@@ -175,7 +175,7 @@ function buildDocumentContent(sessionPath: string): {
   warning?: string
 } {
   const { header, entries } = parseSessionFile(sessionPath);
-  
+
   // Check parentSession BEFORE filtering
   if (header.parentSession) {
     try {
@@ -189,7 +189,7 @@ function buildDocumentContent(sessionPath: string): {
       };
     }
   }
-  
+
   // Not a fork - include all conversation messages
   const conversationEntries = entries.filter(isConversationMessage);
   return {
@@ -204,19 +204,19 @@ function buildForkedContent(
   parentResponseIds: Set<string>
 ): { content: string; documentId: string } {
   const conversationEntries = entries.filter(isConversationMessage);
-  
+
   // Find first assistant with responseId NOT in parent
   const forkPoint = conversationEntries.findIndex(e =>
     e.message.role === "assistant" &&
     e.message.responseId &&
     !parentResponseIds.has(e.message.responseId)
   );
-  
+
   if (forkPoint === -1) {
     // No new responses - nothing to retain
     return { content: "[]", documentId: `session:${header.id}` };
   }
-  
+
   // Walk backward in conversationEntries to find the previous user message
   let userMsgIndex = -1;
   for (let i = forkPoint - 1; i >= 0; i--) {
@@ -225,7 +225,7 @@ function buildForkedContent(
       break;
     }
   }
-  
+
   const startIndex = userMsgIndex === -1 ? forkPoint : userMsgIndex;
   return {
     content: JSON.stringify(conversationEntries.slice(startIndex).map(formatEntry)),
@@ -417,20 +417,20 @@ Recall results are injected **ephemerally** in the `context` event - no state be
 ```typescript
 pi.on("context", async (event, ctx) => {
   if (!autoRecallEnabled) return;
-  
+
   // Extract user message from the messages array
   const userMessage = extractLastUserMessage(event.messages);
   if (!userMessage) return;
-  
+
   // Truncate query to max chars
   const query = userMessage.slice(0, config.recallMaxQueryChars);
-  
+
   // Recall synchronously with timeout and cancellation support
-  const results = await client.recall(query, { 
-    signal: ctx.signal, 
-    timeout: 10000 
+  const results = await client.recall(query, {
+    signal: ctx.signal,
+    timeout: 10000
   });
-  
+
   if (results) {
     // Prepend preamble to recall results
     const content = `${config.recallPromptPreamble}\n\n${results}`;

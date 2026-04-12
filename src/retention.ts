@@ -1,0 +1,171 @@
+/**
+ * Retention handling for pi message events.
+ */
+
+import { enqueueAutoMessage, readAutoQueue, deleteAutoQueue, enqueueToolMessage, readToolQueue, deleteToolQueue } from "./queue";
+import type { ToolQueueEntry } from "./queue";
+import { truncate } from "./utils";
+import type { HindsightConfig } from "./config";
+import type { HindsightClientWrapper } from "./client";
+
+/**
+ * Queue a tool retain entry with complete tags.
+ * Tags are built at queue time to capture the session context when retained.
+ * Returns true on success, false on failure.
+ */
+export function queueToolRetain(
+  sessionId: string,
+  content: string,
+  userTags: string[] | undefined,
+  metadata: Record<string, string> | undefined,
+  sessionCwd: string,
+  parentSessionId: string | undefined,
+  config: Pick<HindsightConfig, "constantTags">,
+): boolean {
+  // Build complete tags at queue time
+  const tags = [
+    ...config.constantTags,
+    `session:${sessionId}`,
+    `cwd:${sessionCwd}`,
+    `store_method:tool`,
+    `parent:${parentSessionId ?? sessionId}`,
+    ...(userTags ?? []),
+  ];
+
+  const entry: ToolQueueEntry = {
+    content,
+    tags,
+    metadata,
+    timestamp: new Date().toISOString(),
+    store_method: "tool",
+  };
+  return enqueueToolMessage(sessionId, entry);
+}
+
+/**
+ * Flush auto-queue entries to Hindsight.
+ * All auto entries are combined into a single document with session ID.
+ */
+export async function flushAutoQueue(
+  sessionId: string,
+  sessionName: string,
+  sessionStartTime: string,
+  sessionCwd: string,
+  parentSessionId: string | undefined,
+  config: HindsightConfig,
+  client: HindsightClientWrapper,
+  signal?: AbortSignal,
+): Promise<{ success: boolean; error?: string; count: number }> {
+  const entries = readAutoQueue(sessionId);
+  if (entries.length === 0) {
+    return { success: true, count: 0 };
+  }
+
+  // Build tags: base session tags
+  const tags = [
+    ...config.constantTags,
+    `session:${sessionId}`,
+    `cwd:${sessionCwd}`,
+    `store_method:auto`,
+    `parent:${parentSessionId ?? sessionId}`,
+  ];
+
+  // Build context
+  const context = truncate(
+    config.hindsightContextPrefix + sessionName,
+    config.hindsightContextMaxLength,
+  );
+
+  // Concatenate all entries into single content array
+  const contentItems = entries.map((entry) => entry.entry);
+
+  const result = await client.retain(
+    {
+      content: JSON.stringify(contentItems),
+      documentId: sessionId,
+      updateMode: "append",
+      context,
+      timestamp: sessionStartTime,
+      tags,
+      entities: config.entities.length > 0 ? config.entities : undefined,
+    },
+    signal,
+  );
+
+  if (result.success) {
+    deleteAutoQueue(sessionId);
+  }
+  return { success: result.success, error: result.error, count: result.success ? entries.length : 0 };
+}
+
+/**
+ * Flush tool-queue entries to Hindsight.
+ * Uses batch retain for efficiency.
+ * On success, clears the queue. On failure, leaves queue intact for retry.
+ */
+export async function flushToolQueue(
+  sessionId: string,
+  client: HindsightClientWrapper,
+  signal?: AbortSignal,
+): Promise<{ success: boolean; error?: string; count: number }> {
+  const entries = readToolQueue(sessionId);
+  if (entries.length === 0) {
+    return { success: true, count: 0 };
+  }
+
+  const result = await client.retainBatch(entries, signal);
+
+  if (result.success) {
+    deleteToolQueue(sessionId);
+    return { success: true, count: entries.length };
+  } else {
+    // Leave queue intact for retry
+    console.warn(`Failed to flush tool queue: ${result.error}`);
+    return { success: false, error: result.error, count: 0 };
+  }
+}
+
+/**
+ * Flush both auto and tool queues for a session.
+ */
+export async function flushQueues(
+  sessionId: string,
+  sessionName: string,
+  sessionStartTime: string,
+  sessionCwd: string,
+  parentSessionId: string | undefined,
+  config: HindsightConfig,
+  client: HindsightClientWrapper,
+  signal?: AbortSignal,
+): Promise<{ success: boolean; error?: string; autoCount: number; toolCount: number }> {
+  const autoResult = await flushAutoQueue(
+    sessionId,
+    sessionName,
+    sessionStartTime,
+    sessionCwd,
+    parentSessionId,
+    config,
+    client,
+    signal,
+  );
+
+  const toolResult = await flushToolQueue(
+    sessionId,
+    client,
+    signal,
+  );
+
+  return {
+    success: autoResult.success && toolResult.success,
+    error: autoResult.error ?? toolResult.error,
+    autoCount: autoResult.count,
+    toolCount: toolResult.count,
+  };
+}
+
+/**
+ * Get total count of queued messages for a session (auto + tool).
+ */
+export function getQueueCount(sessionId: string): number {
+  return readAutoQueue(sessionId).length + readToolQueue(sessionId).length;
+}

@@ -1,0 +1,27 @@
+{
+  "name": "pi-hindsight",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "lint": "biome lint .",
+    "format": "biome format . --write && sed -i 's/[[:space:]]*$//' src/*.ts *.md",
+    "format:check": "biome format . --check && ! grep -n '[[:space:]]$' src/*.ts *.md",
+    "check": "biome check . && ! grep -n '[[:space:]]$' src/*.ts *.md",
+    "check:fix": "biome check . --write && sed -i 's/[[:space:]]*$//' src/*.ts *.md",
+    "typecheck": "bun run --bun tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "biome": "^0.3.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5",
+    "@mariozechner/pi-coding-agent": ">=0.x",
+    "@sinclair/typebox": "^0.34.x"
+  },
+  "dependencies": {
+    "@vectorize-io/hindsight-client": "0.5.0",
+    "jsonc-parser": "^3.3.1"
+  }
+}
