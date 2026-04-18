@@ -16,6 +16,9 @@ import { enqueueAutoMessage } from "./queue";
 import { shouldRetainMessage, prepareEntry } from "./prepare";
 import { extractTextFromContent, getSessionDisplayName, truncate, extractParentSessionId } from "./utils";
 
+// Runtime toggle for recall display (overrides config)
+let recallDisplayOverride: boolean | null = null;
+
 export default function (pi: ExtensionAPI) {
   // Load and validate config
   const { config, warning } = loadConfig();
@@ -45,6 +48,17 @@ export default function (pi: ExtensionAPI) {
 
   // Register slash commands
   registerCommands(pi, config, client);
+
+  // Register toggle display command (needs access to module-level recallDisplayOverride)
+  pi.registerCommand("hindsight-toggle-display", {
+    description: "Toggle recall message display",
+    handler: async (_args: string, ctx: ExtensionContext) => {
+      // Toggle from current state (default from config)
+      const currentState = recallDisplayOverride ?? config.recallDisplay;
+      recallDisplayOverride = !currentState;
+      ctx.ui.notify(`Recall display: ${recallDisplayOverride ? "visible" : "hidden"}`, "info");
+    },
+  });
 
   // Auto-recall on context event (only when last message is from user)
   // @ts-expect-error - AgentMessage union includes types without 'content' (e.g., BashExecutionMessage).
@@ -76,7 +90,8 @@ export default function (pi: ExtensionAPI) {
       const results = response?.results ?? [];
 
       if (results.length > 0) {
-        const recallMessage = formatRecallMessage(results, config.recallPromptPreamble, config.recallShowDateTime);
+        const showDisplay = recallDisplayOverride ?? config.recallDisplay;
+        const recallMessage = formatRecallMessage(results, config.recallPromptPreamble, config.recallShowDateTime, showDisplay);
         return { messages: [...messages, recallMessage] };
       }
     } catch (e) {
@@ -197,6 +212,7 @@ export function formatRecallMessage(
   results: RecallResponse["results"],
   preamble: string,
   showDateTime: boolean,
+  showDisplay: boolean = false,
 ): { role: "custom"; customType: string; content: string; display: boolean; timestamp: number } {
   const memories = results.map((r) => r.text).join("\n\n---\n\n");
 
@@ -231,7 +247,7 @@ ${innerParts.join("\n\n")}
     role: "custom",
     customType: "hindsight-recall",
     content,
-    display: false,
+    display: showDisplay,
     timestamp: Date.now(),
   };
 }

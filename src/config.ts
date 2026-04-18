@@ -42,6 +42,7 @@ export interface HindsightConfig {
   maxRecallTokens: number | null;
   recallPromptPreamble: string;
   recallShowDateTime: boolean;
+  recallDisplay: boolean;
   recallMaxQueryChars: number;
   recallTypes: MemoryType[] | null;
   constantTags: string[];
@@ -68,6 +69,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
   recallPromptPreamble:
     "[System note: The following is recalled memory context, NOT new user input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]",
   recallShowDateTime: true,
+  recallDisplay: false,
   recallMaxQueryChars: 800,
   recallTypes: null,
   constantTags: ["harness:pi"],
@@ -88,7 +90,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
 const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "enabled", "apiUrl", "apiKey", "bankId", "toolsEnabled", "autoRecallEnabled", "autoRecallBudget",
   "autoRetainEnabled", "hindsightContextPrefix", "hindsightContextMaxLength", "maxRecallTokens",
-  "recallPromptPreamble", "recallShowDateTime", "recallMaxQueryChars", "recallTypes",
+  "recallPromptPreamble", "recallShowDateTime", "recallDisplay", "recallMaxQueryChars", "recallTypes",
   "constantTags", "retainContent", "strip", "flushOnCompact", "entities",
 ]);
 
@@ -150,6 +152,7 @@ function setConfigValue(
     case "autoRecallEnabled":
     case "autoRetainEnabled":
     case "recallShowDateTime":
+    case "recallDisplay":
     case "flushOnCompact":
       config[key] = typeof value === "boolean" ? value : parseBoolean(String(value), DEFAULT_CONFIG[key] as boolean);
       break;
@@ -251,6 +254,7 @@ export function loadConfig(extensionsDir?: string): { config: HindsightConfig; w
     PI_HINDSIGHT_MAX_RECALL_TOKENS: "maxRecallTokens",
     PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE: "recallPromptPreamble",
     PI_HINDSIGHT_RECALL_SHOW_DATETIME: "recallShowDateTime",
+    PI_HINDSIGHT_RECALL_DISPLAY: "recallDisplay",
     PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS: "recallMaxQueryChars",
     PI_HINDSIGHT_RECALL_TYPES: "recallTypes",
     PI_HINDSIGHT_CONSTANT_TAGS: "constantTags",
