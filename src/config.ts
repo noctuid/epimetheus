@@ -73,7 +73,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
   recallDisplay: false,
   recallPersist: false,
   recallMaxQueryChars: 800,
-  recallTypes: null,
+  recallTypes: ["observation"],
   constantTags: ["harness:pi"],
   retainContent: {
     assistant: ["text", "thinking", "toolCall"],
@@ -96,58 +96,94 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "constantTags", "retainContent", "strip", "flushOnCompact", "entities",
 ]);
 
-function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
-  if (value === undefined) return defaultValue;
-  return value.toLowerCase() === "true";
+function parseBoolean(value: string | undefined, defaultValue: boolean): { value: boolean; warning?: string } {
+  if (value === undefined) return { value: defaultValue };
+  const lower = value.toLowerCase();
+  if (lower === "true") return { value: true };
+  if (lower === "false") return { value: false };
+  return {
+    value: defaultValue,
+    warning: `Invalid boolean value "${value}", expected "true" or "false". Using default: ${defaultValue}`,
+  };
 }
 
-function parseJsonArray(value: string | undefined, defaultValue: string[]): string[] {
-  if (value === undefined) return defaultValue;
+function parseJsonArray(value: string | undefined, defaultValue: string[], fieldName: string): { value: string[]; warning?: string } {
+  if (value === undefined) return { value: defaultValue };
   try {
     const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return parsed;
-    return defaultValue;
+    if (Array.isArray(parsed)) return { value: parsed };
+    return {
+      value: defaultValue,
+      warning: `${fieldName} must be a JSON array, got ${typeof parsed}. Using default.`,
+    };
   } catch {
-    return defaultValue;
+    return {
+      value: defaultValue,
+      warning: `${fieldName} contains invalid JSON. Using default.`,
+    };
   }
 }
 
-function parseBudget(value: string | undefined, defaultValue: Budget): Budget {
-  if (value === undefined) return defaultValue;
-  const valid = ["low", "mid", "high"];
+function parseBudget(value: string | undefined, defaultValue: Budget): { value: Budget; warning?: string } {
+  if (value === undefined) return { value: defaultValue };
+  const valid: Budget[] = ["low", "mid", "high"];
   const lower = value.toLowerCase();
-  return valid.includes(lower) ? (lower as "low" | "mid" | "high") : defaultValue;
+  if (valid.includes(lower as Budget)) return { value: lower as Budget };
+  return {
+    value: defaultValue,
+    warning: `Invalid budget "${value}", expected "low", "mid", or "high". Using default: ${defaultValue}`,
+  };
 }
 
-function parseNumber(value: string | undefined, defaultValue: number | null): number | null {
-  if (value === undefined) return defaultValue;
+function parseNumber(value: string | undefined, defaultValue: number | null, fieldName: string): { value: number | null; warning?: string } {
+  if (value === undefined) return { value: defaultValue };
   const num = parseInt(value, 10);
-  return isNaN(num) ? defaultValue : num;
+  if (!isNaN(num)) return { value: num };
+  const defaultDesc = defaultValue === null ? "null" : defaultValue;
+  return {
+    value: defaultValue,
+    warning: `Invalid number for ${fieldName}: "${value}". Using default: ${defaultDesc}`,
+  };
 }
 
-function parseMemoryTypes(value: string | undefined, defaultValue: MemoryType[] | null): MemoryType[] | null {
-  if (value === undefined) return defaultValue;
+function parseMemoryTypes(value: string | undefined, defaultValue: MemoryType[] | null): { value: MemoryType[] | null; warning?: string } {
+  if (value === undefined) return { value: defaultValue };
   try {
     const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed)) return defaultValue;
-    if (parsed.length === 0) return null; // Empty array means all types
+    if (parsed === null) return { value: null }; // JSON null ("null" string or actual null)
+    if (!Array.isArray(parsed)) {
+      return {
+        value: defaultValue,
+        warning: `recallTypes must be a JSON array, got ${typeof parsed}. Using default.`,
+      };
+    }
+    if (parsed.length === 0) return { value: null }; // Empty array means all types
     // Validate each type
     const valid = parsed.every((t) => VALID_MEMORY_TYPES.includes(t));
-    if (!valid) return defaultValue;
-    return parsed as MemoryType[];
+    if (!valid) {
+      return {
+        value: defaultValue,
+        warning: `recallTypes contains invalid values. Valid types: ${VALID_MEMORY_TYPES.join(", ")}`,
+      };
+    }
+    return { value: parsed as MemoryType[] };
   } catch {
-    return defaultValue;
+    return {
+      value: defaultValue,
+      warning: `recallTypes contains invalid JSON. Using default.`,
+    };
   }
 }
 
 /**
  * Set a config value with type coercion.
+ * Returns a warning string if the value was invalid and fallback was used.
  */
 function setConfigValue(
   config: HindsightConfig,
   key: keyof HindsightConfig,
   value: unknown,
-): void {
+): string | undefined {
   switch (key) {
     case "enabled":
     case "toolsEnabled":
@@ -156,44 +192,112 @@ function setConfigValue(
     case "recallShowDateTime":
     case "recallDisplay":
     case "recallPersist":
-    case "flushOnCompact":
-      config[key] = typeof value === "boolean" ? value : parseBoolean(String(value), DEFAULT_CONFIG[key] as boolean);
-      break;
-    case "autoRecallBudget":
-      config[key] = typeof value === "string" ? parseBudget(value, DEFAULT_CONFIG[key] as Budget) : DEFAULT_CONFIG[key];
-      break;
+    case "flushOnCompact": {
+      if (typeof value === "boolean") {
+        config[key] = value;
+        return;
+      }
+      const result = parseBoolean(String(value), DEFAULT_CONFIG[key] as boolean);
+      config[key] = result.value;
+      return result.warning;
+    }
+    case "autoRecallBudget": {
+      if (typeof value === "string") {
+        const result = parseBudget(value, DEFAULT_CONFIG[key] as Budget);
+        config[key] = result.value;
+        return result.warning;
+      }
+      config[key] = DEFAULT_CONFIG[key];
+      return;
+    }
     case "hindsightContextMaxLength":
-    case "recallMaxQueryChars":
-      config[key] = typeof value === "number" ? value : parseNumber(String(value), DEFAULT_CONFIG[key] as number) ?? DEFAULT_CONFIG[key];
-      break;
-    case "maxRecallTokens":
-      config[key] = typeof value === "number" ? value : parseNumber(String(value), DEFAULT_CONFIG[key] as number | null);
-      break;
+    case "recallMaxQueryChars": {
+      if (typeof value === "number") {
+        config[key] = value;
+        return;
+      }
+      const result = parseNumber(String(value), DEFAULT_CONFIG[key] as number, key);
+      config[key] = result.value ?? DEFAULT_CONFIG[key] as number;
+      return result.warning;
+    }
+    case "maxRecallTokens": {
+      if (typeof value === "number") {
+        config[key] = value;
+        return;
+      }
+      const result = parseNumber(String(value), DEFAULT_CONFIG[key] as number | null, key);
+      config[key] = result.value;
+      return result.warning;
+    }
     case "recallTypes":
-      config[key] = Array.isArray(value) || value === null
-        ? (value as MemoryType[] | null)
-        : parseMemoryTypes(String(value), DEFAULT_CONFIG[key] as MemoryType[] | null);
-      break;
-    case "constantTags":
-      config[key] = Array.isArray(value) ? value : parseJsonArray(String(value), DEFAULT_CONFIG[key] as string[]);
-      break;
-    case "entities":
-      config[key] = Array.isArray(value) ? value : DEFAULT_CONFIG[key];
-      break;
+      if (value === null || (Array.isArray(value) && value.length === 0)) {
+        config[key] = null;
+        return;
+      }
+      if (Array.isArray(value)) {
+        // Validate each type
+        const valid = value.every((t) => VALID_MEMORY_TYPES.includes(t));
+        if (!valid) {
+          config[key] = DEFAULT_CONFIG[key];
+          return `recallTypes contains invalid values. Valid types: ${VALID_MEMORY_TYPES.join(", ")}`;
+        }
+        config[key] = value;
+        return;
+      }
+      // String value from env var - parse and check for warning
+      {
+        const result = parseMemoryTypes(String(value), DEFAULT_CONFIG[key] as MemoryType[] | null);
+        config[key] = result.value;
+        return result.warning;
+      }
+    case "constantTags": {
+      if (Array.isArray(value)) {
+        config[key] = value;
+        return;
+      }
+      const result = parseJsonArray(String(value), DEFAULT_CONFIG[key] as string[], "constantTags");
+      config[key] = result.value;
+      return result.warning;
+    }
+    case "entities": {
+      if (Array.isArray(value)) {
+        config[key] = value;
+        return;
+      }
+      // String value from env var - parse and check for warning
+      try {
+        const parsed = JSON.parse(String(value));
+        if (Array.isArray(parsed)) {
+          config[key] = parsed;
+          return;
+        }
+        config[key] = DEFAULT_CONFIG[key];
+        return `entities must be a JSON array, got ${typeof parsed}. Using default.`;
+      } catch {
+        config[key] = DEFAULT_CONFIG[key];
+        return "entities contains invalid JSON. Using default.";
+      }
+    }
     case "retainContent":
     case "strip":
       // Replace entirely (not merge) - user must provide complete object
-      if (typeof value === "object" && value !== null) {
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
         Object.assign(config, { [key]: value });
+        return;
       }
-      break;
+      // null might be intentional (e.g., unsetting config), don't warn
+      if (value === null) {
+        return;
+      }
+      config[key] = DEFAULT_CONFIG[key];
+      return `${key} must be an object, got ${Array.isArray(value) ? "array" : typeof value}. Using default.`;
     case "apiUrl":
     case "apiKey":
     case "bankId":
     case "hindsightContextPrefix":
     case "recallPromptPreamble":
       config[key] = String(value);
-      break;
+      return;
     default: {
       // This should never happen if VALID_CONFIG_KEYS is correct
       const _exhaustive: never = key;
@@ -233,7 +337,8 @@ export function loadConfig(extensionsDir?: string): { config: HindsightConfig; w
             warnings.push(`Unknown config key in file: ${key}`);
             continue;
           }
-          setConfigValue(config, key as keyof HindsightConfig, value);
+          const warning = setConfigValue(config, key as keyof HindsightConfig, value);
+          if (warning) warnings.push(warning);
         }
       }
     } catch (e) {
@@ -269,19 +374,8 @@ export function loadConfig(extensionsDir?: string): { config: HindsightConfig; w
   for (const [envVar, configKey] of Object.entries(envMappings)) {
     const value = process.env[envVar];
     if (value !== undefined) {
-      // Special handling for entities (JSON array of objects)
-      if (configKey === "entities") {
-        try {
-          const parsed = JSON.parse(value);
-          if (Array.isArray(parsed)) {
-            config.entities = parsed;
-          }
-        } catch {
-          // Invalid JSON, keep default
-        }
-      } else {
-        setConfigValue(config, configKey, value);
-      }
+      const warning = setConfigValue(config, configKey, value);
+      if (warning) warnings.push(warning);
     }
   }
 
@@ -332,6 +426,14 @@ export function validateConfig(config: HindsightConfig): { valid: boolean; error
     const unique = new Set(items);
     if (unique.size !== items.length) {
       errors.push(`strip.${field} contains duplicate values`);
+    }
+  }
+
+  // Check for duplicates in recallTypes (null means all types, no validation needed)
+  if (config.recallTypes !== null) {
+    const unique = new Set(config.recallTypes);
+    if (unique.size !== config.recallTypes.length) {
+      errors.push("recallTypes contains duplicate values");
     }
   }
 
