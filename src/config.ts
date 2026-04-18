@@ -43,6 +43,7 @@ export interface HindsightConfig {
   recallPromptPreamble: string;
   recallShowDateTime: boolean;
   recallDisplay: boolean;
+  recallPersist: boolean;
   recallMaxQueryChars: number;
   recallTypes: MemoryType[] | null;
   constantTags: string[];
@@ -70,6 +71,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
     "[System note: The following is recalled memory context, NOT new user input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]",
   recallShowDateTime: true,
   recallDisplay: false,
+  recallPersist: false,
   recallMaxQueryChars: 800,
   recallTypes: null,
   constantTags: ["harness:pi"],
@@ -90,7 +92,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
 const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "enabled", "apiUrl", "apiKey", "bankId", "toolsEnabled", "autoRecallEnabled", "autoRecallBudget",
   "autoRetainEnabled", "hindsightContextPrefix", "hindsightContextMaxLength", "maxRecallTokens",
-  "recallPromptPreamble", "recallShowDateTime", "recallDisplay", "recallMaxQueryChars", "recallTypes",
+  "recallPromptPreamble", "recallShowDateTime", "recallDisplay", "recallPersist", "recallMaxQueryChars", "recallTypes",
   "constantTags", "retainContent", "strip", "flushOnCompact", "entities",
 ]);
 
@@ -153,6 +155,7 @@ function setConfigValue(
     case "autoRetainEnabled":
     case "recallShowDateTime":
     case "recallDisplay":
+    case "recallPersist":
     case "flushOnCompact":
       config[key] = typeof value === "boolean" ? value : parseBoolean(String(value), DEFAULT_CONFIG[key] as boolean);
       break;
@@ -255,6 +258,7 @@ export function loadConfig(extensionsDir?: string): { config: HindsightConfig; w
     PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE: "recallPromptPreamble",
     PI_HINDSIGHT_RECALL_SHOW_DATETIME: "recallShowDateTime",
     PI_HINDSIGHT_RECALL_DISPLAY: "recallDisplay",
+    PI_HINDSIGHT_RECALL_PERSIST: "recallPersist",
     PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS: "recallMaxQueryChars",
     PI_HINDSIGHT_RECALL_TYPES: "recallTypes",
     PI_HINDSIGHT_CONSTANT_TAGS: "constantTags",
@@ -284,8 +288,9 @@ export function loadConfig(extensionsDir?: string): { config: HindsightConfig; w
   return { config, warning: warnings.length > 0 ? warnings.join("; ") : undefined };
 }
 
-export function validateConfig(config: HindsightConfig): { valid: boolean; errors: string[] } {
+export function validateConfig(config: HindsightConfig): { valid: boolean; errors: string[]; warnings: string[] } {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
   if (!config.apiUrl) {
     errors.push("apiUrl is required (set in pi-hindsight.json or HINDSIGHT_API_URL env var)");
@@ -330,5 +335,10 @@ export function validateConfig(config: HindsightConfig): { valid: boolean; error
     }
   }
 
-  return { valid: errors.length === 0, errors };
+  // Warn if recallDisplay is true but recallPersist is false
+  if (config.recallDisplay && !config.recallPersist) {
+    warnings.push("recallDisplay: true has no effect when recallPersist: false (context event never shows in TUI)");
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
 }

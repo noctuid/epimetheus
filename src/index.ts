@@ -7,6 +7,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { RecallResponse } from "@vectorize-io/hindsight-client";
+import { Box, Text } from "@mariozechner/pi-tui";
 import { loadConfig, validateConfig } from "./config";
 import { HindsightClientWrapper } from "./client";
 import { registerTools } from "./tools";
@@ -16,8 +17,12 @@ import { enqueueAutoMessage } from "./queue";
 import { shouldRetainMessage, prepareEntry } from "./prepare";
 import { extractTextFromContent, getSessionDisplayName, truncate, extractParentSessionId } from "./utils";
 
+
 // Runtime toggle for recall display (overrides config)
 let recallDisplayOverride: boolean | null = null;
+
+// Cache last recall details for toggle-recall command (works regardless of recallPersist)
+let lastRecallDetails: RecallMessageDetails | null = null;
 
 export default function (pi: ExtensionAPI) {
   // Load and validate config
@@ -34,8 +39,15 @@ export default function (pi: ExtensionAPI) {
 
   if (!validation.valid) {
     console.error("pi-hindsight disabled: " + validation.errors.join(", "));
-  } else if (warning) {
-    console.warn(warning);
+  } else {
+    if (warning) {
+      console.warn(warning);
+    }
+    if (validation.warnings && validation.warnings.length > 0) {
+      for (const w of validation.warnings) {
+        console.warn(w);
+      }
+    }
   }
 
   if (validation.valid) {
@@ -46,56 +58,100 @@ export default function (pi: ExtensionAPI) {
   // Register tools (hindsight_retain always, hindsight_recall when configured)
   registerTools(pi, config, client);
 
-  // Register slash commands
-  registerCommands(pi, config, client);
+  // Register slash commands (pass getter/setter for runtime state)
+  registerCommands(
+    pi,
+    config,
+    client,
+    () => lastRecallDetails,
+    () => recallDisplayOverride,
+    (value) => { recallDisplayOverride = value; },
+  );
 
-  // Register toggle display command (needs access to module-level recallDisplayOverride)
-  pi.registerCommand("hindsight-toggle-display", {
-    description: "Toggle recall message display",
-    handler: async (_args: string, ctx: ExtensionContext) => {
-      // Toggle from current state (default from config)
-      const currentState = recallDisplayOverride ?? config.recallDisplay;
-      recallDisplayOverride = !currentState;
-      ctx.ui.notify(`Recall display: ${recallDisplayOverride ? "visible" : "hidden"}`, "info");
-    },
+  // Register custom message renderer for hindsight-recall messages
+  pi.registerMessageRenderer<RecallMessageDetails>("hindsight-recall", (message, { expanded }, theme) => {
+    const details = message.details;
+    if (!details) return undefined;
+
+    // Build the display text
+    let text: string;
+    if (expanded) {
+      // When expanded: show the full memory content
+      text = theme.fg("accent", "\ud83e\udde0 Hindsight recalled ") +
+        theme.fg("muted", `${details.count} ${details.count === 1 ? "memory" : "memories"}`) +
+        "\n" + theme.fg("dim", "\u2500".repeat(40)) +
+        "\n" + details.memories;
+    } else {
+      // When collapsed: show summary with snippet
+      text = theme.fg("accent", "\ud83e\udde0 Hindsight recalled ") +
+        theme.fg("muted", `${details.count} ${details.count === 1 ? "memory" : "memories"}`) +
+        " " + theme.fg("dim", `[${details.snippet}]`);
+    }
+
+    const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(text, 0, 0));
+    return box;
   });
 
-  // Auto-recall on context event (only when last message is from user)
+  // Auto-recall on before_agent_start (visible, persisted to session file)
+  // Only fires when recallPersist is true
+  pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
+    if (!client || !config.autoRecallEnabled || !config.recallPersist) return;
+
+    // Get the last user message from the session entries
+    const entries = ctx.sessionManager.getEntries();
+    // Find the last user message
+    let lastUserContent: string | null = null;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry && entry.type === "message" && entry.message?.role === "user") {
+        lastUserContent = extractTextFromContent(entry.message.content);
+        break;
+      }
+    }
+
+    if (!lastUserContent) return;
+
+    // Call shared recall helper
+    const result = await doAutoRecall(lastUserContent, ctx.signal, recallDisplayOverride ?? config.recallDisplay);
+    if (result) {
+      return { message: result.recallMessage };
+    }
+  });
+
+  // Context event handler:
+  // 1. Always filter out hindsight-recall messages (prevent old recalls from being sent to LLM)
+  // 2. If recallPersist is false, inject recall message (not visible, not persisted, sent to LLM)
   // @ts-expect-error - AgentMessage union includes types without 'content' (e.g., BashExecutionMessage).
   // We filter to user messages with content at runtime.
-  pi.on("context", async (event: { messages: Array<{ role: string; content?: unknown }> }, ctx: ExtensionContext) => {
-    if (!client || !config.autoRecallEnabled) return;
-
+  pi.on("context", async (event: { messages: Array<{ role: string; content?: unknown; customType?: string }> }, ctx: ExtensionContext) => {
     const messages = event.messages;
 
-    // Only trigger recall if the last message is from user
-    const lastMessage = messages[messages.length - 1];
-    if (!lastMessage || lastMessage.role !== "user") return;
+    // Always filter out existing hindsight-recall messages from the messages array
+    // This is critical to prevent old recall messages from being sent to the LLM
+    const filteredMessages = messages.filter(msg => msg.customType !== "hindsight-recall");
+    const hadRecallMessages = filteredMessages.length !== messages.length;
 
-    const userMessage = extractTextFromContent(lastMessage.content);
-    if (!userMessage) return;
-
-    // Truncate query safely (handles multi-byte Unicode)
-    const query = truncate(userMessage, config.recallMaxQueryChars);
-
-    try {
-      const result = await client.recall({ query, types: config.recallTypes ?? undefined }, ctx.signal);
-
-      if (!result.success) {
-        console.warn("Auto-recall failed:", result.error);
-        return;
+    // If recallPersist is false and auto-recall is enabled, inject recall here
+    // (not visible, not persisted, but sent to LLM for this turn only)
+    if (client && config.autoRecallEnabled && !config.recallPersist) {
+      // Only trigger recall if the last message is from user
+      const lastMessage = filteredMessages[filteredMessages.length - 1];
+      if (lastMessage && lastMessage.role === "user") {
+        const userMessage = extractTextFromContent(lastMessage.content);
+        if (userMessage) {
+          // Call shared recall helper (always display: false when recallPersist is false)
+          const result = await doAutoRecall(userMessage, ctx.signal, false);
+          if (result) {
+            return { messages: [...filteredMessages, result.recallMessage] };
+          }
+        }
       }
+    }
 
-      const response = result.response;
-      const results = response?.results ?? [];
-
-      if (results.length > 0) {
-        const showDisplay = recallDisplayOverride ?? config.recallDisplay;
-        const recallMessage = formatRecallMessage(results, config.recallPromptPreamble, config.recallShowDateTime, showDisplay);
-        return { messages: [...messages, recallMessage] };
-      }
-    } catch (e) {
-      console.warn("Auto-recall error:", e);
+    // If we filtered out recall messages but didn't inject new ones, return filtered array
+    if (hadRecallMessages) {
+      return { messages: filteredMessages };
     }
   });
 
@@ -130,6 +186,8 @@ export default function (pi: ExtensionAPI) {
 
   // Flush queues on session switch (before leaving current session)
   pi.on("session_before_switch", async (_event, ctx: ExtensionContext) => {
+    // Reset cached recall details for the new session
+    lastRecallDetails = null;
     await flushCurrentSession(ctx, "before session switch");
   });
 
@@ -144,6 +202,30 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx: ExtensionContext) => {
     await flushCurrentSession(ctx, "on shutdown", true);
   });
+
+  /**
+   * Perform auto-recall with the given query.
+   * Shared by before_agent_start and context handlers.
+   *
+   * @param query - The user's query text (will be truncated)
+   * @param signal - AbortSignal for cancellation
+   * @param display - Whether the recall message should be visible in TUI
+   * @returns Object with recallMessage if results found, null otherwise
+   */
+  async function doAutoRecall(
+    query: string,
+    signal: AbortSignal | undefined,
+    display: boolean,
+  ): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
+    return doAutoRecallImpl(
+      client,
+      query,
+      signal,
+      display,
+      config,
+      (details) => { lastRecallDetails = details; }
+    );
+  }
 
   /**
    * Flush current session's queue to Hindsight.
@@ -191,6 +273,16 @@ export default function (pi: ExtensionAPI) {
 }
 
 /**
+ * Details included in hindsight-recall messages for the custom renderer.
+ * Exported for testing.
+ */
+export interface RecallMessageDetails {
+  count: number;
+  snippet: string;
+  memories: string;
+}
+
+/**
  * Format recall results into a hidden message with memory context fencing.
  * Precondition: results must be non-empty (caller checks results.length > 0).
  * Uses display: false so message is sent to LLM but not shown to user or persisted.
@@ -212,8 +304,8 @@ export function formatRecallMessage(
   results: RecallResponse["results"],
   preamble: string,
   showDateTime: boolean,
-  showDisplay: boolean = false,
-): { role: "custom"; customType: string; content: string; display: boolean; timestamp: number } {
+  display: boolean = false,
+): { role: "custom"; customType: string; content: string; display: boolean; timestamp: number; details: RecallMessageDetails } {
   const memories = results.map((r) => r.text).join("\n\n---\n\n");
 
   // Build content with preamble first, then optional date/time, then memories
@@ -243,11 +335,115 @@ export function formatRecallMessage(
 ${innerParts.join("\n\n")}
 </memory-context>`;
 
+  // Build details for custom renderer
+  const count = results.length;
+  const snippet = truncate(results.slice(0, 3).map(r => r.text).join(" \u00b7 "), 200);
+
   return {
     role: "custom",
     customType: "hindsight-recall",
     content,
-    display: showDisplay,
+    display,
     timestamp: Date.now(),
+    details: { count, snippet, memories },
   };
 }
+
+/**
+ * Render recall message details for display.
+ * Returns plain text suitable for testing (no ANSI codes).
+ * Exported for testing.
+ */
+export function renderRecallMessage(
+  details: RecallMessageDetails,
+  expanded: boolean,
+): string {
+  if (expanded) {
+    // When expanded: show the full memory content
+    return `Hindsight recalled ${details.count} ${details.count === 1 ? "memory" : "memories"}\n${"\u2500".repeat(40)}\n${details.memories}`;
+  } else {
+    // When collapsed: show summary with snippet
+    return `Hindsight recalled ${details.count} ${details.count === 1 ? "memory" : "memories"} [${details.snippet}]`;
+  }
+}
+
+/**
+ * Options for the recall client wrapper.
+ * Minimal interface for dependency injection in testing.
+ */
+export interface RecallClient {
+  recall: (options: { query: string; types?: ("world" | "experience" | "observation")[] }, signal: AbortSignal | undefined) => Promise<{
+    success: boolean;
+    response?: RecallResponse;
+    error?: string;
+  }>;
+}
+
+/**
+ * Options for auto-recall configuration.
+ */
+export interface AutoRecallConfig {
+  recallMaxQueryChars: number;
+  recallTypes: ("world" | "experience" | "observation")[] | null;
+  recallPromptPreamble: string;
+  recallShowDateTime: boolean;
+}
+
+/**
+ * Perform auto-recall with the given query.
+ * This is the core implementation shared by event handlers.
+ *
+ * @param client - The Hindsight client wrapper (or mock for testing)
+ * @param query - The user's query text (will be truncated)
+ * @param signal - AbortSignal for cancellation
+ * @param display - Whether the recall message should be visible in TUI
+ * @param config - Recall configuration
+ * @param cacheDetails - Callback to cache recall details (receives null on no results)
+ * @returns Object with recallMessage if results found, null otherwise
+ *
+ * Exported for testing.
+ */
+export async function doAutoRecallImpl(
+  client: RecallClient | null,
+  query: string,
+  signal: AbortSignal | undefined,
+  display: boolean,
+  config: AutoRecallConfig,
+  cacheDetails: (details: RecallMessageDetails | null) => void,
+): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
+  if (!client) return null;
+
+  // Truncate query safely (handles multi-byte Unicode)
+  const truncatedQuery = truncate(query, config.recallMaxQueryChars);
+
+  try {
+    // Create a fallback signal if none provided
+    const abortSignal = signal ?? new AbortController().signal;
+    const result = await client.recall({ query: truncatedQuery, types: config.recallTypes ?? undefined }, abortSignal);
+
+    if (!result.success) {
+      console.warn("Auto-recall failed:", result.error);
+      cacheDetails(null);
+      return null;
+    }
+
+    const response = result.response;
+    const results = response?.results ?? [];
+
+    if (results.length > 0) {
+      const recallMessage = formatRecallMessage(results, config.recallPromptPreamble, config.recallShowDateTime, display);
+      // Cache recall details for show-recall command
+      cacheDetails(recallMessage.details);
+      return { recallMessage };
+    }
+
+    cacheDetails(null);
+    return null;
+  } catch (e) {
+    console.warn("Auto-recall error:", e);
+    cacheDetails(null);
+    return null;
+  }
+}
+
+
