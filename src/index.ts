@@ -190,11 +190,16 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Flush queues on session switch (before leaving current session)
+  // Flush queues and reset recall cache on session switch
   pi.on("session_before_switch", async (_event, ctx: ExtensionContext) => {
-    // Reset cached recall details for the new session
     lastRecallDetails = null;
     await flushCurrentSession(ctx, "before session switch");
+  });
+
+  // Flush queues and reset recall cache before forking
+  pi.on("session_before_fork", async (_event, ctx: ExtensionContext) => {
+    lastRecallDetails = null;
+    await flushCurrentSession(ctx, "before session fork");
   });
 
   // Flush queues after compaction (if enabled)
