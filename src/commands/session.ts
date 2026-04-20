@@ -161,6 +161,15 @@ export function createUpsertAllParsedSubcommand(
         return;
       }
 
+      const answer = await ctx.ui.confirm(
+        "Upsert all parsed sessions?",
+        `This will upsert ${files.length} session(s) to Hindsight, which can take a long time and make many API requests. Continue?`
+      );
+      if (!answer) {
+        ctx.ui.notify("Upsert cancelled", "info");
+        return;
+      }
+
       ctx.ui.notify(`Upserting ${files.length} parsed sessions...`, "info");
 
       let successCount = 0;
