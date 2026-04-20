@@ -14,6 +14,15 @@ export interface RetainContent {
   toolResult: "text"[];
 }
 
+export type ToolFilterMode =
+  | { include: string[] }
+  | { exclude: string[] };
+
+export interface ToolFilter {
+  toolCall?: ToolFilterMode;
+  toolResult?: ToolFilterMode;
+}
+
 export interface StripConfig {
   topLevel: string[];
   message: string[];
@@ -49,6 +58,7 @@ export interface HindsightConfig {
   constantTags: string[];
   retainContent: RetainContent;
   strip: StripConfig;
+  toolFilter: ToolFilter;
   flushOnCompact: boolean;
   retainSessionsByDefault: boolean;
   entities: EntityInput[];
@@ -87,6 +97,10 @@ const DEFAULT_CONFIG: HindsightConfig = {
     topLevel: ["type", "id", "parentId"],
     message: ["api", "provider", "model", "usage", "cost", "stopReason", "timestamp", "responseId"],
   },
+  toolFilter: {
+    toolCall: { exclude: ["grep", "find", "ls", "read", "hindsight_retain"] },
+    toolResult: { exclude: ["grep", "find", "ls", "write", "edit", "hindsight_retain", "hindsight_recall", "hindsight_reflect"] },
+  },
   flushOnCompact: false,
   retainSessionsByDefault: true,
   entities: [],
@@ -116,6 +130,7 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "constantTags",
   "retainContent",
   "strip",
+  "toolFilter",
   "flushOnCompact",
   "retainSessionsByDefault",
   "entities",
@@ -361,6 +376,33 @@ function setConfigValue(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (config as any)[key] = structuredClone(DEFAULT_CONFIG[key]);
       return `${key} must be an object, got ${Array.isArray(value) ? "array" : typeof value}. Using default.`;
+    case "toolFilter":
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (config as any)[key] = value;
+        return;
+      }
+      if (typeof value === "string") {
+        try {
+          const parsed = JSON.parse(value);
+          if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (config as any)[key] = parsed;
+            return;
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (config as any)[key] = {};
+          return `toolFilter must be a JSON object, got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed}. Using default.`;
+        } catch {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (config as any)[key] = {};
+          return "toolFilter contains invalid JSON. Using default.";
+        }
+      }
+      // null or undefined - use empty (no filtering)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (config as any)[key] = {};
+      return;
     case "apiUrl":
     case "apiKey":
     case "bankId":
@@ -390,6 +432,15 @@ export function loadConfig(extensionsDir?: string): {
     ...DEFAULT_CONFIG,
     retainContent: { ...DEFAULT_CONFIG.retainContent },
     strip: { ...DEFAULT_CONFIG.strip },
+    toolFilter: {
+      ...DEFAULT_CONFIG.toolFilter,
+      toolCall: DEFAULT_CONFIG.toolFilter.toolCall
+        ? { ...DEFAULT_CONFIG.toolFilter.toolCall }
+        : undefined,
+      toolResult: DEFAULT_CONFIG.toolFilter.toolResult
+        ? { ...DEFAULT_CONFIG.toolFilter.toolResult }
+        : undefined,
+    },
   };
   const warnings: string[] = [];
 
@@ -450,6 +501,7 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT: "retainSessionsByDefault",
     PI_HINDSIGHT_RETAIN_CONTENT: "retainContent",
     PI_HINDSIGHT_STRIP: "strip",
+    PI_HINDSIGHT_TOOL_FILTER: "toolFilter",
     PI_HINDSIGHT_ENTITIES: "entities",
     PI_HINDSIGHT_STATUS_HEALTHY: "statusHealthy",
     PI_HINDSIGHT_STATUS_UNHEALTHY: "statusUnhealthy",
@@ -521,6 +573,40 @@ export function validateConfig(config: HindsightConfig): {
     const unique = new Set(items);
     if (unique.size !== items.length) {
       errors.push(`strip.${field} contains duplicate values`);
+    }
+  }
+
+  // Validate toolFilter - include and exclude are mutually exclusive
+  for (const subKey of ["toolCall", "toolResult"] as const) {
+    const filter = config.toolFilter[subKey];
+    if (!filter) continue;
+
+    const hasInclude = "include" in filter;
+    const hasExclude = "exclude" in filter;
+
+    // Must have at least one of include/exclude
+    if (!hasInclude && !hasExclude) {
+      errors.push(`toolFilter.${subKey} must have either 'include' or 'exclude'`);
+    }
+
+    if (hasInclude && hasExclude) {
+      errors.push(`toolFilter.${subKey} cannot have both 'include' and 'exclude'`);
+    }
+
+    // Check for empty lists
+    if (hasInclude && filter.include.length === 0) {
+      errors.push(`toolFilter.${subKey}.include cannot be empty (use exclude instead, or remove the filter)`);
+    }
+    if (hasExclude && filter.exclude.length === 0) {
+      errors.push(`toolFilter.${subKey}.exclude cannot be empty (use include instead, or remove the filter)`);
+    }
+
+    // Check for unknown keys
+    const allowedKeys = new Set(["include", "exclude"]);
+    for (const key of Object.keys(filter)) {
+      if (!allowedKeys.has(key)) {
+        errors.push(`toolFilter.${subKey} has unknown key '${key}' (only 'include' and 'exclude' are allowed)`);
+      }
     }
   }
 

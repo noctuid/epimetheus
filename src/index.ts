@@ -211,7 +211,7 @@ export default function (pi: ExtensionAPI) {
     if (!message) return;
 
     // Check if this message type should be retained
-    if (!shouldRetainMessage(message, config.retainContent)) return;
+    if (!shouldRetainMessage(message, config.retainContent, config.toolFilter)) return;
 
     // Build entry from message
     const entry: Record<string, unknown> = {

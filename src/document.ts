@@ -3,7 +3,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import type { HindsightConfig, RetainContent } from "./config";
+import type { HindsightConfig, RetainContent, ToolFilter } from "./config";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
 import { extractTextFromContent, truncate } from "./utils";
 
@@ -76,7 +76,11 @@ export function parseSessionFile(sessionPath: string): {
  * Check if an entry is a conversation message.
  * Excludes hindsight-recall messages (injected recall context, not user/assistant content).
  */
-function isConversationMessage(entry: SessionEntry, retainContent: RetainContent): boolean {
+function isConversationMessage(
+  entry: SessionEntry,
+  retainContent: RetainContent,
+  toolFilter?: ToolFilter
+): boolean {
   if (entry.type !== "message" || entry.message === undefined) {
     return false;
   }
@@ -85,7 +89,7 @@ function isConversationMessage(entry: SessionEntry, retainContent: RetainContent
   if (message.customType === "hindsight-recall") {
     return false;
   }
-  return shouldRetainMessage(message, retainContent);
+  return shouldRetainMessage(message, retainContent, toolFilter);
 }
 
 /**
@@ -93,7 +97,7 @@ function isConversationMessage(entry: SessionEntry, retainContent: RetainContent
  */
 function formatEntry(
   entry: SessionEntry,
-  config: Pick<HindsightConfig, "retainContent" | "strip">
+  config: Pick<HindsightConfig, "retainContent" | "strip" | "toolFilter">
 ): object {
   // Use prepareEntry for consistent handling with auto-queue
   return prepareEntry(entry as unknown as Record<string, unknown>, config);
@@ -126,9 +130,11 @@ function buildForkedContent(
   entries: SessionEntry[],
   header: SessionHeader,
   parentAssistantIds: Set<string>,
-  config: Pick<HindsightConfig, "retainContent" | "strip">
+  config: Pick<HindsightConfig, "retainContent" | "strip" | "toolFilter">
 ): { content: string; documentId: string } {
-  const conversationEntries = entries.filter((e) => isConversationMessage(e, config.retainContent));
+  const conversationEntries = entries.filter((e) =>
+    isConversationMessage(e, config.retainContent, config.toolFilter)
+  );
 
   // Find first assistant with id NOT in parent
   const forkPoint = findForkPoint(conversationEntries, parentAssistantIds);
@@ -262,9 +268,11 @@ export function buildMessageArrayFromSession(
  */
 function buildMessageArray(
   entries: SessionEntry[],
-  config: Pick<HindsightConfig, "retainContent" | "strip">
+  config: Pick<HindsightConfig, "retainContent" | "strip" | "toolFilter">
 ): object[] {
-  const conversationEntries = entries.filter((e) => isConversationMessage(e, config.retainContent));
+  const conversationEntries = entries.filter((e) =>
+    isConversationMessage(e, config.retainContent, config.toolFilter)
+  );
   return conversationEntries.map((e) => formatEntry(e, config));
 }
 
@@ -275,9 +283,11 @@ function buildForkedMessages(
   entries: SessionEntry[],
   header: SessionHeader,
   parentAssistantIds: Set<string>,
-  config: Pick<HindsightConfig, "retainContent" | "strip">
+  config: Pick<HindsightConfig, "retainContent" | "strip" | "toolFilter">
 ): { messages: object[]; documentId: string; warning?: string } {
-  const conversationEntries = entries.filter((e) => isConversationMessage(e, config.retainContent));
+  const conversationEntries = entries.filter((e) =>
+    isConversationMessage(e, config.retainContent, config.toolFilter)
+  );
 
   // Find first assistant with id NOT in parent
   const forkPoint = findForkPoint(conversationEntries, parentAssistantIds);

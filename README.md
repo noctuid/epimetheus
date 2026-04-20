@@ -14,6 +14,11 @@ Status: This is currently alpha level software. I recommend waiting until I publ
   - [Status Bar Indicator](#status-bar-indicator)
   - [Session Retention Control](#session-retention-control)
   - [Content Retention & Stripping Settings](#content-retention--stripping-settings)
+    - [retainContent](#retaincontent)
+    - [strip](#strip)
+    - [toolFilter](#toolfilter)
+    - [entities](#entities)
+    - [Examples](#examples)
   - [Environment Variables](#environment-variables)
 - [Additional Details](#additional-details)
 - [Comparison with Other Implementations](#comparison-with-other-implementations)
@@ -231,6 +236,47 @@ Can also be set via environment variable as a JSON string:
 export PI_HINDSIGHT_STRIP='{"topLevel":[],"message":["toolCallId"]}'
 ```
 
+### `toolFilter`
+Filters tool calls and tool results by tool name. Uses `include` (whitelist) or `exclude` (blacklist) per category — these are mutually exclusive within each category.
+
+Only applies when `toolCall` is in `retainContent.assistant` or `toolResult` is in `retainContent.toolResult` respectively.
+
+**Default** (conservative; still retains any potentially useful information while reducing unnecessary tokens):
+```json
+{
+  "toolFilter": {
+    "toolCall": { "exclude": ["grep", "find", "ls", "read", "hindsight_retain"] },
+    "toolResult": { "exclude": ["grep", "find", "ls", "write", "edit", "hindsight_retain", "hindsight_recall", "hindsight_reflect"] }
+  }
+}
+```
+
+The default excludes tool calls where you typically only care about the result (e.g. `read`), and tool results where you typically only care about the input (e.g. `write`). Hindsight tool calls/results are excluded because they would be circular — retaining memories about retained/recalled/reflected content creates a feedback loop, and `hindsight_retain` content is already stored through its own mechanism.
+
+**Examples:**
+
+Retain `read` results but not calls (to have file contents in memory):
+```json
+{
+  "toolFilter": {
+    "toolCall": { "exclude": ["read"] },
+    "toolResult": { "include": ["read"] }
+  }
+}
+```
+
+No tool filtering (retain everything):
+```json
+{
+  "toolFilter": {}
+}
+```
+
+Can also be set via environment variable as a JSON string:
+```bash
+export PI_HINDSIGHT_TOOL_FILTER='{"toolCall":{"exclude":["bash"]},"toolResult":{"include":["read"]}}'
+```
+
 ### `entities`
 Optional entities to pass to every retain call. Useful for tagging known entities in your content.
 
@@ -311,6 +357,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT` | `retainSessionsByDefault` | boolean | `true` |
 | `PI_HINDSIGHT_RETAIN_CONTENT` | `retainContent` | RetainContent (JSON) | *(see retainContent default)* |
 | `PI_HINDSIGHT_STRIP` | `strip` | StripConfig (JSON) | *(see strip default)* |
+| `PI_HINDSIGHT_TOOL_FILTER` | `toolFilter` | ToolFilter (JSON) | *(see toolFilter default)* |
 | `PI_HINDSIGHT_ENTITIES` | `entities` | EntityInput[] (JSON) | `[]` |
 | `PI_HINDSIGHT_STATUS_HEALTHY` | `statusHealthy` | string | `"🧠"` |
 | `PI_HINDSIGHT_STATUS_UNHEALTHY` | `statusUnhealthy` | string | `"🤯"` |
@@ -382,7 +429,8 @@ There are multiple other Hindsight integrations for Pi:
 | Linked host recall (multiple servers) | ❌ | ❌ | ❌ | ✅⁶ |
 | **Retain** |
 | Rich automatic tagging (session, cwd, parent) | ✅ | ❌ | ❌ | ✅ |
-| Operational tool filtering | *(planned)* | ✅ | ✅ | ❌ |
+| Operational tool filtering | ✅ | ✅¹³ | ✅¹³ | ❌ |
+| Configurable tool result inclusion | ✅ | ❌ | ❌ | ❌ |
 | Hashtag extraction from prompts | ❌ | ✅ | ✅ | ✅ |
 | Opt-out via `#nomem`/`#skip` | ❌⁷ | ✅ | ✅ | ❌ |
 | Per-session retain/ignore toggle | ✅ | ❌ | ❌ | ❌ |
@@ -419,6 +467,7 @@ There are multiple other Hindsight integrations for Pi:
 > ¹⁰ Named `hindsight_context` in hindsight-pi (uses Hindsight's reflect API with dynamic reasoning budget).
 > ¹¹ Queues messages to disk instead, which prevents data loss if Hindsight is down and allows deferring/reprocessing later. See [Design Decisions](#design-decisions).
 > ¹² Credential sanitization can't perfectly detect all secrets and risks giving a false sense of safety. It's better prevented at the source — e.g., use [gondolin with secret injection](https://earendil-works.github.io/gondolin/secrets/) or manually remove sensitive fields. If you run memory locally, the risk is lower; if a secret already made it into the session file, it was already sent to your LLM provider, so rotating the credential is the safe move.
+> ¹³ anh-chu and pi-less-shitty use hardcoded `OPERATIONAL_TOOLS` lists to exclude certain tool calls from plaintext transcripts (not configurable). This plugin uses the configurable `toolFilter` with per-category include/exclude lists, and retains JSON (not plaintext) so tool results can also be selectively included.
 
 > **Note:** This comparison table was AI-generated. If anything is incorrect or outdated, please open a PR. I'm only 100% sure of the current features of my own plugin.
 
@@ -474,6 +523,10 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 - See the [model leaderboard](https://benchmarks.hindsight.vectorize.io/) for information on what models to use. I am currently using gemma 4 31b for retention/consolidation.
 - Think about your [retain mission](https://hindsight.vectorize.io/developer/api/memory-banks#retain-configuration), [observations mission](https://hindsight.vectorize.io/developer/api/memory-banks#observations_mission), and [entity labels](https://hindsight.vectorize.io/developer/api/memory-banks#entity-labels) up front, as if you change these later and want them to affect old sessions, you will need to reingest everything.
 - Remember that the recall prompt is constructed from the first part of your user message. For long prompts, consider putting any details or keywords you want memories for towards the beginning.
+- Consider whether you want to keep tool calls and results. Including tool calls might be useful for remembering details about writes/edits (especially if you use pi for writing prose). Including tool result might be useful, for example, if you want to store memories about reads. You can always keep both and put more details about what should be ignored in your retain mission.
+
+For the retain mission, you may want to experiment with including something like this to avoid retaining duplicate information that may end up in the LLM thinking or final output after recall/reflect:
+- "Ignore resurfaced information that has already been stored or meta-commentary about it (unless the commentary is a new realization, surprise, correction, or new connection; in that case retain only the new commentary)"
 
 # Caveats
 - This plugin is still in flux and may have breaking changes
