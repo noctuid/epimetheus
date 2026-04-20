@@ -296,7 +296,6 @@ There are multiple other Hindsight integrations for Pi:
 | Configurable recall types | ✅ | ✅ | ✅ | ✅ |
 | Custom message renderer | ✅ | ✅ | ✅ | ✅ |
 | Cached context (anti-pattern) | ❌ | ❌ | ❌ | ✅⁸ |
-| Reflect/synthesis API | *(planned)* | ✅ | ✅ | ✅ |
 | Linked host recall (multiple servers) | ❌ | ❌ | ❌ | ✅⁹ |
 | **Retain** |
 | Rich automatic tagging (session, cwd, parent) | ✅ | ❌ | ❌ | ✅ |
@@ -313,7 +312,7 @@ There are multiple other Hindsight integrations for Pi:
 | `hindsight_recall` | ✅ | ✅ | ✅ | ✅⁵ |
 | `hindsight_retain` | ✅ | ✅ | ✅ | ✅ |
 | `hindsight_retain` with scope param | *(planned)* | ❌ | ✅ | ❌ |
-| `hindsight_reflect` | *(planned)* | ✅ | ✅ | ✅⁶ |
+| `hindsight_reflect` | ✅ | ✅ | ✅ | ✅⁶ |
 | `hindsight_bank_profile` | ❌ | ❌ | ❌ | ✅ |
 | **Legacy Support** |
 | Bootstrap/import existing sessions | ✅ | ❌ | ✅ | ❌ |
@@ -361,6 +360,7 @@ When `toolsEnabled: true` (default), the following tools are available for the a
 |------|-------------|
 | `hindsight_retain` | Store information to long-term memory. Queues to disk and retains on next flush. Use for facts, preferences, decisions, or any information worth remembering. |
 | `hindsight_recall` | Search long-term memory using multi-strategy retrieval. Supports filtering by tags, memory types (`world`/`experience`/`observation`), and budget. |
+| `hindsight_reflect` | Generate a synthesized answer from long-term memory. Unlike recall which returns raw facts, reflect uses the bank's identity, mental models, and multi-step reasoning to produce a contextual markdown answer. Best for questions requiring synthesis of multiple memories. |
 
 # Slash Commands
 All commands are under `/hindsight <subcommand>`. With no subcommand, defaults to `status`.

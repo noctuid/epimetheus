@@ -9,6 +9,7 @@ import {
   HindsightError,
   type MemoryItemInput,
   type RecallResponse,
+  type ReflectResponse,
 } from "@vectorize-io/hindsight-client";
 import type { HindsightConfig } from "./config";
 
@@ -30,6 +31,27 @@ export interface RecallOptions {
   types?: ("world" | "experience" | "observation")[];
   budget?: Budget;
   maxTokens?: number | null;
+}
+
+export interface ReflectOptions {
+  query: string;
+  /** Filter memories by tags during reflection. If not specified, all memories are considered. */
+  tags?: string[];
+  /** How to match tags: 'any' (OR, includes untagged), 'all' (AND, includes untagged), 'any_strict' (OR, excludes untagged), 'all_strict' (AND, excludes untagged). Default: 'any'. */
+  tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+  /** Budget level controlling how much effort to spend on retrieval and reasoning: 'low', 'mid', or 'high'.
+   *  Default: 'low' (per Hindsight SDK). Reflect runs an agentic loop with up to 10 iterations
+   *  of multi-tool search + LLM calls, so it is substantially slower than recall even at low budget. */
+  budget?: Budget;
+  // Not currently exposed (simplified HindsightClient wrapper doesn't support these;
+  // the underlying ReflectRequest API supports fact_types, exclude_mental_models,
+  // exclude_mental_model_ids, tag_groups, max_tokens, include, response_schema):
+  // - fact_types / exclude_mental_models: can be added if the client SDK is updated
+  //   or when switching to the generated SDK directly
+  // - max_tokens: not currently configurable (default 4096 output)
+  // - response_schema: not adding for now as structured output seems less useful
+  //   for coding agent integration
+  // - include: can be added later if needed (for trace, facts, chunks, etc.)
 }
 
 export class HindsightClientWrapper {
@@ -165,6 +187,35 @@ export class HindsightClientWrapper {
           budget: options.budget ?? this.config.autoRecallBudget,
           maxTokens: options.maxTokens ?? this.config.maxRecallTokens ?? undefined,
           includeEntities: true,
+        }),
+        timeoutMs,
+        signal
+      );
+
+      return { success: true, response: result };
+    } catch (e) {
+      return { success: false, error: this.formatError(e) };
+    }
+  }
+
+  /**
+   * Reflect and generate a contextual answer using the bank's identity and memories.
+   */
+  async reflect(
+    options: ReflectOptions,
+    signal?: AbortSignal,
+    timeoutMs: number = 90000
+  ): Promise<{ success: boolean; response?: ReflectResponse; error?: string }> {
+    try {
+      // Note: unlike recall, we don't fall back to autoRecallBudget (which defaults to 'mid').
+      // The Hindsight SDK defaults reflect budget to 'low' since reflect is much more expensive
+      // (agentic loop with up to 10 iterations of multi-tool search + LLM calls).
+      // Only override when the user explicitly sets a budget.
+      const result = await this.withTimeout(
+        this.client.reflect(this.config.bankId, options.query, {
+          tags: options.tags,
+          tagsMatch: options.tagsMatch,
+          budget: options.budget,
         }),
         timeoutMs,
         signal

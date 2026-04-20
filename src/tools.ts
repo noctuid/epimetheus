@@ -4,19 +4,21 @@
 
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
-import type { Budget, RecallResponse } from "@vectorize-io/hindsight-client";
+import type { Budget, RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig, MemoryType } from "./config";
 import { queueToolRetain } from "./retention";
 import { extractParentSessionId } from "./utils";
 
 // Reusable schemas
-const TagsMatchSchema = Type.Union([
-  Type.Literal("any"),
-  Type.Literal("all"),
-  Type.Literal("any_strict"),
-  Type.Literal("all_strict"),
-]);
+/** Tags match strategy for recall/reflect operations. */
+const TagsMatchSchema = Type.Union(
+  [Type.Literal("any"), Type.Literal("all"), Type.Literal("any_strict"), Type.Literal("all_strict")],
+  {
+    description:
+      "How to match tags: 'any', 'all', 'any_strict', 'all_strict' (any/all - OR/AND, strict - excludes untagged). Default: 'any'.",
+  }
+);
 type TagsMatch = Static<typeof TagsMatchSchema>;
 
 const MemoryTypeSchema = Type.Union([
@@ -25,7 +27,10 @@ const MemoryTypeSchema = Type.Union([
   Type.Literal("observation"),
 ]);
 
-const BudgetSchema = Type.Union([Type.Literal("low"), Type.Literal("mid"), Type.Literal("high")]);
+/** Budget level for recall/reflect operations. */
+const BudgetSchema = Type.Union([Type.Literal("low"), Type.Literal("mid"), Type.Literal("high")], {
+  description: "Budget level: 'low', 'mid', or 'high'. Controls how much effort to spend on retrieval and reasoning.",
+});
 
 interface RetainDetails {
   success: boolean;
@@ -38,10 +43,16 @@ interface RecallDetails {
   response?: RecallResponse;
 }
 
+interface ReflectDetails {
+  success: boolean;
+  error?: string;
+  response?: ReflectResponse;
+}
+
 /**
- * Register hindsight_retain and hindsight_recall tools.
+ * Register hindsight_retain, hindsight_recall, and hindsight_reflect tools.
  * hindsight_retain is always available (queues to disk).
- * hindsight_recall is only available when client is provided.
+ * hindsight_recall and hindsight_reflect are only available when client is provided.
  */
 export function registerTools(
   pi: ExtensionAPI,
@@ -183,6 +194,75 @@ export function registerTools(
       }
 
       const text = results.map((r, i) => `${i + 1}. ${r.text}`).join("\n");
+
+      return {
+        content: [{ type: "text", text }],
+        details: { success: true, response },
+      };
+    },
+  });
+
+  // hindsight_reflect - only available when client is configured
+  pi.registerTool({
+    name: "hindsight_reflect",
+    label: "Hindsight Reflect",
+    description: `Generate a synthesized answer from long-term memory. Unlike recall which returns raw facts, reflect uses the bank's identity, mental models, and multi-step reasoning to produce a contextual markdown answer.
+
+Best for:
+- Answering questions that require synthesizing multiple memories
+- Getting a coherent summary of what's known about a topic
+- When you need a reasoned perspective rather than raw fact retrieval
+
+Use recall instead when you just need raw facts or latency matters.
+
+**Performance:** Reflect runs an agentic loop with up to 10 iterations of multi-tool search + LLM calls, making it substantially slower than recall (seconds vs milliseconds). Budget defaults to 'low'; increase only if necessary as higher budgets take much longer.`,
+    parameters: Type.Object({
+      query: Type.String({ description: "The question to answer using memories" }),
+      tags: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Filter memories by tags during reflection. Only memories matching the tags will be considered.",
+        })
+      ),
+      tagsMatch: Type.Optional(TagsMatchSchema),
+      budget: Type.Optional(BudgetSchema),
+    }),
+
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+      _onUpdate,
+      _ctx
+    ): Promise<AgentToolResult<ReflectDetails>> {
+      const result = await client.reflect(
+        {
+          query: params.query,
+          tags: params.tags,
+          tagsMatch: params.tagsMatch as TagsMatch | undefined,
+          budget: params.budget as Budget | undefined,
+        },
+        signal
+      );
+
+      if (!result.success) {
+        return {
+          content: [
+            { type: "text", text: `Failed to reflect: ${result.error ?? "unknown error"}` },
+          ],
+          details: { success: false, error: result.error },
+        };
+      }
+
+      const response = result.response;
+      const text = response?.text;
+
+      if (!text) {
+        return {
+          content: [{ type: "text", text: "No relevant memories found to reflect on." }],
+          details: { success: true, response },
+        };
+      }
 
       return {
         content: [{ type: "text", text }],
