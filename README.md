@@ -57,7 +57,7 @@ Additionally:
 - Allows choosing what content to retain and stripping unnecessary fields to reduce tokens/cost
 
 # Configuration
-Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight.json` or `pi-hindsight.jsonc` (JSONC has precedence).
+Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json` or `config.jsonc` (JSONC has precedence).
 
 ## Example Configuration
 ```jsonc

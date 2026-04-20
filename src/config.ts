@@ -344,9 +344,9 @@ export function loadConfig(extensionsDir?: string): { config: HindsightConfig; c
   const warnings: string[] = [];
 
   // Load from config file (prefer .jsonc over .json)
-  const dir = extensionsDir ?? join(getAgentDir(), "extensions");
-  const jsoncPath = join(dir, "pi-hindsight.jsonc");
-  const jsonPath = join(dir, "pi-hindsight.json");
+  const dir = extensionsDir ?? join(getAgentDir(), "extensions", "pi-hindsight");
+  const jsoncPath = join(dir, "config.jsonc");
+  const jsonPath = join(dir, "config.json");
 
   const configPath = existsSync(jsoncPath) ? jsoncPath : (existsSync(jsonPath) ? jsonPath : null);
 
@@ -420,11 +420,11 @@ export function validateConfig(config: HindsightConfig): { valid: boolean; error
   const warnings: string[] = [];
 
   if (!config.apiUrl) {
-    errors.push("apiUrl is required (set in pi-hindsight.json or HINDSIGHT_API_URL env var)");
+    errors.push("apiUrl is required (set in config.json or HINDSIGHT_API_URL env var)");
   }
 
   if (!config.apiKey) {
-    errors.push("apiKey is required (set in pi-hindsight.json or HINDSIGHT_API_KEY env var)");
+    errors.push("apiKey is required (set in config.json or HINDSIGHT_API_KEY env var)");
   }
 
   if (config.hindsightContextMaxLength < 0) {
