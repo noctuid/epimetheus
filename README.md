@@ -8,6 +8,7 @@ A pi extension that integrates Hindsight AI memory for long-term conversation me
   - [Example Configuration](#example-configuration)
   - [Auto-Recall Settings](#auto-recall-settings)
   - [Status Bar Indicator](#status-bar-indicator)
+  - [Session Retention Control](#session-retention-control)
   - [Content Retention & Stripping Settings](#content-retention--stripping-settings)
   - [Environment Variables](#environment-variables)
 - [Additional Details](#additional-details)
@@ -103,6 +104,30 @@ The extension shows a health indicator in pi's status bar:
 - 🤯 (unhealthy) — Config has validation errors or load warnings
 
 Both indicator texts are configurable via `statusHealthy` and `statusUnhealthy` options. If `enabled: false`, no status indicator is shown.
+
+## Session Retention Control
+By default, all sessions are retained to Hindsight. You can change the default with `retainSessionsByDefault: false`, which prevents *new* sessions from being retained unless explicitly enabled (old resumed sessions are not affected).
+
+Per-session control:
+- `/hindsight toggle-retain` — Toggle whether the current session should be retained
+- `/hindsight tag <tag>` — Add a tag to the session's metadata (included in document tags on flush)
+- `/hindsight remove-tag <tag>` — Remove a tag from the session's metadata
+
+Current retain setting and tags can be viewed for the current session with `/hindsight status`.
+
+When a session does not allow retention:
+- Messages are not auto-queued on `message_end`
+- The `hindsight_retain` tool returns an error ("Session does not allow retention")
+- Auto-recall still works (read-only operation)
+- `/hindsight parse-session` and `/hindsight parse-and-upsert-session` are disabled
+
+When toggling retention:
+- **Off**: Queue files are deleted (queued messages will not be flushed). The existing document in Hindsight is not affected to avoid mistakes (manually delete it if you want to).
+- **On**: A confirmation dialog asks whether to parse and upsert the full session first. If confirmed, the entire conversation is retained as the document (so newly queued messages append correctly). If declined, retention is not enabled. Queue files are deleted regardless.
+
+Tags added via `/hindsight tag` are included in the document tags when flushing to Hindsight, alongside the automatic tags (session ID, cwd, parent, etc.).
+
+Session metadata (retention state and tags) is stored as a `CustomEntry` in the session file with `customType: "hindsight-meta"`, so it persists across session restarts but is not sent to the LLM.
 
 ## Content Retention & Stripping Settings
 ### `retainContent`
@@ -226,6 +251,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_RECALL_TYPES` | `recallTypes` | string[] (JSON) | `["observation"]` |
 | `PI_HINDSIGHT_CONSTANT_TAGS` | `constantTags` | string[] (JSON) | `["harness:pi"]` |
 | `PI_HINDSIGHT_FLUSH_ON_COMPACT` | `flushOnCompact` | boolean | `false` |
+| `PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT` | `retainSessionsByDefault` | boolean | `true` |
 | `PI_HINDSIGHT_RETAIN_CONTENT` | `retainContent` | RetainContent (JSON) | *(see retainContent default)* |
 | `PI_HINDSIGHT_STRIP` | `strip` | StripConfig (JSON) | *(see strip default)* |
 | `PI_HINDSIGHT_ENTITIES` | `entities` | EntityInput[] (JSON) | `[]` |
@@ -295,24 +321,26 @@ There are multiple other Hindsight integrations for Pi:
 | Multi-bank recall (project + global) | *(planned)* | ✅ | ✅ | ✅ |
 | Configurable recall types | ✅ | ✅ | ✅ | ✅ |
 | Custom message renderer | ✅ | ✅ | ✅ | ✅ |
-| Cached context (anti-pattern) | ❌ | ❌ | ❌ | ✅⁸ |
-| Linked host recall (multiple servers) | ❌ | ❌ | ❌ | ✅⁹ |
+| Cached context (anti-pattern) | ❌ | ❌ | ❌ | ✅⁵ |
+| Linked host recall (multiple servers) | ❌ | ❌ | ❌ | ✅⁶ |
 | **Retain** |
 | Rich automatic tagging (session, cwd, parent) | ✅ | ❌ | ❌ | ✅ |
 | Operational tool filtering | *(planned)* | ✅ | ✅ | ❌ |
 | Hashtag extraction from prompts | ❌ | ✅ | ✅ | ✅ |
-| Opt-out via `#nomem`/`#skip` | ❌ | ✅ | ✅ | ❌ |
+| Opt-out via `#nomem`/`#skip` | ❌⁷ | ✅ | ✅ | ❌ |
+| Per-session retain/ignore toggle | ✅ | ❌ | ❌ | ❌ |
+| Per-session manual tags | ✅ | ❌ | ❌ | ❌ |
 | Hard truncation (50KB) | ❌ | ✅ | ✅ | ❌ |
 | **Bank Management** |
 | Bank auto-creation | ❌ | ❌ | ❌ | ✅ |
-| Deterministic bank ID from git/cwd | ❌ | ✅⁷ | ❌ | ✅ |
+| Deterministic bank ID from git/cwd | ❌ | ✅⁸ | ❌ | ✅ |
 | Directory → bank ID mappings | ❌ | ❌ | ❌ | ✅ |
 | Bank profile/inspection | ❌ | ❌ | ❌ | ✅ |
 | **Tools** |
-| `hindsight_recall` | ✅ | ✅ | ✅ | ✅⁵ |
+| `hindsight_recall` | ✅ | ✅ | ✅ | ✅⁹ |
 | `hindsight_retain` | ✅ | ✅ | ✅ | ✅ |
 | `hindsight_retain` with scope param | *(planned)* | ❌ | ✅ | ❌ |
-| `hindsight_reflect` | ✅ | ✅ | ✅ | ✅⁶ |
+| `hindsight_reflect` | ✅ | ✅ | ✅ | ✅¹⁰ |
 | `hindsight_bank_profile` | ❌ | ❌ | ❌ | ✅ |
 | **Legacy Support** |
 | Bootstrap/import existing sessions | ✅ | ❌ | ✅ | ❌ |
@@ -323,14 +351,15 @@ There are multiple other Hindsight integrations for Pi:
 
 > **Notes:**
 > ¹ hindsight-pi builds per-turn summaries with `[user]`/`[assistant]` sections (plaintext), not raw JSON messages.
-> ² Supports `async`/`turn`/`session`/integer-N frequencies via `WriteScheduler`.
+> ² hindsight-pi supports `async`/`turn`/`session`/integer-N write frequencies via `WriteScheduler`.
 > ³ Uses `~/.hindsight/config.json` (global) + `.hindsight/config.json` (local), not JSONC.
 > ⁴ Injects into the system prompt each turn (or on first turn only if `injectionFrequency: "first-turn"`), which breaks prompt caching by default.
-> ⁵ Named `hindsight_search` in hindsight-pi.
-> ⁶ Named `hindsight_context` in hindsight-pi (uses Hindsight's reflect API with dynamic reasoning budget).
-> ⁷ anh-chu derives `project-{dirname}` from cwd basename (simple, collision-prone). hindsight-pi supports git remote, branch, and per-directory hash strategies.
-> ⁸ Anti-pattern: recall is fast and should be queried fresh based on the current user prompt each turn, not cached. Caching serves the wrong results when the query changes and adds unnecessary complexity.
-> ⁹ Integrates with multiple separate Hindsight server instances in a single session. I am not sure what the use case is for this.
+> ⁵ Anti-pattern: recall is fast and should be queried fresh based on the current user prompt each turn, not cached. Caching serves the wrong results when the query changes and adds unnecessary complexity.
+> ⁶ Integrates with multiple separate Hindsight server instances in a single session. I am not sure what the use case is for this.
+> ⁷ This plugin supports per-session opt-out via `/hindsight toggle-retain` instead of `#nomem` hashtag-based opt-out. See [Design Decisions](#design-decisions).
+> ⁸ anh-chu derives `project-{dirname}` from cwd basename (simple, collision-prone). hindsight-pi supports git remote, branch, and per-directory hash strategies.
+> ⁹ Named `hindsight_search` in hindsight-pi.
+> ¹⁰ Named `hindsight_context` in hindsight-pi (uses Hindsight's reflect API with dynamic reasoning budget).
 
 > **Note:** This comparison table was AI-generated. If anything is incorrect or outdated, please open a PR. I'm only 100% sure of the current features of my own plugin.
 
@@ -339,7 +368,7 @@ There are multiple other Hindsight integrations for Pi:
 - **Use a disk queue in case hindsight is down or to delay retention**
 - **Use as much automatic tagging as possible**
 - **Official TypeScript client library over raw HTTP requests** Using `@vectorize-io/hindsight-client` ensures correct API usage, type safety, and automatic compatibility with Hindsight API changes.
-- **No hashtag extraction or `#nomem` opt-out.** These features require parsing user prompts for control tags, which has edge cases with markdown headings. `#nomem` also does not make sense to me for a turn, since any information in that turn could still be referenced in later turns and retained then, and this would complicate reingesting full sessions later. It makes more sense to me to disable retention on a per-session basis. Same for tags: it makes more sense to have a dedicated command for manually adding tags to the document for the current session.
+- **No hashtag extraction or `#nomem` opt-out.** These features require parsing user prompts for control tags, which has edge cases with markdown headings. `#nomem` also does not make sense to me for a turn, since any information in that turn could still be referenced in later turns and retained then, and this would complicate reingesting full sessions later. It makes more sense to disable retention on a per-session basis (via `/hindsight toggle-retain`). Same for tags: it makes more sense to have a dedicated command (`/hindsight tag`) for manually adding tags to the document for the current session.
 - **No hard truncation or client-side text chunking.** Hindsight chunks content internally and handles large documents gracefully. Arbitrary truncation risks losing useful information. Client-side chunking (as done by hindsight-pi) is unnecessary since Hindsight already handles this.
 - **No support for bank creation/management or functionality that hindsight already provides** This is only for pi integration. Do bank creation and setup directly with e.g. `hindsight-embed` and hindsight's UI
 - **No project-local configuration files** Use environment variables with mise/direnv for directory-specific config (more flexible and less complex implementation). Note that anh-chu and pi-less-shitty do support `.hindsight/config` in CWD / parent traversal.
@@ -368,13 +397,16 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 | Subcommand | Description |
 |------------|-------------|
 | `flush` | Flush queued messages to Hindsight |
+| `toggle-retain` | Toggle whether the current session should be retained |
+| `tag <tag>` | Add a tag to the session's hindsight metadata |
+| `remove-tag <tag>` | Remove a tag from the session's hindsight metadata |
 | `toggle-display` | Toggle recall message visibility in UI |
 | `popup` | Pop up last recalled messages in overlay |
 | `queue-status` | Show count of queued messages |
 | `status` | Show operational status (connection, session, recall info) |
 | `config` | Show configuration (file path, env vars, masked config) |
 | `parse-session` | Parse current session to file for manual review |
-| `upsert-parsed-session [id]` | Upsert a parsed session to Hindsight. If no ID is given, presents a selection UI to choose from parsed sessions. |
+| `parse-and-upsert-session` | Parse and upsert the full current session to Hindsight |
 | `upsert-all-parsed` | Upsert all parsed sessions to Hindsight |
 
 > **Note:** After `/resume`, a new user message is required before `/hindsight popup` will show content, since recall only happens when there's a user message to query against.

@@ -11,6 +11,7 @@ import type { RecallResponse } from "@vectorize-io/hindsight-client";
 import { HindsightClientWrapper } from "./client";
 import { registerCommands } from "./commands";
 import { loadConfig, validateConfig } from "./config";
+import { shouldSessionBeRetained } from "./meta";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
 import { enqueueAutoMessage } from "./queue";
 import { flushQueues, getQueueCount } from "./retention";
@@ -209,6 +210,10 @@ export default function (pi: ExtensionAPI) {
     const sessionId = ctx.sessionManager.getSessionId();
     if (!sessionId) return;
 
+    // Check if session is retained
+    const entries = ctx.sessionManager.getEntries();
+    if (!shouldSessionBeRetained(entries, config)) return;
+
     // event.message is AgentMessage union (many types). Cast to Record for processing.
     const message = event.message as unknown as Record<string, unknown> | undefined;
     if (!message) return;
@@ -296,6 +301,7 @@ export default function (pi: ExtensionAPI) {
     console.log(`pi-hindsight: Flushing ${count} messages ${reason}`);
 
     const header = ctx.sessionManager.getHeader();
+    const entries = ctx.sessionManager.getEntries();
     const sessionName = getSessionDisplayName(
       ctx.sessionManager.getSessionName.bind(ctx.sessionManager),
       ctx.sessionManager.getEntries.bind(ctx.sessionManager)
@@ -309,7 +315,8 @@ export default function (pi: ExtensionAPI) {
       parentSessionId,
       config,
       client,
-      ctx.signal
+      ctx.signal,
+      entries
     );
 
     if (!result.success) {

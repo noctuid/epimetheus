@@ -302,7 +302,7 @@ function buildForkedMessages(
 export function buildDocumentTags(
   header: SessionHeader,
   config: HindsightConfig,
-  options?: { storeMethod?: "auto" | "tool" }
+  options?: { storeMethod?: "auto" | "tool"; sessionTags?: string[] }
 ): string[] {
   const tags = [
     ...config.constantTags,
@@ -331,6 +331,11 @@ export function buildDocumentTags(
     tags.push(`parent:${parentId}`);
   } else {
     tags.push(`parent:${header.id}`);
+  }
+
+  // Add session metadata tags
+  if (options?.sessionTags) {
+    tags.push(...options.sessionTags);
   }
 
   return tags;

@@ -9,8 +9,11 @@ import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
 import type { RecallMessageDetails } from "../index";
+import { buildDocumentTags, buildMessageArrayFromSession, getHindsightContext, parseSessionFile } from "../document";
+import { getHindsightMeta, shouldSessionBeRetained, type HindsightMeta } from "../meta";
 import { RecallOverlayComponent } from "../overlay";
 import { flushQueues, getQueueCount } from "../retention";
+import { deleteAutoQueue, deleteToolQueue } from "../queue";
 import { getSessionDisplayName } from "../utils";
 
 interface Subcommand {
@@ -19,6 +22,121 @@ interface Subcommand {
   getArgumentCompletions?: (
     argumentPrefix: string
   ) => Promise<Array<{ label: string; value: string }> | null>;
+}
+
+/**
+ * Call client.retain with standard options (updateMode=replace, entities from config).
+ * Throws on failure.
+ */
+async function upsertToHindsight(
+  client: HindsightClientWrapper,
+  params: {
+    content: string;
+    documentId: string;
+    context: string;
+    timestamp: string;
+    tags: string[];
+  },
+  config: HindsightConfig,
+  signal: unknown
+): Promise<void> {
+  const result = await client.retain(
+    {
+      content: params.content,
+      documentId: params.documentId,
+      context: params.context,
+      timestamp: params.timestamp,
+      tags: params.tags,
+      updateMode: "replace",
+      entities: config.entities.length > 0 ? config.entities : undefined,
+    },
+    signal
+  );
+
+  if (!result.success) {
+    throw new Error(result.error ?? "Unknown error");
+  }
+}
+
+/**
+ * Parse the current session file and upsert to Hindsight in one step.
+ * Also writes the parsed session to the parsed-sessions directory on disk
+ * so the user can review it afterward.
+ * Returns a description of the result, or throws on error.
+ */
+async function parseAndUpsertSession(
+  ctx: ExtensionContext,
+  config: HindsightConfig,
+  client: HindsightClientWrapper
+): Promise<string> {
+  const sessionFile = ctx.sessionManager.getSessionFile();
+  if (!sessionFile || !existsSync(sessionFile)) {
+    return "No session file found";
+  }
+
+  const { header, entries: originalEntries } = parseSessionFile(sessionFile);
+  const { messages, documentId, warning } = buildMessageArrayFromSession(sessionFile, config);
+
+  if (messages.length === 0) {
+    return "No messages to parse";
+  }
+
+  if (warning) {
+    return warning;
+  }
+
+  // Check retention state
+  if (!shouldSessionBeRetained(originalEntries, config)) {
+    return "Session does not allow retention. Use /hindsight toggle-retain to enable retention.";
+  }
+
+  // Build tags from metadata
+  const parsedMeta = getHindsightMeta(originalEntries);
+  const sessionTags = parsedMeta?.tags ?? [];
+  const sessionName = getSessionDisplayName(
+    ctx.sessionManager.getSessionName.bind(ctx.sessionManager),
+    ctx.sessionManager.getEntries.bind(ctx.sessionManager)
+  );
+
+  const tags = buildDocumentTags(header, config, { sessionTags });
+  const context = getHindsightContext(sessionFile, config, sessionName);
+
+  // Write parsed session to disk for later review
+  const parsedSession = {
+    documentId,
+    context,
+    tags,
+    timestamp: header.timestamp,
+    messages,
+    parsedAt: new Date().toISOString(),
+  };
+  const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+  if (!existsSync(parsedDir)) {
+    mkdirSync(parsedDir, { recursive: true });
+  }
+  writeFileSync(join(parsedDir, `${header.id}.jsonl`), `${JSON.stringify(parsedSession)}\n`, "utf8");
+
+  // Clear queued messages to prevent duplication — the full session was just upserted
+  const sessionId = ctx.sessionManager.getSessionId();
+  if (sessionId) {
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+  }
+
+  await upsertToHindsight(
+    client,
+    {
+      content: JSON.stringify(messages),
+      documentId,
+      context,
+      timestamp: header.timestamp,
+      tags,
+    },
+    config,
+    ctx.signal
+  );
+
+  return `Parsed and upserted ${messages.length} messages`;
 }
 
 /**
@@ -67,6 +185,7 @@ export function registerCommands(
         const sessionStartTime = header?.timestamp || new Date().toISOString();
         const sessionCwd = header?.cwd || ctx.cwd;
         const parentSessionId = header?.parentSession;
+        const entries = ctx.sessionManager.getEntries();
 
         ctx.ui.notify(`Flushing ${count} messages...`, "info");
 
@@ -78,7 +197,8 @@ export function registerCommands(
           parentSessionId,
           config,
           client,
-          ctx.signal
+          ctx.signal,
+          entries
         );
 
         if (result.success) {
@@ -101,14 +221,7 @@ export function registerCommands(
           return;
         }
 
-        const {
-          parseSessionFile,
-          buildDocumentTags,
-          getHindsightContext,
-          buildMessageArrayFromSession,
-        } = await import("../document");
-
-        const { header } = parseSessionFile(sessionFile);
+        const { header, entries: originalEntries } = parseSessionFile(sessionFile);
 
         // Build messages with fork detection
         const { messages, documentId, warning } = buildMessageArrayFromSession(sessionFile, config);
@@ -118,10 +231,23 @@ export function registerCommands(
           return;
         }
 
+        // Get session tags from metadata
+        const parsedMeta = getHindsightMeta(originalEntries);
+        const sessionTags = parsedMeta?.tags ?? [];
+
         const sessionName = getSessionDisplayName(
           ctx.sessionManager.getSessionName.bind(ctx.sessionManager),
           ctx.sessionManager.getEntries.bind(ctx.sessionManager)
         );
+
+        // Check retention state — skip if session is not retained
+        if (!shouldSessionBeRetained(originalEntries, config)) {
+          ctx.ui.notify(
+            "Session does not allow retention. Use /hindsight toggle-retain to enable retention.",
+            "warning"
+          );
+          return;
+        }
 
         // Build output - matches Hindsight retain API structure (minus updateMode)
         const parsedSession: {
@@ -131,19 +257,14 @@ export function registerCommands(
           timestamp: string;
           messages: object[];
           parsedAt: string;
-          warning?: string;
         } = {
           documentId,
           context: getHindsightContext(sessionFile, config, sessionName),
-          tags: buildDocumentTags(header, config),
+          tags: buildDocumentTags(header, config, { sessionTags }),
           timestamp: header.timestamp,
           messages,
           parsedAt: new Date().toISOString(),
         };
-
-        if (warning) {
-          parsedSession.warning = warning;
-        }
 
         // Write to parsed-sessions directory
         const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
@@ -158,81 +279,20 @@ export function registerCommands(
       },
     },
 
-    "upsert-parsed-session": {
-      description: "Upsert a parsed session to Hindsight (selects if no ID given)",
-      getArgumentCompletions: async (argumentPrefix: string) => {
-        const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
-        if (!existsSync(parsedDir)) return null;
-
-        const files = readdirSync(parsedDir)
-          .filter((f) => f.endsWith(".jsonl") && f.includes(argumentPrefix))
-          .map((f) => ({ label: f.replace(".jsonl", ""), value: f.replace(".jsonl", "") }));
-
-        return files.length > 0 ? files : null;
-      },
-      handler: async (args: string, ctx: ExtensionContext) => {
+    "parse-and-upsert-session": {
+      description: "Parse and upsert the full current session to Hindsight",
+      handler: async (_args: string, ctx: ExtensionContext) => {
         if (!client) {
           ctx.ui.notify("Hindsight not configured", "error");
           return;
         }
 
-        const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
-        let sessionId = args.trim();
-
-        // List available sessions if no ID provided
-        if (!sessionId) {
-          if (!existsSync(parsedDir)) {
-            ctx.ui.notify("No parsed sessions found", "error");
-            return;
-          }
-
-          const files = readdirSync(parsedDir).filter((f) => f.endsWith(".jsonl"));
-          if (files.length === 0) {
-            ctx.ui.notify("No parsed sessions found", "error");
-            return;
-          }
-
-          // Use select to let user pick
-          const options = files.map((f) => f.replace(".jsonl", ""));
-          const answer = await ctx.ui.select("Select session to upsert:", options);
-
-          if (!answer) {
-            return;
-          }
-          sessionId = answer;
-        }
-
-        const parsedPath = join(
-          parsedDir,
-          sessionId.endsWith(".jsonl") ? sessionId : `${sessionId}.jsonl`
-        );
-        if (!existsSync(parsedPath)) {
-          ctx.ui.notify(`Parsed session not found: ${sessionId}`, "error");
-          return;
-        }
-
-        const parsed = JSON.parse(readFileSync(parsedPath, "utf8"));
-
-        ctx.ui.notify(`Upserting session ${sessionId}...`, "info");
-
-        const content = JSON.stringify(parsed.messages);
-        const result = await client.retain(
-          {
-            content,
-            documentId: parsed.documentId,
-            context: parsed.context,
-            timestamp: parsed.timestamp,
-            tags: parsed.tags,
-            updateMode: "replace",
-            entities: config.entities.length > 0 ? config.entities : undefined,
-          },
-          ctx.signal
-        );
-
-        if (result.success) {
-          ctx.ui.notify(`Session ${sessionId} upserted successfully`, "info");
-        } else {
-          ctx.ui.notify(`Upsert failed: ${result.error}`, "error");
+        try {
+          const result = await parseAndUpsertSession(ctx, config, client);
+          ctx.ui.notify(result, "info");
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          ctx.ui.notify(`Parse-and-upsert failed: ${msg}`, "error");
         }
       },
     },
@@ -318,6 +378,142 @@ export function registerCommands(
       },
     },
 
+    "toggle-retain": {
+      description: "Toggle whether the current session should be retained",
+      handler: async (_args: string, ctx: ExtensionContext) => {
+        if (!client) {
+          ctx.ui.notify("Hindsight not configured", "error");
+          return;
+        }
+
+        const entries = ctx.sessionManager.getEntries();
+        const currentRetained = shouldSessionBeRetained(entries, config);
+        const newShouldRetain = !currentRetained;
+
+        const sessionId = ctx.sessionManager.getSessionId();
+
+        if (newShouldRetain) {
+          // Toggling ON: ask if user wants to parse-and-upsert first so the
+          // full session content is retained (newly queued messages append correctly)
+          const answer = await ctx.ui.confirm(
+            "Enable retention?",
+            "Parse and upsert the full session before enabling retention? This ensures the full conversation is retained."
+          );
+
+          if (!answer) {
+            ctx.ui.notify(
+              "Retention not enabled. Use /hindsight toggle-retain again to enable.",
+              "info"
+            );
+            return;
+          }
+
+          // Build new meta, preserving existing tags
+          const existingMeta = getHindsightMeta(entries);
+          const meta: HindsightMeta = {
+            retained: true,
+            ...(existingMeta?.tags ? { tags: existingMeta.tags } : {}),
+          };
+          pi.appendEntry("hindsight-meta", meta);
+
+          // Delete any existing queue files
+          if (sessionId) {
+            deleteAutoQueue(sessionId);
+            deleteToolQueue(sessionId);
+          }
+
+          // Parse and upsert the full session
+          try {
+            const result = await parseAndUpsertSession(ctx, config, client);
+            ctx.ui.notify(`Session retention: enabled. ${result}.`, "info");
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            ctx.ui.notify(
+              `Session retention: enabled, but parse-and-upsert failed: ${msg}`,
+              "warning"
+            );
+          }
+        } else {
+          // Toggling OFF: build new meta, preserving existing tags
+          const existingMeta = getHindsightMeta(entries);
+          const meta: HindsightMeta = {
+            retained: false,
+            ...(existingMeta?.tags ? { tags: existingMeta.tags } : {}),
+          };
+          pi.appendEntry("hindsight-meta", meta);
+
+          // Delete queue files so queued messages will NOT be flushed
+          if (sessionId) {
+            deleteAutoQueue(sessionId);
+            deleteToolQueue(sessionId);
+          }
+
+          ctx.ui.notify("Session retention: disabled (will be ignored)", "info");
+        }
+      },
+    },
+
+    tag: {
+      description: "Add a tag to session metadata",
+      handler: async (args: string, ctx: ExtensionContext) => {
+        const tag = args.trim();
+        if (!tag) {
+          ctx.ui.notify("Usage: /hindsight tag <tag>", "warning");
+          return;
+        }
+
+        const entries = ctx.sessionManager.getEntries();
+        const existingMeta = getHindsightMeta(entries);
+        const tags = [...(existingMeta?.tags ?? [])];
+
+        if (tags.includes(tag)) {
+          ctx.ui.notify(`Tag "${tag}" already exists`, "warning");
+          return;
+        }
+
+        tags.push(tag);
+
+        const meta: HindsightMeta = {
+          ...(existingMeta?.retained !== undefined ? { retained: existingMeta.retained } : {}),
+          tags,
+        };
+
+        pi.appendEntry("hindsight-meta", meta);
+        ctx.ui.notify(`Tag "${tag}" added`, "info");
+      },
+    },
+
+    "remove-tag": {
+      description: "Remove a tag from session metadata",
+      handler: async (args: string, ctx: ExtensionContext) => {
+        const tag = args.trim();
+        if (!tag) {
+          ctx.ui.notify("Usage: /hindsight remove-tag <tag>", "warning");
+          return;
+        }
+
+        const entries = ctx.sessionManager.getEntries();
+        const existingMeta = getHindsightMeta(entries);
+        const tags = [...(existingMeta?.tags ?? [])];
+
+        const index = tags.indexOf(tag);
+        if (index === -1) {
+          ctx.ui.notify(`Tag "${tag}" not found`, "warning");
+          return;
+        }
+
+        tags.splice(index, 1);
+
+        const meta: HindsightMeta = {
+          ...(existingMeta?.retained !== undefined ? { retained: existingMeta.retained } : {}),
+          ...(tags.length > 0 ? { tags } : {}),
+        };
+
+        pi.appendEntry("hindsight-meta", meta);
+        ctx.ui.notify(`Tag "${tag}" removed`, "info");
+      },
+    },
+
     "toggle-display": {
       description: "Toggle recall message display",
       handler: async (_args: string, ctx: ExtensionContext) => {
@@ -380,6 +576,14 @@ export function registerCommands(
         lines.push(`  Bank ID: ${config.bankId}`);
         const sessionId = ctx.sessionManager.getSessionId();
         lines.push(`  Session ID: ${sessionId ?? "none"}`);
+
+        // Retention state and tags
+        const sessionEntries = ctx.sessionManager.getEntries();
+        const retained = shouldSessionBeRetained(sessionEntries, config);
+        lines.push(`  Retained: ${retained ? "yes" : "no"}`);
+        const meta = getHindsightMeta(sessionEntries);
+        const tags = meta?.tags ?? [];
+        lines.push(`  Tags: ${tags.length > 0 ? tags.join(", ") : "none"}`);
 
         // Last recall status
         lines.push("\n== Last Recall ==");

@@ -7,6 +7,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import type { Budget, RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig, MemoryType } from "./config";
+import { getHindsightMeta, shouldSessionBeRetained } from "./meta";
 import { queueToolRetain } from "./retention";
 import { extractParentSessionId } from "./utils";
 
@@ -97,8 +98,26 @@ export function registerTools(
         };
       }
 
+      // Check if session is retained
+      const entries = ctx.sessionManager.getEntries();
+      if (!shouldSessionBeRetained(entries, config)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Session does not allow retention. Use /hindsight toggle-retain to enable retention.",
+            },
+          ],
+          details: { success: false, error: "session does not allow retention" },
+        };
+      }
+
       const header = ctx.sessionManager.getHeader();
       const parentSessionId = extractParentSessionId(header?.parentSession);
+
+      // Get session tags from metadata
+      const meta = getHindsightMeta(entries);
+      const sessionTags = meta?.tags;
 
       const success = queueToolRetain(
         sessionId,
@@ -107,7 +126,8 @@ export function registerTools(
         params.metadata,
         ctx.cwd,
         parentSessionId,
-        config
+        config,
+        sessionTags
       );
       if (!success) {
         return {

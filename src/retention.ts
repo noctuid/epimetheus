@@ -4,6 +4,7 @@
 
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig } from "./config";
+import { getHindsightMeta } from "./meta";
 import type { ToolQueueEntry } from "./queue";
 import {
   deleteAutoQueue,
@@ -26,7 +27,8 @@ export function queueToolRetain(
   metadata: Record<string, string> | undefined,
   sessionCwd: string,
   parentSessionId: string | undefined,
-  config: Pick<HindsightConfig, "constantTags">
+  config: Pick<HindsightConfig, "constantTags">,
+  sessionTags?: string[]
 ): boolean {
   // Build complete tags at queue time
   const tags = [
@@ -36,6 +38,7 @@ export function queueToolRetain(
     `store_method:tool`,
     `parent:${parentSessionId ?? sessionId}`,
     ...(userTags ?? []),
+    ...(sessionTags ?? []),
   ];
 
   const entry: ToolQueueEntry = {
@@ -60,20 +63,24 @@ export async function flushAutoQueue(
   parentSessionId: string | undefined,
   config: HindsightConfig,
   client: HindsightClientWrapper,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  entries?: Array<{ type: string; customType?: string; data?: unknown }>
 ): Promise<{ success: boolean; error?: string; count: number }> {
-  const entries = readAutoQueue(sessionId);
-  if (entries.length === 0) {
+  const autoEntries = readAutoQueue(sessionId);
+  if (autoEntries.length === 0) {
     return { success: true, count: 0 };
   }
 
-  // Build tags: base session tags
+  // Build tags: base session tags + session metadata tags
+  const meta = entries ? getHindsightMeta(entries) : null;
+  const sessionTags = meta?.tags ?? [];
   const tags = [
     ...config.constantTags,
     `session:${sessionId}`,
     `cwd:${sessionCwd}`,
     `store_method:auto`,
     `parent:${parentSessionId ?? sessionId}`,
+    ...sessionTags,
   ];
 
   // Build context
@@ -83,7 +90,7 @@ export async function flushAutoQueue(
   );
 
   // Concatenate all entries into single content array
-  const contentItems = entries.map((entry) => entry.entry);
+  const contentItems = autoEntries.map((entry) => entry.entry);
 
   const result = await client.retain(
     {
@@ -104,7 +111,7 @@ export async function flushAutoQueue(
   return {
     success: result.success,
     error: result.error,
-    count: result.success ? entries.length : 0,
+    count: result.success ? autoEntries.length : 0,
   };
 }
 
@@ -146,7 +153,8 @@ export async function flushQueues(
   parentSessionId: string | undefined,
   config: HindsightConfig,
   client: HindsightClientWrapper,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  entries?: Array<{ type: string; customType?: string; data?: unknown }>
 ): Promise<{ success: boolean; error?: string; autoCount: number; toolCount: number }> {
   const autoResult = await flushAutoQueue(
     sessionId,
@@ -156,7 +164,8 @@ export async function flushQueues(
     parentSessionId,
     config,
     client,
-    signal
+    signal,
+    entries
   );
 
   const toolResult = await flushToolQueue(sessionId, client, signal);

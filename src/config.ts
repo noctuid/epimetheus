@@ -50,6 +50,7 @@ export interface HindsightConfig {
   retainContent: RetainContent;
   strip: StripConfig;
   flushOnCompact: boolean;
+  retainSessionsByDefault: boolean;
   entities: EntityInput[];
   statusHealthy: string;
   statusUnhealthy: string;
@@ -87,6 +88,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
     message: ["api", "provider", "model", "usage", "cost", "stopReason", "timestamp", "responseId"],
   },
   flushOnCompact: false,
+  retainSessionsByDefault: true,
   entities: [],
   statusHealthy: "🧠",
   statusUnhealthy: "🤯",
@@ -115,6 +117,7 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "retainContent",
   "strip",
   "flushOnCompact",
+  "retainSessionsByDefault",
   "entities",
   "statusHealthy",
   "statusUnhealthy",
@@ -233,6 +236,7 @@ function setConfigValue(
     case "recallShowDateTime":
     case "recallDisplay":
     case "recallPersist":
+    case "retainSessionsByDefault":
     case "flushOnCompact": {
       if (typeof value === "boolean") {
         config[key] = value;
@@ -443,6 +447,7 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_RECALL_TYPES: "recallTypes",
     PI_HINDSIGHT_CONSTANT_TAGS: "constantTags",
     PI_HINDSIGHT_FLUSH_ON_COMPACT: "flushOnCompact",
+    PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT: "retainSessionsByDefault",
     PI_HINDSIGHT_RETAIN_CONTENT: "retainContent",
     PI_HINDSIGHT_STRIP: "strip",
     PI_HINDSIGHT_ENTITIES: "entities",
