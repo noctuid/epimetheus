@@ -141,7 +141,7 @@ function buildForkedContent(
 
   if (forkPoint === -1) {
     // No new responses - nothing to retain
-    return { content: "[]", documentId: `session:${header.id}` };
+    return { content: "[]", documentId: header.id };
   }
 
   // Walk backward in conversationEntries to find the previous user message
@@ -152,7 +152,7 @@ function buildForkedContent(
 
   return {
     content,
-    documentId: `session:${header.id}`,
+    documentId: header.id,
   };
 }
 
@@ -217,7 +217,7 @@ export function buildDocumentContent(
     } catch (_e) {
       return {
         content: "[]",
-        documentId: `session:${header.id}`,
+        documentId: header.id,
         warning: `Parent session not found: ${header.parentSession}`,
       };
     }
@@ -227,7 +227,7 @@ export function buildDocumentContent(
   const messages = buildMessageArray(entries, config);
   return {
     content: JSON.stringify(messages),
-    documentId: `session:${header.id}`,
+    documentId: header.id,
   };
 }
 
@@ -260,7 +260,7 @@ export function buildMessageArrayFromParsedSession(
     } catch (_e) {
       return {
         messages: [],
-        documentId: `session:${header.id}`,
+        documentId: header.id,
         warning: `Parent session not found: ${header.parentSession}`,
       };
     }
@@ -270,7 +270,7 @@ export function buildMessageArrayFromParsedSession(
   const messages = buildMessageArray(entries, config);
   return {
     messages,
-    documentId: `session:${header.id}`,
+    documentId: header.id,
   };
 }
 
@@ -304,7 +304,7 @@ function buildForkedMessages(
   const forkPoint = findForkPoint(conversationEntries, parentAssistantIds);
 
   if (forkPoint === -1) {
-    return { messages: [], documentId: `session:${header.id}`, warning: "No new content in fork" };
+    return { messages: [], documentId: header.id, warning: "No new content in fork" };
   }
 
   // Walk backward in conversationEntries to find the previous user message
@@ -313,7 +313,7 @@ function buildForkedMessages(
 
   return {
     messages,
-    documentId: `session:${header.id}`,
+    documentId: header.id,
   };
 }
 
