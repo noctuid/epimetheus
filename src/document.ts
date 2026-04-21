@@ -5,7 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { HindsightConfig, RetainContent, ToolFilter } from "./config";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
-import { extractTextFromContent, truncate } from "./utils";
+import { extractParentSessionId, extractTextFromContent, truncate } from "./utils";
 
 export interface SessionHeader {
   type: "session";
@@ -240,7 +240,18 @@ export function buildMessageArrayFromSession(
   config: HindsightConfig
 ): { messages: object[]; documentId: string; warning?: string } {
   const { header, entries } = parseSessionFile(sessionPath);
+  return buildMessageArrayFromParsedSession(header, entries, config);
+}
 
+/**
+ * Build an array of formatted messages from pre-parsed session data.
+ * Uses fork detection if the session has a parent.
+ */
+export function buildMessageArrayFromParsedSession(
+  header: SessionHeader,
+  entries: SessionEntry[],
+  config: HindsightConfig
+): { messages: object[]; documentId: string; warning?: string } {
   // Check parentSession BEFORE filtering
   if (header.parentSession) {
     try {
@@ -312,7 +323,7 @@ function buildForkedMessages(
 export function buildDocumentTags(
   header: SessionHeader,
   config: HindsightConfig,
-  options?: { storeMethod?: "auto" | "tool"; sessionTags?: string[] }
+  options?: { storeMethod?: "auto" | "tool"; sessionTags?: string[]; parentSessionId?: string }
 ): string[] {
   const tags = [
     ...config.constantTags,
@@ -323,22 +334,15 @@ export function buildDocumentTags(
 
   // Add parent tag - parent session ID if forked, otherwise self
   if (header.parentSession) {
-    // Read parent session file to get the actual ID
-    let parentId: string | undefined;
-    try {
-      if (existsSync(header.parentSession)) {
-        const { header: parentHeader } = parseSessionFile(header.parentSession);
-        parentId = parentHeader.id;
-      }
-    } catch {
-      // Ignore errors
-    }
-    // Fallback: extract from path
-    if (!parentId) {
+    // Use provided parent ID if available, otherwise extract from parent session file
+    const parentId = options?.parentSessionId ?? extractParentSessionId(header.parentSession);
+    if (parentId) {
+      tags.push(`parent:${parentId}`);
+    } else {
+      // Last resort: extract UUID from path
       const match = header.parentSession.match(/([a-f0-9-]{36})\.jsonl$/);
-      parentId = match ? match[1] : header.parentSession;
+      tags.push(`parent:${match ? match[1] : header.parentSession}`);
     }
-    tags.push(`parent:${parentId}`);
   } else {
     tags.push(`parent:${header.id}`);
   }
@@ -367,5 +371,22 @@ export function getHindsightContext(
 
   // Fall back to first user message
   const { entries } = parseSessionFile(sessionPath);
+  return truncateSessionTitle(entries, config);
+}
+
+/**
+ * Get context string from pre-parsed session entries.
+ * Prefers session name if provided, otherwise falls back to first user message.
+ */
+export function getHindsightContextFromEntries(
+  entries: SessionEntry[],
+  config: HindsightConfig,
+  sessionName?: string
+): string {
+  // Prefer session name if provided
+  if (sessionName) {
+    return truncate(config.hindsightContextPrefix + sessionName, config.hindsightContextMaxLength);
+  }
+
   return truncateSessionTitle(entries, config);
 }

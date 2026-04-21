@@ -37,6 +37,20 @@ export interface EntityInput {
 
 export type MemoryType = "world" | "experience" | "observation";
 
+/** Observation scopes for controlling how observations are consolidated. */
+export type ObservationScopes =
+  | "per_tag"
+  | "combined"
+  | "all_combinations"
+  | string[][]
+  | null;
+
+/** Placeholder patterns supported in observation_scopes arrays. */
+const SCOPE_PLACEHOLDERS: Record<string, string> = {
+  "{session}": "session",
+  "{parent}": "parent",
+};
+
 export interface HindsightConfig {
   enabled: boolean;
   apiUrl: string;
@@ -62,6 +76,7 @@ export interface HindsightConfig {
   flushOnCompact: boolean;
   retainSessionsByDefault: boolean;
   entities: EntityInput[];
+  observationScopes: ObservationScopes;
   statusHealthy: string;
   statusUnhealthy: string;
 }
@@ -104,6 +119,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
   flushOnCompact: false,
   retainSessionsByDefault: true,
   entities: [],
+  observationScopes: null,
   statusHealthy: "🧠",
   statusUnhealthy: "🤯",
 };
@@ -134,6 +150,7 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "flushOnCompact",
   "retainSessionsByDefault",
   "entities",
+  "observationScopes",
   "statusHealthy",
   "statusUnhealthy",
 ]);
@@ -403,6 +420,48 @@ function setConfigValue(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (config as any)[key] = {};
       return;
+    case "observationScopes": {
+      if (value === null || value === undefined || value === "") {
+        config[key] = null;
+        return;
+      }
+      if (typeof value === "string") {
+        // Could be a preset string or JSON string (from env var or config file)
+        const presetValues = ["per_tag", "combined", "all_combinations"];
+        if (presetValues.includes(value)) {
+          config[key] = value as ObservationScopes;
+          return;
+        }
+        // Try parsing as JSON (for arrays or null)
+        try {
+          const parsed = JSON.parse(value);
+          if (parsed === null) {
+            config[key] = null;
+            return;
+          }
+          const validated = validateObservationScopes(parsed);
+          if (validated !== undefined) {
+            config[key] = validated;
+            return;
+          }
+          config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
+          return `observationScopes: invalid value. Expected "per_tag", "combined", "all_combinations", an array of tag arrays, or null.`;
+        } catch {
+          config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
+          return `observationScopes contains invalid JSON. Using default.`;
+        }
+      }
+      // Non-string value (from config file)
+      {
+        const validated = validateObservationScopes(value);
+        if (validated !== undefined) {
+          config[key] = validated;
+          return;
+        }
+        config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
+        return `observationScopes: invalid value. Expected "per_tag", "combined", "all_combinations", an array of tag arrays, or null.`;
+      }
+    }
     case "apiUrl":
     case "apiKey":
     case "bankId":
@@ -418,6 +477,77 @@ function setConfigValue(
       throw new Error(`Unexpected config key: ${_exhaustive}`);
     }
   }
+}
+
+/**
+ * Validate an observation_scopes value.
+ * Returns the validated value or undefined if invalid.
+ */
+function validateObservationScopes(value: unknown): ObservationScopes | undefined {
+  if (value === null) return null;
+  if (typeof value === "string") {
+    const presetValues: string[] = ["per_tag", "combined", "all_combinations"];
+    if (presetValues.includes(value)) return value as ObservationScopes;
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return undefined; // Empty top-level array is invalid
+    // Must be string[][] (array of arrays of strings)
+    for (const inner of value) {
+      if (!Array.isArray(inner)) return undefined;
+      if (inner.length === 0) return undefined; // Empty inner array is invalid
+      for (const item of inner) {
+        if (typeof item !== "string") return undefined;
+      }
+    }
+    return value as string[][];
+  }
+  return undefined;
+}
+
+/**
+ * Check if observation_scopes array tags contain placeholder patterns
+ * that aren't exact matches. Returns warning messages.
+ */
+function checkScopePlaceholderWarnings(scopes: string[][]): string[] {
+  const warnings: string[] = [];
+  const placeholderPatterns = Object.keys(SCOPE_PLACEHOLDERS);
+  for (const group of scopes) {
+    for (const tag of group) {
+      for (const placeholder of placeholderPatterns) {
+        if (tag !== placeholder && tag.includes(placeholder)) {
+          warnings.push(
+            `observationScopes: tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. ["${placeholder}"] not "${tag}")`
+          );
+        }
+      }
+    }
+  }
+  return warnings;
+}
+
+/**
+ * Expand placeholder patterns in observation_scopes arrays.
+ * E.g. ["{session}"] -> ["session:<sessionId>"], ["{parent}"] -> ["parent:<parentId>"]
+ * Only applies to string[][] (custom scope groups), not preset strings like "per_tag".
+ * Only exact placeholder matches are expanded (e.g. "{session}" but not "{session}:extra").
+ */
+export function expandScopePlaceholders(
+  scopes: ObservationScopes,
+  params: { sessionId: string; parentSessionId?: string }
+): ObservationScopes {
+  if (scopes === null || typeof scopes === "string") return scopes;
+
+  return scopes.map((group) =>
+    group.map((tag) => {
+      const prefix = SCOPE_PLACEHOLDERS[tag];
+      if (prefix) {
+        const id = prefix === "parent" ? (params.parentSessionId ?? params.sessionId) : params.sessionId;
+        return `${prefix}:${id}`;
+      }
+      return tag;
+    })
+  );
 }
 
 export function loadConfig(extensionsDir?: string): {
@@ -503,6 +633,7 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_STRIP: "strip",
     PI_HINDSIGHT_TOOL_FILTER: "toolFilter",
     PI_HINDSIGHT_ENTITIES: "entities",
+    PI_HINDSIGHT_OBSERVATION_SCOPES: "observationScopes",
     PI_HINDSIGHT_STATUS_HEALTHY: "statusHealthy",
     PI_HINDSIGHT_STATUS_UNHEALTHY: "statusUnhealthy",
   };
@@ -615,6 +746,41 @@ export function validateConfig(config: HindsightConfig): {
     const unique = new Set(config.recallTypes);
     if (unique.size !== config.recallTypes.length) {
       errors.push("recallTypes contains duplicate values");
+    }
+  }
+
+  // Validate observationScopes
+  if (config.observationScopes !== null) {
+    if (typeof config.observationScopes === "string") {
+      const validPresets = ["per_tag", "combined", "all_combinations"];
+      if (!validPresets.includes(config.observationScopes)) {
+        errors.push(`observationScopes: invalid preset "${config.observationScopes}". Expected "per_tag", "combined", or "all_combinations"`);
+      }
+    } else if (Array.isArray(config.observationScopes)) {
+      if (config.observationScopes.length === 0) {
+        errors.push("observationScopes: array must not be empty");
+      }
+      for (let i = 0; i < config.observationScopes.length; i++) {
+        const group = config.observationScopes[i];
+        if (!Array.isArray(group)) {
+          errors.push(`observationScopes[${i}]: must be an array of strings`);
+        } else if (group.length === 0) {
+          errors.push(`observationScopes[${i}]: must not be empty`);
+        } else {
+          for (let j = 0; j < group.length; j++) {
+            if (typeof group[j] !== "string") {
+              errors.push(`observationScopes[${i}][${j}]: must be a string`);
+            }
+          }
+        }
+      }
+      // Warn on non-exact placeholder usage
+      const placeholderWarnings = checkScopePlaceholderWarnings(config.observationScopes);
+      for (const w of placeholderWarnings) {
+        warnings.push(w);
+      }
+    } else {
+      errors.push("observationScopes: must be null, a preset string, or an array of tag arrays");
     }
   }
 
