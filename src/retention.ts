@@ -2,8 +2,10 @@
  * Retention handling for pi message events.
  */
 
+import type { MemoryItemInput } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "./client";
-import type { HindsightConfig } from "./config";
+import type { HindsightConfig, ObservationScopes } from "./config";
+import { expandScopePlaceholders } from "./config";
 import { getHindsightMeta } from "./meta";
 import type { ToolQueueEntry } from "./queue";
 import {
@@ -18,6 +20,8 @@ import { truncate } from "./utils";
 /**
  * Queue a tool retain entry with complete tags.
  * Tags are built at queue time to capture the session context when retained.
+ * Observation scopes are captured from config at queue time
+ * (not settable by the LLM - re-evaluate if want it to be manually settable).
  * Returns true on success, false on failure.
  */
 export function queueToolRetain(
@@ -27,7 +31,7 @@ export function queueToolRetain(
   metadata: Record<string, string> | undefined,
   sessionCwd: string,
   parentSessionId: string | undefined,
-  config: Pick<HindsightConfig, "constantTags">,
+  config: Pick<HindsightConfig, "constantTags" | "observationScopes">,
   sessionTags?: string[]
 ): boolean {
   // Build complete tags at queue time
@@ -41,12 +45,21 @@ export function queueToolRetain(
     ...(sessionTags ?? []),
   ];
 
+  // Expand placeholders in observation scopes at queue time
+  const expandedScopes = config.observationScopes
+    ? expandScopePlaceholders(config.observationScopes, {
+        sessionId,
+        parentSessionId,
+      })
+    : undefined;
+
   const entry: ToolQueueEntry = {
     content,
     tags,
     metadata,
     timestamp: new Date().toISOString(),
     store_method: "tool",
+    ...(expandedScopes ? { observation_scopes: expandedScopes } : {}),
   };
   return enqueueToolMessage(sessionId, entry);
 }
@@ -92,6 +105,14 @@ export async function flushAutoQueue(
   // Concatenate all entries into single content array
   const contentItems = autoEntries.map((entry) => entry.entry);
 
+  // Expand placeholders in observation scopes
+  const expandedScopes = config.observationScopes
+    ? expandScopePlaceholders(config.observationScopes, {
+        sessionId,
+        parentSessionId,
+      })
+    : undefined;
+
   const result = await client.retain(
     {
       content: JSON.stringify(contentItems),
@@ -101,6 +122,7 @@ export async function flushAutoQueue(
       timestamp: sessionStartTime,
       tags,
       entities: config.entities.length > 0 ? config.entities : undefined,
+      observationScopes: expandedScopes,
     },
     signal
   );
@@ -130,7 +152,15 @@ export async function flushToolQueue(
     return { success: true, count: 0 };
   }
 
-  const result = await client.retainBatch(entries, signal);
+  const items: MemoryItemInput[] = entries.map((entry) => ({
+    content: entry.content,
+    tags: entry.tags,
+    metadata: entry.metadata,
+    observation_scopes: entry.observation_scopes,
+    timestamp: entry.timestamp,
+  }));
+
+  const result = await client.retainBatch(items, signal);
 
   if (result.success) {
     deleteToolQueue(sessionId);

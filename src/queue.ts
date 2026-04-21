@@ -12,6 +12,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from 
 import { join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
+import type { ObservationScopes } from "./config";
+
 /**
  * Queue entry for auto-queued messages from message_end events.
  */
@@ -34,6 +36,8 @@ export type ToolQueueEntry = {
   /** When the entry was queued (ISO 8601) */
   timestamp: string;
   store_method: "tool";
+  /** Omitted when config observationScopes is null (meaning use Hindsight default) */
+  observation_scopes?: Exclude<ObservationScopes, null>;
 };
 
 /**

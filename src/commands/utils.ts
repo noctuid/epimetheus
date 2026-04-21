@@ -7,11 +7,11 @@ import { join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
-import type { HindsightConfig } from "../config";
-import { buildDocumentTags, buildMessageArrayFromSession, getHindsightContext, parseSessionFile } from "../document";
+import { expandScopePlaceholders, type HindsightConfig } from "../config";
+import { buildDocumentTags, buildMessageArrayFromParsedSession, getHindsightContextFromEntries, parseSessionFile } from "../document";
 import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
 import { deleteAutoQueue, deleteToolQueue } from "../queue";
-import { getSessionDisplayName } from "../utils";
+import { extractParentSessionId, getSessionDisplayName } from "../utils";
 
 /** Result of parsing a session file for subcommand handlers. */
 export interface ParsedSessionResult {
@@ -23,6 +23,8 @@ export interface ParsedSessionResult {
     timestamp: string;
     messages: object[];
     parsedAt: string;
+    sessionId: string;
+    parentSessionId?: string;
   };
   /** Path where the parsed session file was written on disk. */
   outputPath: string;
@@ -46,16 +48,14 @@ export function parseCurrentSession(
   }
 
   const { header, entries: originalEntries } = parseSessionFile(sessionFile);
-  const { messages, documentId, warning } = buildMessageArrayFromSession(sessionFile, config);
+  const { messages, documentId, warning } = buildMessageArrayFromParsedSession(header, originalEntries, config);
 
-  // If no messages, include the specific warning if available (e.g. fork issues)
-  if (messages.length === 0) {
-    return warning ?? "No messages to parse";
-  }
-
-  // If there are messages but also a warning, return the warning
   if (warning) {
     return warning;
+  }
+
+  if (messages.length === 0) {
+    return "No messages to parse";
   }
 
   // Check retention state
@@ -71,10 +71,9 @@ export function parseCurrentSession(
     ctx.sessionManager.getEntries.bind(ctx.sessionManager)
   );
 
-  const tags = buildDocumentTags(header, config, { sessionTags });
-  const context = getHindsightContext(sessionFile, config, sessionName);
-
-  // Build the parsed session output
+  const parentSessionId = extractParentSessionId(header.parentSession);
+  const tags = buildDocumentTags(header, config, { sessionTags, parentSessionId });
+  const context = getHindsightContextFromEntries(originalEntries, config, sessionName);
   const parsedSession = {
     documentId,
     context,
@@ -82,6 +81,8 @@ export function parseCurrentSession(
     timestamp: header.timestamp,
     messages,
     parsedAt: new Date().toISOString(),
+    sessionId: header.id,
+    parentSessionId,
   };
 
   // Write parsed session to disk for later review
@@ -107,10 +108,20 @@ export async function upsertToHindsight(
     context: string;
     timestamp: string;
     tags: string[];
+    sessionId: string;
+    parentSessionId?: string;
   },
   config: HindsightConfig,
   signal?: AbortSignal
 ): Promise<void> {
+  // Expand placeholders in observation scopes
+  const expandedScopes = config.observationScopes
+    ? expandScopePlaceholders(config.observationScopes, {
+        sessionId: params.sessionId,
+        parentSessionId: params.parentSessionId,
+      })
+    : undefined;
+
   const result = await client.retain(
     {
       content: params.content,
@@ -120,6 +131,7 @@ export async function upsertToHindsight(
       tags: params.tags,
       updateMode: "replace",
       entities: config.entities.length > 0 ? config.entities : undefined,
+      observationScopes: expandedScopes,
     },
     signal
   );
@@ -164,6 +176,8 @@ export async function parseAndUpsertSession(
       context: parsedSession.context,
       timestamp: parsedSession.timestamp,
       tags: parsedSession.tags,
+      sessionId: parsedSession.sessionId,
+      parentSessionId: parsedSession.parentSessionId,
     },
     config,
     ctx.signal

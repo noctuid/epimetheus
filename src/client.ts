@@ -11,7 +11,7 @@ import {
   type RecallResponse,
   type ReflectResponse,
 } from "@vectorize-io/hindsight-client";
-import type { HindsightConfig } from "./config";
+import type { HindsightConfig, ObservationScopes } from "./config";
 
 export interface RetainOptions {
   content: string;
@@ -22,6 +22,8 @@ export interface RetainOptions {
   documentId?: string;
   updateMode?: "replace" | "append";
   entities?: EntityInput[];
+  /** Observation scopes for controlling how observations are consolidated. */
+  observationScopes?: ObservationScopes;
 }
 
 export interface RecallOptions {
@@ -119,6 +121,9 @@ export class HindsightClientWrapper {
 
   /**
    * Retain content with timeout and optional abort signal.
+   * Always uses retainBatch internally since the SDK's retain() doesn't support
+   * the observation_scopes parameter.
+   * TODO: Switch to SDK's retain() when it supports observation_scopes.
    */
   async retain(
     options: RetainOptions,
@@ -126,15 +131,24 @@ export class HindsightClientWrapper {
     timeoutMs: number = 30000
   ): Promise<{ success: boolean; error?: string }> {
     try {
+      const item: MemoryItemInput = {
+        content: options.content,
+        tags: options.tags,
+        metadata: options.metadata,
+        document_id: options.documentId,
+        update_mode: options.updateMode,
+        entities: options.entities,
+        // null (config default) is not valid for the SDK; convert to undefined
+        observation_scopes: options.observationScopes ?? undefined,
+      };
+      if (options.timestamp) {
+        item.timestamp = new Date(options.timestamp);
+      }
+      if (options.context) {
+        item.context = options.context;
+      }
       await this.withTimeout(
-        this.client.retain(this.config.bankId, options.content, {
-          timestamp: options.timestamp ? new Date(options.timestamp) : undefined,
-          context: options.context,
-          tags: options.tags,
-          metadata: options.metadata,
-          documentId: options.documentId,
-          updateMode: options.updateMode,
-          entities: options.entities,
+        this.client.retainBatch(this.config.bankId, [item], {
           async: true,
         }),
         timeoutMs,

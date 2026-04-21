@@ -299,6 +299,43 @@ Or via environment variable as a JSON string:
 export PI_HINDSIGHT_ENTITIES='[{"text":"John","type":"PERSON"}]'
 ```
 
+### `observationScopes`
+Controls how observations are scoped during consolidation. When `null` (default), Hindsight uses its default of `"combined"` (a single consolidation pass with all tags together).
+
+**Presets:**
+- `"per_tag"` — One consolidation pass per individual tag, creating separate observations for each tag
+- `"combined"` — A single pass with all tags together (Hindsight default)
+- `"all_combinations"` — One pass per unique combination of tags
+
+**Custom scope groups:** An array of tag arrays, where each inner array defines a group of tags for one consolidation pass. This gives full control over which tag combinations produce separate observations.
+
+**Placeholder expansion:** In custom scope groups, `{session}` expands to `session:<sessionId>` and `{parent}` expands to `parent:<parentId>` at retain time. Placeholders must be used as standalone tags — e.g. `["{session}"]` not `["{session}:extra"]`. Non-exact placeholder usage will produce a config warning. This is useful for creating per-session or per-conversation-thread observation scopes.
+
+Example — Create separate observation scopes for user, assistant, session, and parent conversation thread:
+```jsonc
+{
+  "observationScopes": [
+    ["user:alice"],           // observations scoped to alice's facts
+    ["assistant:code"],       // observations scoped to specific assistant
+    ["{session}"],            // expands to session:<id> — per-session observations
+    ["{parent}"]              // expands to parent:<id> — cross fork observations
+  ]
+}
+```
+
+This would create four consolidation passes, each producing its own set of observations:
+1. One for facts specific to user `alice`
+2. One for facts specific to assistant `code`
+3. One for the current session's observations
+4. One for the full parent thread context
+
+Or via environment variable as a JSON string:
+```bash
+export PI_HINDSIGHT_OBSERVATION_SCOPES='[["session:abc","user:alice"],["project:foo"]]'
+```
+
+Note: This is currently a config-only setting and not exposed as a parameter on the `hindsight_retain` tool. The configured scope applies to all retains (both auto and tool-initiated).
+
 ### Examples
 
 **Keep only user and assistant text messages (no tool calls/results):**
@@ -359,6 +396,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_STRIP` | `strip` | StripConfig (JSON) | *(see strip default)* |
 | `PI_HINDSIGHT_TOOL_FILTER` | `toolFilter` | ToolFilter (JSON) | *(see toolFilter default)* |
 | `PI_HINDSIGHT_ENTITIES` | `entities` | EntityInput[] (JSON) | `[]` |
+| `PI_HINDSIGHT_OBSERVATION_SCOPES` | `observationScopes` | ObservationScopes (JSON or preset string) | `null` |
 | `PI_HINDSIGHT_STATUS_HEALTHY` | `statusHealthy` | string | `"🧠"` |
 | `PI_HINDSIGHT_STATUS_UNHEALTHY` | `statusUnhealthy` | string | `"🤯"` |
 
@@ -444,7 +482,7 @@ There are multiple other Hindsight integrations for Pi:
 | **Tools** |
 | `hindsight_recall` | ✅ | ✅ | ✅ | ✅⁹ |
 | `hindsight_retain` | ✅ | ✅ | ✅ | ✅ |
-| `hindsight_retain` with scope param | *(planned)* | ❌ | ✅ | ❌ |
+| `hindsight_retain` with scope param | ✅ (config) | ❌ | ✅ | ❌ |
 | `hindsight_reflect` | ✅ | ✅ | ✅ | ✅¹⁰ |
 | `hindsight_bank_profile` | ❌ | ❌ | ❌ | ✅ |
 | **Legacy Support** |
@@ -531,7 +569,6 @@ For the retain mission, you may want to experiment with including something like
 # Caveats
 - This plugin is still in flux and may have breaking changes
 - Depending on your workflow with `/tree` and what you expect to be retained, this package may not play well (all new messages and session file content will be retained). Also see rewind/rollback information below
-- Currently missing observation scopes
 - Currently the only flush options are manual or on session event
 
 # Known Package Interactions
