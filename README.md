@@ -399,6 +399,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_OBSERVATION_SCOPES` | `observationScopes` | ObservationScopes (JSON or preset string) | `null` |
 | `PI_HINDSIGHT_STATUS_HEALTHY` | `statusHealthy` | string | `"🧠"` |
 | `PI_HINDSIGHT_STATUS_UNHEALTHY` | `statusUnhealthy` | string | `"🤯"` |
+</details>
 
 # Additional Details
 ## Memory Context Fencing
@@ -493,18 +494,31 @@ There are multiple other Hindsight integrations for Pi:
 | Health/doctor diagnostic command | ❌ | ❌ | ❌ | ✅ |
 
 > **Notes:**
+>
 > ¹ hindsight-pi builds per-turn summaries with `[user]`/`[assistant]` sections (plaintext), not raw JSON messages.
+>
 > ² hindsight-pi supports `async`/`turn`/`session`/integer-N write frequencies via `WriteScheduler`.
+>
 > ³ Uses `~/.hindsight/config.json` (global) + `.hindsight/config.json` (local), not JSONC.
+>
 > ⁴ Injects into the system prompt each turn (or on first turn only if `injectionFrequency: "first-turn"`), which breaks prompt caching by default.
+>
 > ⁵ Anti-pattern: recall is fast and should be queried fresh based on the current user prompt each turn, not cached. Caching serves the wrong results when the query changes and adds unnecessary complexity.
+>
 > ⁶ Integrates with multiple separate Hindsight server instances in a single session. I am not sure what the use case is for this.
+>
 > ⁷ This plugin supports per-session opt-out via `/hindsight toggle-retain` instead of `#nomem` hashtag-based opt-out. See [Design Decisions](#design-decisions).
+>
 > ⁸ anh-chu derives `project-{dirname}` from cwd basename (simple, collision-prone). hindsight-pi supports git remote, branch, and per-directory hash strategies.
+>
 > ⁹ Named `hindsight_search` in hindsight-pi.
+>
 > ¹⁰ Named `hindsight_context` in hindsight-pi (uses Hindsight's reflect API with dynamic reasoning budget).
+>
 > ¹¹ Queues messages to disk instead, which prevents data loss if Hindsight is down and allows deferring/reprocessing later. See [Design Decisions](#design-decisions).
+>
 > ¹² Credential sanitization can't perfectly detect all secrets and risks giving a false sense of safety. It's better prevented at the source — e.g., use [gondolin with secret injection](https://earendil-works.github.io/gondolin/secrets/) or manually remove sensitive fields. If you run memory locally, the risk is lower; if a secret already made it into the session file, it was already sent to your LLM provider, so rotating the credential is the safe move.
+>
 > ¹³ anh-chu and pi-less-shitty use hardcoded `OPERATIONAL_TOOLS` lists to exclude certain tool calls from plaintext transcripts (not configurable). This plugin uses the configurable `toolFilter` with per-category include/exclude lists, and retains JSON (not plaintext) so tool results can also be selectively included.
 
 > **Note:** This comparison table was AI-generated. If anything is incorrect or outdated, please open a PR. I'm only 100% sure of the current features of my own plugin.
@@ -605,4 +619,4 @@ The commands to show the status, config, popup, and recall display in the UI (wh
 
 The automated tests have not been reviewed properly. I'm sure there are also bugs that I have not caught. Any feedback is welcome here, but one major advantage of this plugin is that **you can easily verify the queue and parsed session files are as expected yourself** before retention, and then you can verify that the documents and tags are as expected after retention. You can also verify for yourself that you are still getting cached reads.
 
-Long term, I plan to focus on ensuring this extension is robust and bug-free. The primary reason I am making this extension myself is to make sure every aspect works correctly after finding issues with a lot of integrations for other memory systems or harnesses. Correctness matters too much for memory to not review the code.
+Long term, I plan to focus on ensuring this extension is robust and bug-free. The primary reason I am making this extension myself is to make sure every aspect works correctly after finding issues with a lot of integrations for other memory systems or harnesses. Correctness matters too much for memory to not review the code (at least in the current month).
