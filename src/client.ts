@@ -140,13 +140,9 @@ export class HindsightClientWrapper {
         entities: options.entities,
         // null (config default) is not valid for the SDK; convert to undefined
         observation_scopes: options.observationScopes ?? undefined,
+        timestamp: options.timestamp,
+        context: options.context,
       };
-      if (options.timestamp) {
-        item.timestamp = new Date(options.timestamp);
-      }
-      if (options.context) {
-        item.context = options.context;
-      }
       await this.withTimeout(
         this.client.retainBatch(this.config.bankId, [item], {
           async: true,
