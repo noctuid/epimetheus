@@ -185,6 +185,9 @@ export function createUpsertAllParsedSubcommand(
 
         try {
           const parsed = JSON.parse(readFileSync(parsedPath, "utf8"));
+          if (!parsed.messages || !parsed.documentId) {
+            throw new Error("Invalid session format: missing required fields");
+          }
           await upsertToHindsight(
             client,
             {
@@ -207,14 +210,17 @@ export function createUpsertAllParsedSubcommand(
         }
       }
 
+      const aborted = ctx.signal?.aborted;
+      const abortNote = aborted ? " (operation cancelled — partial results)" : "";
+
       if (failCount === 0) {
-        ctx.ui.notify(`Successfully upserted ${successCount} sessions`, "info");
+        ctx.ui.notify(`Successfully upserted ${successCount} sessions${abortNote}`, "info");
       } else {
         console.error("pi-hindsight: Upsert errors:", errors.join("; "));
         const sampleErrors = errors.slice(0, 3).join("; ");
         const suffix = errors.length > 3 ? `; and ${errors.length - 3} more` : "";
         ctx.ui.notify(
-          `Upserted ${successCount} sessions, ${failCount} failed (${sampleErrors}${suffix})`,
+          `Upserted ${successCount} sessions, ${failCount} failed (${sampleErrors}${suffix})${abortNote}`,
           "error"
         );
       }

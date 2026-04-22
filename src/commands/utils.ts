@@ -161,13 +161,6 @@ export async function parseAndUpsertSession(
 
   const { parsedSession } = result;
 
-  // Clear queued messages to prevent duplication — the full session was just upserted
-  const sessionId = ctx.sessionManager.getSessionId();
-  if (sessionId) {
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
-  }
-
   await upsertToHindsight(
     client,
     {
@@ -182,6 +175,10 @@ export async function parseAndUpsertSession(
     config,
     ctx.signal
   );
+
+  // Clear queued messages to prevent duplication — the full session was just upserted
+  deleteAutoQueue(parsedSession.sessionId);
+  deleteToolQueue(parsedSession.sessionId);
 
   return `Parsed and upserted ${parsedSession.messages.length} messages`;
 }

@@ -112,7 +112,7 @@ Create a basic `~/.pi/agent/extensions/pi-hindsight/config.jsonc`:
   "apiUrl": "http://127.0.0.1:9100",
   "apiKey": "unused",
   "bankId": "default",
-  // read over traedoffs before enabling
+  // read over tradeoffs before enabling
   "recallPersist": true,
   "recallDisplay": true
 }
@@ -590,7 +590,7 @@ For the retain mission, you may want to experiment with including something like
 [pi-subagents](https://github.com/tintinweb/pi-subagents) does not affect the session file. This plugin is good to use for anything you *don't* want extracted except for the final output/summary (e.g. long web search dump).
 
 ## rewind/rollback
-Untested, I need to look into how these packages affect the session file. If they don't actually delete old entries from the session file
+Rollback with checkpoint extensions is untested. It may require code changes to include rollback information/messages. I think it makes sense to include the rollback information in memories (what happened? why was it necessary?), so I won't support actually removing messages from before the rollback in the final ingested document.
 
 # FAQ
 ## Why did you make this when there is already a pi-hindsight?

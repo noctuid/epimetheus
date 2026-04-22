@@ -177,7 +177,15 @@ function parseJsonArray(
   if (value === undefined) return { value: defaultValue };
   try {
     const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return { value: parsed };
+    if (Array.isArray(parsed)) {
+      if (parsed.every((item) => typeof item === "string")) {
+        return { value: parsed };
+      }
+      return {
+        value: defaultValue,
+        warning: `${fieldName} must be a JSON array of strings. Using default.`,
+      };
+    }
     return {
       value: defaultValue,
       warning: `${fieldName} must be a JSON array, got ${typeof parsed}. Using default.`,
@@ -284,8 +292,9 @@ function setConfigValue(
         config[key] = result.value;
         return result.warning;
       }
-      config[key] = DEFAULT_CONFIG[key];
-      return;
+      const result = parseBudget(String(value), DEFAULT_CONFIG[key] as Budget);
+      config[key] = result.value;
+      return result.warning ?? `autoRecallBudget must be a string, got ${typeof value}. Using default.`;
     }
     case "hindsightContextMaxLength":
     case "recallMaxQueryChars": {
@@ -338,15 +347,29 @@ function setConfigValue(
     }
     case "entities": {
       if (Array.isArray(value)) {
-        config[key] = value;
-        return;
+        const valid = value.every(
+          (e) => typeof e === "object" && e !== null && typeof (e as Record<string, unknown>).text === "string"
+        );
+        if (valid) {
+          config[key] = value;
+          return;
+        }
+        config[key] = DEFAULT_CONFIG[key];
+        return "entities must be an array of objects with a string 'text' property; using default.";
       }
       // String value from env var - parse and check for warning
       try {
         const parsed = JSON.parse(String(value));
         if (Array.isArray(parsed)) {
-          config[key] = parsed;
-          return;
+          const valid = parsed.every(
+            (e: unknown) => typeof e === "object" && e !== null && typeof (e as Record<string, unknown>).text === "string"
+          );
+          if (valid) {
+            config[key] = parsed;
+            return;
+          }
+          config[key] = DEFAULT_CONFIG[key];
+          return "entities must be an array of objects with a string 'text' property; using default.";
         }
         config[key] = DEFAULT_CONFIG[key];
         return `entities must be a JSON array, got ${typeof parsed}. Using default.`;
@@ -408,17 +431,15 @@ function setConfigValue(
             return;
           }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (config as any)[key] = {};
+          (config as any)[key] = structuredClone(DEFAULT_CONFIG[key]);
           return `toolFilter must be a JSON object, got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed}. Using default.`;
         } catch {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (config as any)[key] = {};
+          (config as any)[key] = structuredClone(DEFAULT_CONFIG[key]);
           return "toolFilter contains invalid JSON. Using default.";
         }
       }
-      // null or undefined - use empty (no filtering)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (config as any)[key] = {};
+      // null or undefined - keep default (consistent with retainContent/strip)
       return;
     case "observationScopes": {
       if (value === null || value === undefined || value === "") {

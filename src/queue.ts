@@ -170,7 +170,8 @@ export function readToolQueue(sessionId: string): ToolQueueEntry[] {
         typeof parsed === "object" &&
         parsed !== null &&
         parsed.store_method === "tool" &&
-        typeof parsed.content === "string"
+        typeof parsed.content === "string" &&
+        typeof parsed.timestamp === "string"
       ) {
         entries.push(parsed as ToolQueueEntry);
       } else {

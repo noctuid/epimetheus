@@ -16,7 +16,6 @@ export function truncate(str: string, maxChars: number): string {
   if (maxChars <= 0) return str;
   const chars = [...str]; // Splits by code point
   if (chars.length <= maxChars) return str;
-  if (maxChars < 1) return chars.slice(0, maxChars).join("");
   return `${chars.slice(0, maxChars - 1).join("")}…`;
 }
 

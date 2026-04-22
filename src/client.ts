@@ -89,8 +89,9 @@ export class HindsightClientWrapper {
       }
     }
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
-      const timeoutId = setTimeout(() => {
+      timeoutId = setTimeout(() => {
         timedOut = true;
         controller.abort();
       }, timeoutMs);
@@ -99,7 +100,6 @@ export class HindsightClientWrapper {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
       if (response.ok) {
         return { success: true };
       }
@@ -113,6 +113,7 @@ export class HindsightClientWrapper {
       }
       return { success: false, error: e instanceof Error ? e.message : String(e) };
     } finally {
+      clearTimeout(timeoutId!);
       if (abortHandler) {
         signal?.removeEventListener("abort", abortHandler);
       }
