@@ -14,9 +14,7 @@ export interface RetainContent {
   toolResult: "text"[];
 }
 
-export type ToolFilterMode =
-  | { include: string[] }
-  | { exclude: string[] };
+export type ToolFilterMode = { include: string[] } | { exclude: string[] };
 
 export interface ToolFilter {
   toolCall?: ToolFilterMode;
@@ -38,12 +36,7 @@ export interface EntityInput {
 export type MemoryType = "world" | "experience" | "observation";
 
 /** Observation scopes for controlling how observations are consolidated. */
-export type ObservationScopes =
-  | "per_tag"
-  | "combined"
-  | "all_combinations"
-  | string[][]
-  | null;
+export type ObservationScopes = "per_tag" | "combined" | "all_combinations" | string[][] | null;
 
 /** Placeholder patterns supported in observation_scopes arrays. */
 const SCOPE_PLACEHOLDERS: Record<string, string> = {
@@ -114,7 +107,18 @@ const DEFAULT_CONFIG: HindsightConfig = {
   },
   toolFilter: {
     toolCall: { exclude: ["grep", "find", "ls", "read", "hindsight_retain"] },
-    toolResult: { exclude: ["grep", "find", "ls", "write", "edit", "hindsight_retain", "hindsight_recall", "hindsight_reflect"] },
+    toolResult: {
+      exclude: [
+        "grep",
+        "find",
+        "ls",
+        "write",
+        "edit",
+        "hindsight_retain",
+        "hindsight_recall",
+        "hindsight_reflect",
+      ],
+    },
   },
   flushOnCompact: false,
   retainSessionsByDefault: true,
@@ -294,7 +298,9 @@ function setConfigValue(
       }
       const result = parseBudget(String(value), DEFAULT_CONFIG[key] as Budget);
       config[key] = result.value;
-      return result.warning ?? `autoRecallBudget must be a string, got ${typeof value}. Using default.`;
+      return (
+        result.warning ?? `autoRecallBudget must be a string, got ${typeof value}. Using default.`
+      );
     }
     case "hindsightContextMaxLength":
     case "recallMaxQueryChars": {
@@ -348,7 +354,10 @@ function setConfigValue(
     case "entities": {
       if (Array.isArray(value)) {
         const valid = value.every(
-          (e) => typeof e === "object" && e !== null && typeof (e as Record<string, unknown>).text === "string"
+          (e) =>
+            typeof e === "object" &&
+            e !== null &&
+            typeof (e as Record<string, unknown>).text === "string"
         );
         if (valid) {
           config[key] = value;
@@ -362,7 +371,10 @@ function setConfigValue(
         const parsed = JSON.parse(String(value));
         if (Array.isArray(parsed)) {
           const valid = parsed.every(
-            (e: unknown) => typeof e === "object" && e !== null && typeof (e as Record<string, unknown>).text === "string"
+            (e: unknown) =>
+              typeof e === "object" &&
+              e !== null &&
+              typeof (e as Record<string, unknown>).text === "string"
           );
           if (valid) {
             config[key] = parsed;
@@ -563,7 +575,8 @@ export function expandScopePlaceholders(
     group.map((tag) => {
       const prefix = SCOPE_PLACEHOLDERS[tag];
       if (prefix) {
-        const id = prefix === "parent" ? (params.parentSessionId ?? params.sessionId) : params.sessionId;
+        const id =
+          prefix === "parent" ? (params.parentSessionId ?? params.sessionId) : params.sessionId;
         return `${prefix}:${id}`;
       }
       return tag;
@@ -747,17 +760,23 @@ export function validateConfig(config: HindsightConfig): {
 
     // Check for empty lists
     if (hasInclude && filter.include.length === 0) {
-      errors.push(`toolFilter.${subKey}.include cannot be empty (use exclude instead, or remove the filter)`);
+      errors.push(
+        `toolFilter.${subKey}.include cannot be empty (use exclude instead, or remove the filter)`
+      );
     }
     if (hasExclude && filter.exclude.length === 0) {
-      errors.push(`toolFilter.${subKey}.exclude cannot be empty (use include instead, or remove the filter)`);
+      errors.push(
+        `toolFilter.${subKey}.exclude cannot be empty (use include instead, or remove the filter)`
+      );
     }
 
     // Check for unknown keys
     const allowedKeys = new Set(["include", "exclude"]);
     for (const key of Object.keys(filter)) {
       if (!allowedKeys.has(key)) {
-        errors.push(`toolFilter.${subKey} has unknown key '${key}' (only 'include' and 'exclude' are allowed)`);
+        errors.push(
+          `toolFilter.${subKey} has unknown key '${key}' (only 'include' and 'exclude' are allowed)`
+        );
       }
     }
   }
@@ -775,7 +794,9 @@ export function validateConfig(config: HindsightConfig): {
     if (typeof config.observationScopes === "string") {
       const validPresets = ["per_tag", "combined", "all_combinations"];
       if (!validPresets.includes(config.observationScopes)) {
-        errors.push(`observationScopes: invalid preset "${config.observationScopes}". Expected "per_tag", "combined", or "all_combinations"`);
+        errors.push(
+          `observationScopes: invalid preset "${config.observationScopes}". Expected "per_tag", "combined", or "all_combinations"`
+        );
       }
     } else if (Array.isArray(config.observationScopes)) {
       if (config.observationScopes.length === 0) {

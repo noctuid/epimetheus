@@ -165,7 +165,11 @@ export default function (pi: ExtensionAPI) {
   // 1. Always filter out hindsight-recall messages (prevent old recalls from being sent to LLM)
   // 2. If recallPersist is false, inject recall message (not visible, not persisted, sent to LLM)
   pi.on("context", async (event, ctx: ExtensionContext) => {
-    const messages = event.messages as Array<{ role: string; content?: unknown; customType?: string }>;
+    const messages = event.messages as Array<{
+      role: string;
+      content?: unknown;
+      customType?: string;
+    }>;
 
     // Always filter out existing hindsight-recall messages from the messages array
     // This is critical to prevent old recall messages from being sent to the LLM

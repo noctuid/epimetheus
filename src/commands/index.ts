@@ -12,12 +12,16 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
 import type { RecallMessageDetails } from "../index";
-import { createToggleDisplaySubcommand, createPopupSubcommand } from "./recall";
-import { createToggleRetainSubcommand, createTagSubcommand, createRemoveTagSubcommand } from "./meta";
+import {
+  createRemoveTagSubcommand,
+  createTagSubcommand,
+  createToggleRetainSubcommand,
+} from "./meta";
+import { createPopupSubcommand, createToggleDisplaySubcommand } from "./recall";
 import {
   createFlushSubcommand,
-  createParseSessionSubcommand,
   createParseAndUpsertSessionSubcommand,
+  createParseSessionSubcommand,
   createUpsertAllParsedSubcommand,
 } from "./session";
 import { createConfigSubcommand, createStatusSubcommand } from "./status";
@@ -56,7 +60,11 @@ export function registerCommands(
     "toggle-retain": createToggleRetainSubcommand(pi, client, config),
     tag: createTagSubcommand(pi),
     "remove-tag": createRemoveTagSubcommand(pi),
-    "toggle-display": createToggleDisplaySubcommand(config, getRecallDisplayOverride, setRecallDisplayOverride),
+    "toggle-display": createToggleDisplaySubcommand(
+      config,
+      getRecallDisplayOverride,
+      setRecallDisplayOverride
+    ),
     popup: createPopupSubcommand(getRecallDetails),
     status: createStatusSubcommand(client, config, getRecallDetails),
     config: createConfigSubcommand(config, configMeta),

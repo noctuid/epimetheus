@@ -4,11 +4,16 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import { expandScopePlaceholders, type HindsightConfig } from "../config";
-import { buildDocumentTags, buildMessageArrayFromParsedSession, getHindsightContextFromEntries, parseSessionFile } from "../document";
+import {
+  buildDocumentTags,
+  buildMessageArrayFromParsedSession,
+  getHindsightContextFromEntries,
+  parseSessionFile,
+} from "../document";
 import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
 import { deleteAutoQueue, deleteToolQueue } from "../queue";
 import { extractParentSessionId, getSessionDisplayName } from "../utils";
@@ -48,7 +53,11 @@ export function parseCurrentSession(
   }
 
   const { header, entries: originalEntries } = parseSessionFile(sessionFile);
-  const { messages, documentId, warning } = buildMessageArrayFromParsedSession(header, originalEntries, config);
+  const { messages, documentId, warning } = buildMessageArrayFromParsedSession(
+    header,
+    originalEntries,
+    config
+  );
 
   if (warning) {
     return warning;

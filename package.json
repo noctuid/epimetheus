@@ -13,8 +13,8 @@
     "ci": "bun run check && bun run typecheck && bun test"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "biome": "^0.3.3"
+    "@biomejs/biome": "^2.4.12",
+    "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5",

@@ -5,10 +5,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
-import { getHindsightMeta, shouldSessionBeRetained, type HindsightMeta } from "../meta";
+import { getHindsightMeta, type HindsightMeta, shouldSessionBeRetained } from "../meta";
 import { deleteAutoQueue, deleteToolQueue } from "../queue";
-import { parseAndUpsertSession } from "./utils";
 import type { Subcommand } from "./types";
+import { parseAndUpsertSession } from "./utils";
 
 /**
  * Create the toggle-retain subcommand — toggle whether the current session is retained.

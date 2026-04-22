@@ -4,14 +4,14 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
 import { flushQueues, getQueueCount } from "../retention";
 import { extractParentSessionId, getSessionDisplayName } from "../utils";
-import { parseAndUpsertSession, parseCurrentSession, upsertToHindsight } from "./utils";
 import type { Subcommand } from "./types";
+import { parseAndUpsertSession, parseCurrentSession, upsertToHindsight } from "./utils";
 
 /**
  * Create the flush subcommand — flushes queued messages to Hindsight.

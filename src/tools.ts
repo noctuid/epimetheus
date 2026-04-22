@@ -14,7 +14,12 @@ import { extractParentSessionId } from "./utils";
 // Reusable schemas
 /** Tags match strategy for recall/reflect operations. */
 const TagsMatchSchema = Type.Union(
-  [Type.Literal("any"), Type.Literal("all"), Type.Literal("any_strict"), Type.Literal("all_strict")],
+  [
+    Type.Literal("any"),
+    Type.Literal("all"),
+    Type.Literal("any_strict"),
+    Type.Literal("all_strict"),
+  ],
   {
     description:
       "How to match tags: 'any', 'all', 'any_strict', 'all_strict' (any/all - OR/AND, strict - excludes untagged). Default: 'any'.",
@@ -30,7 +35,8 @@ const MemoryTypeSchema = Type.Union([
 
 /** Budget level for recall/reflect operations. */
 const BudgetSchema = Type.Union([Type.Literal("low"), Type.Literal("mid"), Type.Literal("high")], {
-  description: "Budget level: 'low', 'mid', or 'high'. Controls how much effort to spend on retrieval and reasoning.",
+  description:
+    "Budget level: 'low', 'mid', or 'high'. Controls how much effort to spend on retrieval and reasoning.",
 });
 
 interface RetainDetails {
