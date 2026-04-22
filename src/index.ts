@@ -35,8 +35,17 @@ export default function (pi: ExtensionAPI) {
   const validation = validateConfig(config);
 
   // Global disable check
+  // Note: register a lightweight context handler to filter hindsight-recall
+  // messages even when disabled (prevents stale recalls from reaching the LLM)
   if (!config.enabled) {
     console.log("pi-hindsight disabled via config");
+    pi.on("context", async (event) => {
+      const messages = event.messages as Array<{ customType?: string }>;
+      const filtered = messages.filter((msg) => msg.customType !== "hindsight-recall");
+      if (filtered.length !== messages.length) {
+        return { messages: filtered } as Record<string, unknown>;
+      }
+    });
     return;
   }
 
