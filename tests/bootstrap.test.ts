@@ -482,15 +482,27 @@ describe("real entrypoint bootstrap", () => {
     expect(msg.customType).toBe("hindsight-recall");
   });
 
-  it("before_agent_start handler returns nothing when recallPersist is false", async () => {
+  it("before_agent_start caches recall but does not persist when recallPersist is false", async () => {
     // activeConfig already has recallPersist: false from afterEach reset
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Cached memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
 
     const pi = createMockPi();
     const extension = await import("../src/index");
     extension.default(pi);
 
-    const handler = pi.handlers.get("before_agent_start")!;
-    const ctx = createMockContext({
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const ctxBas = createMockContext({
       sessionManager: {
         ...createMockContext().sessionManager,
         getEntries: mock(() => [
@@ -502,7 +514,268 @@ describe("real entrypoint bootstrap", () => {
       },
     });
 
-    const result = await handler({ type: "before_agent_start" }, ctx);
+    // before_agent_start should NOT return a message (not persisted)
+    const result = await basHandler({ type: "before_agent_start" }, ctxBas);
     expect(result).toBeUndefined();
+
+    // But it should have cached the recall for the context handler to re-inject
+    const contextHandler = pi.handlers.get("context")!;
+    const ctxContext = createMockContext();
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+        ],
+      },
+      ctxContext
+    )) as Record<string, unknown> | undefined;
+
+    expect(contextResult).toBeDefined();
+    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
+    const recallMsg = messages.find((m) => m.customType === "hindsight-recall");
+    expect(recallMsg).toBeDefined();
+    expect(recallMsg?.content).toContain("Cached memory");
+  });
+
+  // ============================================
+  // recallPersist context filtering regression (integration)
+  // ============================================
+  //
+  // Bug: When recallPersist: true, before_agent_start injects a hindsight-recall
+  // message into the session, but the context handler stripped ALL hindsight-recall
+  // messages and never re-injected, so the LLM never saw recalled memories.
+  //
+  // Fix: before_agent_start always does recall and caches the message.
+  // The context handler strips stale recalls and re-injects the cached recall.
+  // These tests exercise the real handler flow (before_agent_start → context).
+
+  it("recallPersist: true - recall survives before_agent_start → context handler flow", async () => {
+    activeConfig = { ...testConfig, recallPersist: true };
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Important memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "What do I prefer?" }] },
+          },
+        ]),
+      },
+    });
+
+    // Step 1: before_agent_start should return message (persisted) and cache it
+    const basResult = (await basHandler({ type: "before_agent_start" }, ctxBas)) as
+      | Record<string, unknown>
+      | undefined;
+    expect(basResult).toBeDefined();
+    const basMsg = basResult?.message as Record<string, unknown>;
+    expect(basMsg.customType).toBe("hindsight-recall");
+    expect(basMsg.content).toContain("Important memory");
+
+    // Step 2: context handler should filter the persisted recall and re-inject it
+    const ctxContext = createMockContext();
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "What do I prefer?" }],
+            customType: undefined,
+          },
+          // The persisted recall message is in the session, so it appears here
+          { role: "custom", customType: "hindsight-recall", content: "Important memory" },
+        ],
+      },
+      ctxContext
+    )) as Record<string, unknown> | undefined;
+
+    expect(contextResult).toBeDefined();
+    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
+    // Exactly 2 messages: user + one re-injected recall (stale persisted recall was filtered)
+    expect(messages).toHaveLength(2);
+    const recallMsgs = messages.filter((m) => m.customType === "hindsight-recall");
+    expect(recallMsgs).toHaveLength(1); // no duplication
+    expect(recallMsgs[0]?.content).toContain("Important memory");
+  });
+
+  it("recallPersist: true - stale recalls filtered when no recall this turn", async () => {
+    activeConfig = { ...testConfig, recallPersist: true };
+    // recall returns no results this turn (simulating no new recall)
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() => Promise.resolve({ success: true, response: { results: [] } })),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+
+    // before_agent_start with no results → no cached recall
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+          },
+        ]),
+      },
+    });
+    await basHandler({ type: "before_agent_start" }, ctxBas);
+
+    // Context handler receives stale recall from session
+    const ctxContext = createMockContext();
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+          { role: "custom", customType: "hindsight-recall", content: "Old stale memory" },
+        ],
+      },
+      ctxContext
+    )) as Record<string, unknown> | undefined;
+
+    // Stale recall should be filtered, no recall re-injected
+    expect(contextResult).toBeDefined();
+    const messages = contextResult?.messages as Array<{ customType?: string }>;
+    const recallMsgs = messages.filter((m) => m.customType === "hindsight-recall");
+    expect(recallMsgs).toHaveLength(0);
+    expect(messages).toHaveLength(1); // just user message
+  });
+
+  it("recallPersist: false - recall cached by before_agent_start is re-injected by context", async () => {
+    // activeConfig already has recallPersist: false
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Ephemeral memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+
+    // before_agent_start caches recall but does NOT return it (not persisted)
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+          },
+        ]),
+      },
+    });
+    const basResult = await basHandler({ type: "before_agent_start" }, ctxBas);
+    expect(basResult).toBeUndefined(); // not persisted
+
+    // Context handler re-injects the cached recall (ephemeral, for LLM this turn only)
+    const ctxContext = createMockContext();
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+        ],
+      },
+      ctxContext
+    )) as Record<string, unknown> | undefined;
+
+    expect(contextResult).toBeDefined();
+    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
+    const recallMsg = messages.find((m) => m.customType === "hindsight-recall");
+    expect(recallMsg).toBeDefined();
+    expect(recallMsg?.content).toContain("Ephemeral memory");
+  });
+
+  it("context handler filters stale recalls when no recall cached", async () => {
+    activeConfig = { ...testConfig, recallPersist: false };
+    // No results → nothing cached by before_agent_start
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() => Promise.resolve({ success: true, response: { results: [] } })),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    // Run before_agent_start (no results → no cache)
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+          },
+        ]),
+      },
+    });
+    await basHandler({ type: "before_agent_start" }, ctxBas);
+
+    // Context handler should filter out stale recall with nothing to re-inject
+    const contextHandler = pi.handlers.get("context")!;
+    const ctxContext = createMockContext();
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+          { role: "custom", customType: "hindsight-recall", content: "Stale recall" },
+        ],
+      },
+      ctxContext
+    )) as Record<string, unknown> | undefined;
+
+    expect(contextResult).toBeDefined();
+    const messages = contextResult?.messages as Array<{ customType?: string }>;
+    const recallMsgs = messages.filter((m) => m.customType === "hindsight-recall");
+    expect(recallMsgs).toHaveLength(0);
   });
 });

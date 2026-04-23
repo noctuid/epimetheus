@@ -26,8 +26,9 @@ import {
 // Runtime toggle for recall display (overrides config)
 let recallDisplayOverride: boolean | null = null;
 
-// Cache last recall details for toggle-recall command (works regardless of recallPersist)
-let lastRecallDetails: RecallMessageDetails | null = null;
+// Cache last recall message for context handler re-injection (recallPersist: true)
+// and for show-recall/popup command (lastRecallMessage?.details is the cached details)
+let lastRecallMessage: ReturnType<typeof formatRecallMessage> | null = null;
 
 export default function (pi: ExtensionAPI) {
   // Load and validate config
@@ -94,7 +95,7 @@ export default function (pi: ExtensionAPI) {
     pi,
     config,
     client,
-    () => lastRecallDetails,
+    () => lastRecallMessage?.details ?? null,
     () => recallDisplayOverride,
     (value) => {
       recallDisplayOverride = value;
@@ -140,10 +141,11 @@ export default function (pi: ExtensionAPI) {
     }
   );
 
-  // Auto-recall on before_agent_start (visible, persisted to session file)
-  // Only fires when recallPersist is true
+  // Auto-recall on before_agent_start.
+  // Always performs recall and caches the result for the context handler to re-inject.
+  // Only returns the message (persisting it to session) when recallPersist is true.
   pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
-    if (!client || !config.autoRecallEnabled || !config.recallPersist) return;
+    if (!client || !config.autoRecallEnabled) return;
 
     // Get the last user message from the session entries
     const entries = ctx.sessionManager.getEntries();
@@ -166,14 +168,18 @@ export default function (pi: ExtensionAPI) {
       recallDisplayOverride ?? config.recallDisplay
     );
     if (result) {
-      return { message: result.recallMessage };
+      lastRecallMessage = result.recallMessage;
+      // Only persist to session file when recallPersist is true
+      if (config.recallPersist) {
+        return { message: result.recallMessage };
+      }
     }
   });
 
   // Context event handler:
-  // 1. Always filter out hindsight-recall messages (prevent old recalls from being sent to LLM)
-  // 2. If recallPersist is false, inject recall message (not visible, not persisted, sent to LLM)
-  pi.on("context", async (event, ctx: ExtensionContext) => {
+  // 1. Always filter out hindsight-recall messages (prevent stale recalls from being sent to LLM)
+  // 2. Re-inject cached recall from before_agent_start (so the LLM sees fresh recall)
+  pi.on("context", async (event, _ctx: ExtensionContext) => {
     const messages = event.messages as Array<{
       role: string;
       content?: unknown;
@@ -185,27 +191,17 @@ export default function (pi: ExtensionAPI) {
     const filteredMessages = messages.filter((msg) => msg.customType !== "hindsight-recall");
     const hadRecallMessages = filteredMessages.length !== messages.length;
 
-    // If recallPersist is false and auto-recall is enabled, inject recall here
-    // (not visible, not persisted, but sent to LLM for this turn only)
-    if (client && config.autoRecallEnabled && !config.recallPersist) {
-      // Only trigger recall if the last message is from user
-      const lastMessage = filteredMessages[filteredMessages.length - 1];
-      if (lastMessage && lastMessage.role === "user") {
-        const userMessage = extractTextFromContent(lastMessage.content);
-        if (userMessage) {
-          // Call shared recall helper (always display: false when recallPersist is false)
-          const result = await doAutoRecall(userMessage, ctx.signal, false);
-          if (result) {
-            return { messages: [...filteredMessages, result.recallMessage] } as Record<
-              string,
-              unknown
-            >;
-          }
-        }
-      }
+    // Re-inject the cached recall from before_agent_start.
+    // before_agent_start always does the recall and caches the message here.
+    // When recallPersist: true, the message was also persisted to the session file;
+    // when recallPersist: false, it's ephemeral (re-injected here only for this turn).
+    const cachedRecall = lastRecallMessage;
+    lastRecallMessage = null; // Clear after reading (consume once per turn)
+    if (cachedRecall) {
+      return { messages: [...filteredMessages, cachedRecall] } as Record<string, unknown>;
     }
 
-    // If we filtered out recall messages but didn't inject new ones, return filtered array
+    // If we filtered out recall messages but didn't re-inject, return filtered array
     if (hadRecallMessages) {
       return { messages: filteredMessages } as Record<string, unknown>;
     }
@@ -246,13 +242,13 @@ export default function (pi: ExtensionAPI) {
 
   // Flush queues and reset recall cache on session switch
   pi.on("session_before_switch", async (_event, ctx: ExtensionContext) => {
-    lastRecallDetails = null;
+    lastRecallMessage = null;
     await flushCurrentSession(ctx, "before session switch");
   });
 
   // Flush queues and reset recall cache before forking
   pi.on("session_before_fork", async (_event, ctx: ExtensionContext) => {
-    lastRecallDetails = null;
+    lastRecallMessage = null;
     await flushCurrentSession(ctx, "before session fork");
   });
 
@@ -282,8 +278,10 @@ export default function (pi: ExtensionAPI) {
     signal: AbortSignal | undefined,
     display: boolean
   ): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
-    return doAutoRecallImpl(client, query, signal, display, config, (details) => {
-      lastRecallDetails = details;
+    // Clear stale recall on error/no-results (doAutoRecallImpl calls cacheDetails(null))
+    // On success, we set lastRecallMessage directly after getting the full result.
+    return doAutoRecallImpl(client, query, signal, display, config, () => {
+      lastRecallMessage = null;
     });
   }
 
