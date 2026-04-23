@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node_modules-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-node_modules-
+      - run: bun install --frozen-lockfile
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+      - name: Check formatting and linting
+        run: bun run check
+      - name: Typecheck
+        run: bun run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node_modules-${{ hashFiles('bun.lock') }}
+          restore-keys: ${{ runner.os }}-node_modules-
+      - run: bun install --frozen-lockfile
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+      - name: Run tests with coverage
+        run: bun test --coverage | tee coverage-output.txt
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(grep 'All files' coverage-output.txt | awk -F'|' '{gsub(/ /, "", $3); print $3}')
+          echo "Line coverage: ${COVERAGE}%"
+          THRESHOLD=95
+          INTEGERS_ONLY=$(echo "$COVERAGE" | cut -d. -f1)
+          if [ "$INTEGERS_ONLY" -lt "$THRESHOLD" ]; then
+            echo "Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+            exit 1
+          fi
+          echo "Coverage meets threshold (${COVERAGE}% >= ${THRESHOLD}%)"
