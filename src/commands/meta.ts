@@ -62,6 +62,9 @@ export function createToggleRetainSubcommand(
         pi.appendEntry("hindsight-meta", meta);
 
         // Delete any existing queue files
+        // Note: there should not be a tool queue for a non-retained session
+        // (tool retains are only queued when retention is enabled), but clean up
+        // defensively in case the state got out of sync.
         if (sessionId) {
           deleteAutoQueue(sessionId);
           deleteToolQueue(sessionId);

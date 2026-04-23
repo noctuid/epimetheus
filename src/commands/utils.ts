@@ -15,7 +15,7 @@ import {
   parseSessionFile,
 } from "../document";
 import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
-import { deleteAutoQueue, deleteToolQueue } from "../queue";
+import { deleteAutoQueue } from "../queue";
 import { extractParentSessionId, getSessionDisplayName } from "../utils";
 
 /** Result of parsing a session file for subcommand handlers. */
@@ -185,9 +185,10 @@ export async function parseAndUpsertSession(
     ctx.signal
   );
 
-  // Clear queued messages to prevent duplication — the full session was just upserted
+  // Clear auto-queued messages to prevent duplication — the full session was just upserted
+  // Note: Tool queue is NOT deleted because tool retains are separate documents
+  // (raw content with their own tags/metadata), not included in the session upsert.
   deleteAutoQueue(parsedSession.sessionId);
-  deleteToolQueue(parsedSession.sessionId);
 
   return `Parsed and upserted ${parsedSession.messages.length} messages`;
 }

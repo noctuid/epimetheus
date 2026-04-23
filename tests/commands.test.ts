@@ -440,6 +440,84 @@ describe("registerCommands", () => {
         rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it("preserves tool queue on upsert (tool retains are separate documents)", async () => {
+      const { mkdtempSync, rmSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
+      const sessionPath = join(tmpDir, "test-session-123.jsonl");
+      const { writeFileSync: writeFile } = await import("node:fs");
+
+      const header = JSON.stringify({
+        type: "session",
+        id: "test-session-123",
+        timestamp: new Date().toISOString(),
+        cwd: "/test",
+      });
+      const message = JSON.stringify({
+        type: "message",
+        message: { role: "user", content: "Hello world" },
+      });
+      writeFile(sessionPath, `${header}\n${message}\n`, "utf8");
+
+      const sessionId = "test-session-123";
+      const {
+        enqueueAutoMessage,
+        enqueueToolMessage,
+        readAutoQueue,
+        readToolQueue,
+        deleteAutoQueue,
+        deleteToolQueue,
+      } = await import("../src/queue");
+
+      try {
+        // Enqueue both auto and tool messages
+        enqueueAutoMessage(sessionId, {
+          entry: { message: { role: "user", content: "Hello" } },
+          store_method: "auto",
+        });
+        enqueueToolMessage(sessionId, {
+          content: "User prefers dark mode",
+          tags: ["topic:ui"],
+          timestamp: new Date().toISOString(),
+          store_method: "tool",
+        });
+        expect(readAutoQueue(sessionId)).toHaveLength(1);
+        expect(readToolQueue(sessionId)).toHaveLength(1);
+
+        mockClient = createMockClient({
+          retainResult: { success: true },
+        });
+        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
+          success: true,
+        }));
+
+        register();
+
+        const ctx = {
+          ...makeCtx(),
+          sessionManager: {
+            ...makeCtx().sessionManager,
+            getSessionFile: () => sessionPath,
+          },
+        } as unknown as ExtensionContext;
+
+        await getHandler()("parse-and-upsert-session", ctx);
+
+        // Auto queue should be cleared (session messages are already upserted)
+        expect(readAutoQueue(sessionId)).toHaveLength(0);
+        // Tool queue should be preserved (tool retains are separate documents,
+        // not included in the session upsert; deleting them would cause data loss)
+        expect(readToolQueue(sessionId)).toHaveLength(1);
+        expect(readToolQueue(sessionId)[0]?.content).toBe("User prefers dark mode");
+        expect(lastNotification?.message).toContain("Parsed and upserted");
+      } finally {
+        deleteAutoQueue(sessionId);
+        deleteToolQueue(sessionId);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("toggle-retain subcommand", () => {
