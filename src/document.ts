@@ -126,6 +126,12 @@ function loadParentAssistantIds(parentPath: string): Set<string> {
 /**
  * Find the index of the first assistant message with an id not in parent.
  * Returns -1 if no fork point found (all assistant messages exist in parent).
+ *
+ * Note: Forks with only new user content (no assistant reply yet) will return -1
+ * and be treated as "No new content in fork". This is intentional — a user message
+ * almost always has an assistant reply after it, and persisting just a user message
+ * without the response isn't very useful. If the assistant does reply, the fork
+ * will be detected on the next parse.
  */
 function findForkPoint(
   conversationEntries: SessionEntry[],
