@@ -124,39 +124,6 @@ function loadParentAssistantIds(parentPath: string): Set<string> {
 }
 
 /**
- * Build document content for a forked session.
- */
-function buildForkedContent(
-  entries: SessionEntry[],
-  header: SessionHeader,
-  parentAssistantIds: Set<string>,
-  config: Pick<HindsightConfig, "retainContent" | "strip" | "toolFilter">
-): { content: string; documentId: string } {
-  const conversationEntries = entries.filter((e) =>
-    isConversationMessage(e, config.retainContent, config.toolFilter)
-  );
-
-  // Find first assistant with id NOT in parent
-  const forkPoint = findForkPoint(conversationEntries, parentAssistantIds);
-
-  if (forkPoint === -1) {
-    // No new responses - nothing to retain
-    return { content: "[]", documentId: header.id };
-  }
-
-  // Walk backward in conversationEntries to find the previous user message
-  const startIndex = findForkStartIndex(conversationEntries, forkPoint);
-  const content = JSON.stringify(
-    conversationEntries.slice(startIndex).map((e) => formatEntry(e, config))
-  );
-
-  return {
-    content,
-    documentId: header.id,
-  };
-}
-
-/**
  * Find the index of the first assistant message with an id not in parent.
  * Returns -1 if no fork point found (all assistant messages exist in parent).
  */
@@ -201,33 +168,23 @@ function truncateSessionTitle(entries: SessionEntry[], config: HindsightConfig):
 
 /**
  * Build document content from a session file.
+ *
+ * Delegates to {@link buildMessageArrayFromParsedSession} and serializes to JSON.
  */
 export function buildDocumentContent(
   sessionPath: string,
   config: HindsightConfig
 ): DocumentContent {
   const { header, entries } = parseSessionFile(sessionPath);
-
-  // Check parentSession BEFORE filtering
-  if (header.parentSession) {
-    try {
-      const parentAssistantIds = loadParentAssistantIds(header.parentSession);
-      const result = buildForkedContent(entries, header, parentAssistantIds, config);
-      return result;
-    } catch (_e) {
-      return {
-        content: "[]",
-        documentId: header.id,
-        warning: `Parent session not found: ${header.parentSession}`,
-      };
-    }
-  }
-
-  // Not a fork - include all conversation messages
-  const messages = buildMessageArray(entries, config);
+  const { messages, documentId, warning } = buildMessageArrayFromParsedSession(
+    header,
+    entries,
+    config
+  );
   return {
     content: JSON.stringify(messages),
-    documentId: header.id,
+    documentId,
+    warning,
   };
 }
 

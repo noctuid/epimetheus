@@ -397,6 +397,7 @@ describe("fork detection", () => {
 
     // No new content to retain
     expect(result.content).toBe("[]");
+    expect(result.warning).toBe("No new content in fork");
   });
 
   it("filters hindsight-recall messages from forked sessions", () => {
