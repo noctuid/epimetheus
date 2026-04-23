@@ -156,6 +156,20 @@ describe("validateConfig", () => {
     expect(result.errors).toContain("hindsightContextMaxLength must be >= 0");
   });
 
+  it("allows empty string for hindsightContextPrefix", () => {
+    const config = { ...validConfig, hindsightContextPrefix: "" };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("allows hindsightContextMaxLength of 0", () => {
+    const config = { ...validConfig, hindsightContextMaxLength: 0 };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+  });
+
   it("errors when retainContent has duplicates", () => {
     const config = {
       ...validConfig,
@@ -540,6 +554,29 @@ describe("loadConfig", () => {
 
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.hindsightContextMaxLength).toBe(200);
+    expect(warning).toBeUndefined();
+  });
+
+  it("hindsightContextPrefix can be set to empty string via config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        hindsightContextPrefix: "",
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.hindsightContextPrefix).toBe("");
+    expect(warning).toBeUndefined();
+  });
+
+  it("hindsightContextPrefix can be set to empty string via env var", () => {
+    process.env.PI_HINDSIGHT_CONTEXT_PREFIX = "";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.hindsightContextPrefix).toBe("");
     expect(warning).toBeUndefined();
   });
 
