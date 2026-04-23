@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
-import { expandScopePlaceholders, type HindsightConfig } from "../config";
+import { expandSessionObservationScopes, type HindsightConfig } from "../config";
 import {
   buildDocumentTags,
   buildMessageArrayFromParsedSession,
@@ -124,12 +124,11 @@ export async function upsertToHindsight(
   signal?: AbortSignal
 ): Promise<void> {
   // Expand placeholders in observation scopes
-  const expandedScopes = config.observationScopes
-    ? expandScopePlaceholders(config.observationScopes, {
-        sessionId: params.sessionId,
-        parentSessionId: params.parentSessionId,
-      })
-    : undefined;
+  const expandedScopes = expandSessionObservationScopes(
+    config,
+    params.sessionId,
+    params.parentSessionId
+  );
 
   const result = await client.retain(
     {

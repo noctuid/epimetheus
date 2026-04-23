@@ -12,6 +12,7 @@ import {
   type ToolFilterMode,
   validateConfig,
 } from "../src/config";
+import { HINDSIGHT_ENV_KEYS, saveEnvKeys } from "./fixtures";
 
 // Config for validateConfig tests — may differ from runtime defaults since
 // these tests exercise validation logic, not runtime behavior.
@@ -55,44 +56,10 @@ const validConfig: HindsightConfig = {
 // Temp directory for file loading tests
 const TEST_DIR = "/tmp/pi-hindsight-config-test";
 
-// Store original env values to restore after tests
-const envKeys = [
-  "PI_HINDSIGHT_ENABLED",
-  "HINDSIGHT_API_URL",
-  "HINDSIGHT_API_KEY",
-  "PI_HINDSIGHT_BANK_ID",
-  "PI_HINDSIGHT_TOOLS_ENABLED",
-  "PI_HINDSIGHT_AUTO_RECALL_ENABLED",
-  "PI_HINDSIGHT_AUTO_RECALL_BUDGET",
-  "PI_HINDSIGHT_AUTO_RETAIN_ENABLED",
-  "PI_HINDSIGHT_CONTEXT_PREFIX",
-  "PI_HINDSIGHT_CONTEXT_MAX_LENGTH",
-  "PI_HINDSIGHT_MAX_RECALL_TOKENS",
-  "PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE",
-  "PI_HINDSIGHT_RECALL_SHOW_DATETIME",
-  "PI_HINDSIGHT_RECALL_DISPLAY",
-  "PI_HINDSIGHT_RECALL_PERSIST",
-  "PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS",
-  "PI_HINDSIGHT_RECALL_TYPES",
-  "PI_HINDSIGHT_CONSTANT_TAGS",
-  "PI_HINDSIGHT_FLUSH_ON_COMPACT",
-  "PI_HINDSIGHT_RETAIN_CONTENT",
-  "PI_HINDSIGHT_STRIP",
-  "PI_HINDSIGHT_ENTITIES",
-  "PI_HINDSIGHT_STATUS_HEALTHY",
-  "PI_HINDSIGHT_STATUS_UNHEALTHY",
-  "PI_HINDSIGHT_OBSERVATION_SCOPES",
-  "PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT",
-  "PI_HINDSIGHT_TOOL_FILTER",
-];
-const originalEnv: Record<string, string | undefined> = {};
+let restoreEnv: () => void;
 
 beforeEach(() => {
-  // Save and clear env vars
-  for (const key of envKeys) {
-    originalEnv[key] = process.env[key];
-    delete process.env[key];
-  }
+  restoreEnv = saveEnvKeys(HINDSIGHT_ENV_KEYS);
 
   if (existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -101,14 +68,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // Restore env vars
-  for (const key of envKeys) {
-    if (originalEnv[key] === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = originalEnv[key];
-    }
-  }
+  restoreEnv();
 
   if (existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });

@@ -581,6 +581,22 @@ export function expandScopePlaceholders(
   );
 }
 
+/**
+ * Expand observation scope placeholders for a specific session.
+ * Returns undefined when observationScopes is not configured (null/falsy).
+ */
+export function expandSessionObservationScopes(
+  config: Pick<HindsightConfig, "observationScopes">,
+  sessionId: string,
+  parentSessionId?: string
+): Exclude<ObservationScopes, null> | undefined {
+  if (!config.observationScopes) return undefined;
+  return expandScopePlaceholders(config.observationScopes, {
+    sessionId,
+    parentSessionId,
+  }) as Exclude<ObservationScopes, null>;
+}
+
 export function loadConfig(extensionsDir?: string): {
   config: HindsightConfig;
   configPath?: string;

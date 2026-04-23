@@ -5,7 +5,7 @@
 import type { MemoryItemInput } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig } from "./config";
-import { expandScopePlaceholders } from "./config";
+import { expandSessionObservationScopes } from "./config";
 import { getHindsightMeta } from "./meta";
 import type { ToolQueueEntry } from "./queue";
 import {
@@ -46,12 +46,7 @@ export function queueToolRetain(
   ];
 
   // Expand placeholders in observation scopes at queue time
-  const expandedScopes = config.observationScopes
-    ? expandScopePlaceholders(config.observationScopes, {
-        sessionId,
-        parentSessionId,
-      })
-    : undefined;
+  const expandedScopes = expandSessionObservationScopes(config, sessionId, parentSessionId);
 
   const entry: ToolQueueEntry = {
     content,
@@ -106,12 +101,7 @@ export async function flushAutoQueue(
   const contentItems = autoEntries.map((entry) => entry.entry);
 
   // Expand placeholders in observation scopes
-  const expandedScopes = config.observationScopes
-    ? expandScopePlaceholders(config.observationScopes, {
-        sessionId,
-        parentSessionId,
-      })
-    : undefined;
+  const expandedScopes = expandSessionObservationScopes(config, sessionId, parentSessionId);
 
   const result = await client.retain(
     {

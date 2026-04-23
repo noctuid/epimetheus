@@ -6,6 +6,9 @@
  */
 
 import { mock } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
@@ -163,8 +166,123 @@ export function createMockContext(overrides: Record<string, unknown> = {}): Exte
 }
 
 // ============================================
-// Types
+// Temp directory and session file helpers
 // ============================================
+
+/**
+ * Hindsight-related environment variable keys that affect config loading.
+ * Use with {@link saveEnvKeys} in beforeEach/afterEach to isolate tests from
+ * the host environment.
+ */
+export const HINDSIGHT_ENV_KEYS = [
+  "PI_HINDSIGHT_ENABLED",
+  "HINDSIGHT_API_URL",
+  "HINDSIGHT_API_KEY",
+  "PI_HINDSIGHT_BANK_ID",
+  "PI_HINDSIGHT_TOOLS_ENABLED",
+  "PI_HINDSIGHT_AUTO_RECALL_ENABLED",
+  "PI_HINDSIGHT_AUTO_RECALL_BUDGET",
+  "PI_HINDSIGHT_AUTO_RETAIN_ENABLED",
+  "PI_HINDSIGHT_CONTEXT_PREFIX",
+  "PI_HINDSIGHT_CONTEXT_MAX_LENGTH",
+  "PI_HINDSIGHT_MAX_RECALL_TOKENS",
+  "PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE",
+  "PI_HINDSIGHT_RECALL_SHOW_DATETIME",
+  "PI_HINDSIGHT_RECALL_DISPLAY",
+  "PI_HINDSIGHT_RECALL_PERSIST",
+  "PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS",
+  "PI_HINDSIGHT_RECALL_TYPES",
+  "PI_HINDSIGHT_CONSTANT_TAGS",
+  "PI_HINDSIGHT_FLUSH_ON_COMPACT",
+  "PI_HINDSIGHT_RETAIN_CONTENT",
+  "PI_HINDSIGHT_STRIP",
+  "PI_HINDSIGHT_ENTITIES",
+  "PI_HINDSIGHT_STATUS_HEALTHY",
+  "PI_HINDSIGHT_STATUS_UNHEALTHY",
+  "PI_HINDSIGHT_OBSERVATION_SCOPES",
+  "PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT",
+  "PI_HINDSIGHT_TOOL_FILTER",
+];
+
+/**
+ * Save and clear the given env vars, returning a restore function.
+ * Call the restore function in afterEach to put the original values back.
+ *
+ * ```ts
+ * let restoreEnv: () => void;
+ * beforeEach(() => { restoreEnv = saveEnvKeys(HINDSIGHT_ENV_KEYS); });
+ * afterEach(() => { restoreEnv(); });
+ * ```
+ */
+export function saveEnvKeys(keys: readonly string[]): () => void {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of keys) {
+    saved[key] = process.env[key];
+    delete process.env[key];
+  }
+  return () => {
+    for (const key of keys) {
+      if (saved[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved[key];
+      }
+    }
+  };
+}
+
+/**
+ * Create a temporary directory and clean it up after the callback completes.
+ * Useful for tests that need to write session files without polluting /tmp.
+ */
+export async function withTempDir<T>(fn: (tmpDir: string) => Promise<T>): Promise<T> {
+  const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
+  try {
+    return await fn(tmpDir);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Write a pi session JSONL file and return its path.
+ *
+ * @param dir - Directory to write the file in
+ * @param sessionId - Session ID (used as filename and in the header)
+ * @param options.parentSession - Optional parent session path (for forked sessions)
+ * @param options.messages - Messages to include. Defaults to a single user message.
+ *   Pass an empty array to write a header-only file (e.g. for fork-without-messages tests).
+ */
+export function writeSessionFile(
+  dir: string,
+  sessionId: string,
+  options: {
+    parentSession?: string;
+    messages?: Array<{ role: string; content: unknown }>;
+  } = {}
+): string {
+  const sessionPath = join(dir, `${sessionId}.jsonl`);
+  const header: Record<string, unknown> = {
+    type: "session",
+    id: sessionId,
+    timestamp: new Date().toISOString(),
+    cwd: "/test",
+  };
+  if (options.parentSession) {
+    header.parentSession = options.parentSession;
+  }
+  const messages = options.messages ?? [{ role: "user", content: "Hello world" }];
+  const lines = [JSON.stringify(header)];
+  for (const msg of messages) {
+    lines.push(JSON.stringify({ type: "message", message: msg }));
+  }
+  writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+  return sessionPath;
+}
+
+// ============================================
+// Types
+// ===========================================
 
 /** Captured state from a mock ExtensionAPI. */
 export interface CapturedExtension {

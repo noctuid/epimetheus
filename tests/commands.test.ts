@@ -7,7 +7,7 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../src/client";
 import { registerCommands } from "../src/commands";
 import type { RecallMessageDetails } from "../src/index";
-import { createMockClient, statusTestConfig } from "./fixtures";
+import { createMockClient, statusTestConfig, withTempDir, writeSessionFile } from "./fixtures";
 
 interface RegisteredCmd {
   description: string;
@@ -327,140 +327,89 @@ describe("registerCommands", () => {
     });
 
     it("deletes queued messages after upsert to prevent duplication", async () => {
-      const { mkdtempSync, rmSync } = await import("node:fs");
-      const { tmpdir } = await import("node:os");
-      const { join } = await import("node:path");
-      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
-      const sessionPath = join(tmpDir, "test-session-123.jsonl");
-      const { writeFileSync: writeFile } = await import("node:fs");
-
-      const header = JSON.stringify({
-        type: "session",
-        id: "test-session-123",
-        timestamp: new Date().toISOString(),
-        cwd: "/test",
-      });
-      const message = JSON.stringify({
-        type: "message",
-        message: { role: "user", content: "Hello world" },
-      });
-      writeFile(sessionPath, `${header}\n${message}\n`, "utf8");
-
       const sessionId = "test-session-123";
       const { enqueueAutoMessage, readAutoQueue, deleteAutoQueue, deleteToolQueue } = await import(
         "../src/queue"
       );
 
-      try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
-        expect(readAutoQueue(sessionId)).toHaveLength(1);
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
 
-        let retainCalled = false;
-        mockClient = createMockClient({
-          retainResult: { success: true },
-        });
-        // Override retain to track calls
-        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => {
-          retainCalled = true;
-          return { success: true };
-        });
+        try {
+          enqueueAutoMessage(sessionId, {
+            entry: { message: { role: "user", content: "Hello" } },
+            store_method: "auto",
+          });
+          expect(readAutoQueue(sessionId)).toHaveLength(1);
 
-        register();
+          let retainCalled = false;
+          mockClient = createMockClient({
+            retainResult: { success: true },
+          });
+          // Override retain to track calls
+          (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => {
+            retainCalled = true;
+            return { success: true };
+          });
 
-        const ctx = {
-          ...makeCtx(),
-          sessionManager: {
-            ...makeCtx().sessionManager,
-            getSessionFile: () => sessionPath,
-          },
-        } as unknown as ExtensionContext;
+          register();
 
-        await getHandler()("parse-and-upsert-session", ctx);
+          const ctx = {
+            ...makeCtx(),
+            sessionManager: {
+              ...makeCtx().sessionManager,
+              getSessionFile: () => sessionPath,
+            },
+          } as unknown as ExtensionContext;
 
-        expect(readAutoQueue(sessionId)).toHaveLength(0);
-        expect(retainCalled).toBe(true);
-        expect(lastNotification?.message).toContain("Parsed and upserted");
-      } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+          await getHandler()("parse-and-upsert-session", ctx);
+
+          expect(readAutoQueue(sessionId)).toHaveLength(0);
+          expect(retainCalled).toBe(true);
+          expect(lastNotification?.message).toContain("Parsed and upserted");
+        } finally {
+          deleteAutoQueue(sessionId);
+          deleteToolQueue(sessionId);
+        }
+      });
     });
 
     it("does not error when no queue files exist", async () => {
-      const { mkdtempSync, rmSync } = await import("node:fs");
-      const { tmpdir } = await import("node:os");
-      const { join } = await import("node:path");
-      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
-      const sessionPath = join(tmpDir, "test-session-123.jsonl");
-      const { writeFileSync: writeFile } = await import("node:fs");
-
-      const header = JSON.stringify({
-        type: "session",
-        id: "test-session-123",
-        timestamp: new Date().toISOString(),
-        cwd: "/test",
-      });
-      const message = JSON.stringify({
-        type: "message",
-        message: { role: "user", content: "Hello world" },
-      });
-      writeFile(sessionPath, `${header}\n${message}\n`, "utf8");
-
       const sessionId = "test-session-123";
       const { deleteAutoQueue, deleteToolQueue } = await import("../src/queue");
 
-      try {
-        let retainCalled = false;
-        mockClient = createMockClient();
-        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => {
-          retainCalled = true;
-          return { success: true };
-        });
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
 
-        register();
+        try {
+          let retainCalled = false;
+          mockClient = createMockClient();
+          (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => {
+            retainCalled = true;
+            return { success: true };
+          });
 
-        const ctx = {
-          ...makeCtx(),
-          sessionManager: {
-            ...makeCtx().sessionManager,
-            getSessionFile: () => sessionPath,
-          },
-        } as unknown as ExtensionContext;
+          register();
 
-        await getHandler()("parse-and-upsert-session", ctx);
-        expect(retainCalled).toBe(true);
-        expect(lastNotification?.message).toContain("Parsed and upserted");
-      } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+          const ctx = {
+            ...makeCtx(),
+            sessionManager: {
+              ...makeCtx().sessionManager,
+              getSessionFile: () => sessionPath,
+            },
+          } as unknown as ExtensionContext;
+
+          await getHandler()("parse-and-upsert-session", ctx);
+          expect(retainCalled).toBe(true);
+          expect(lastNotification?.message).toContain("Parsed and upserted");
+        } finally {
+          deleteAutoQueue(sessionId);
+          deleteToolQueue(sessionId);
+        }
+      });
     });
 
     it("preserves tool queue on upsert (tool retains are separate documents)", async () => {
-      const { mkdtempSync, rmSync } = await import("node:fs");
-      const { tmpdir } = await import("node:os");
-      const { join } = await import("node:path");
-      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
-      const sessionPath = join(tmpDir, "test-session-123.jsonl");
-      const { writeFileSync: writeFile } = await import("node:fs");
-
-      const header = JSON.stringify({
-        type: "session",
-        id: "test-session-123",
-        timestamp: new Date().toISOString(),
-        cwd: "/test",
-      });
-      const message = JSON.stringify({
-        type: "message",
-        message: { role: "user", content: "Hello world" },
-      });
-      writeFile(sessionPath, `${header}\n${message}\n`, "utf8");
-
       const sessionId = "test-session-123";
       const {
         enqueueAutoMessage,
@@ -471,52 +420,55 @@ describe("registerCommands", () => {
         deleteToolQueue,
       } = await import("../src/queue");
 
-      try {
-        // Enqueue both auto and tool messages
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
-        enqueueToolMessage(sessionId, {
-          content: "User prefers dark mode",
-          tags: ["topic:ui"],
-          timestamp: new Date().toISOString(),
-          store_method: "tool",
-        });
-        expect(readAutoQueue(sessionId)).toHaveLength(1);
-        expect(readToolQueue(sessionId)).toHaveLength(1);
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
 
-        mockClient = createMockClient({
-          retainResult: { success: true },
-        });
-        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
-          success: true,
-        }));
+        try {
+          // Enqueue both auto and tool messages
+          enqueueAutoMessage(sessionId, {
+            entry: { message: { role: "user", content: "Hello" } },
+            store_method: "auto",
+          });
+          enqueueToolMessage(sessionId, {
+            content: "User prefers dark mode",
+            tags: ["topic:ui"],
+            timestamp: new Date().toISOString(),
+            store_method: "tool",
+          });
+          expect(readAutoQueue(sessionId)).toHaveLength(1);
+          expect(readToolQueue(sessionId)).toHaveLength(1);
 
-        register();
+          mockClient = createMockClient({
+            retainResult: { success: true },
+          });
+          (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
+            success: true,
+          }));
 
-        const ctx = {
-          ...makeCtx(),
-          sessionManager: {
-            ...makeCtx().sessionManager,
-            getSessionFile: () => sessionPath,
-          },
-        } as unknown as ExtensionContext;
+          register();
 
-        await getHandler()("parse-and-upsert-session", ctx);
+          const ctx = {
+            ...makeCtx(),
+            sessionManager: {
+              ...makeCtx().sessionManager,
+              getSessionFile: () => sessionPath,
+            },
+          } as unknown as ExtensionContext;
 
-        // Auto queue should be cleared (session messages are already upserted)
-        expect(readAutoQueue(sessionId)).toHaveLength(0);
-        // Tool queue should be preserved (tool retains are separate documents,
-        // not included in the session upsert; deleting them would cause data loss)
-        expect(readToolQueue(sessionId)).toHaveLength(1);
-        expect(readToolQueue(sessionId)[0]?.content).toBe("User prefers dark mode");
-        expect(lastNotification?.message).toContain("Parsed and upserted");
-      } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+          await getHandler()("parse-and-upsert-session", ctx);
+
+          // Auto queue should be cleared (session messages are already upserted)
+          expect(readAutoQueue(sessionId)).toHaveLength(0);
+          // Tool queue should be preserved (tool retains are separate documents,
+          // not included in the session upsert; deleting them would cause data loss)
+          expect(readToolQueue(sessionId)).toHaveLength(1);
+          expect(readToolQueue(sessionId)[0]?.content).toBe("User prefers dark mode");
+          expect(lastNotification?.message).toContain("Parsed and upserted");
+        } finally {
+          deleteAutoQueue(sessionId);
+          deleteToolQueue(sessionId);
+        }
+      });
     });
   });
 
@@ -1102,26 +1054,11 @@ describe("registerCommands", () => {
 
   describe("filename mismatch regression (GLM bug 1)", () => {
     it("parse-session reports path using header.id, not documentId", async () => {
-      const { mkdtempSync, rmSync, writeFileSync: writeFile } = await import("node:fs");
-      const { tmpdir } = await import("node:os");
-      const { join } = await import("node:path");
-      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
       const sessionId = "test-session-abc123";
-      const sessionPath = join(tmpDir, `${sessionId}.jsonl`);
 
-      const header = JSON.stringify({
-        type: "session",
-        id: sessionId,
-        timestamp: new Date().toISOString(),
-        cwd: "/test",
-      });
-      const message = JSON.stringify({
-        type: "message",
-        message: { role: "user", content: "Hello world" },
-      });
-      writeFile(sessionPath, `${header}\n${message}\n`, "utf8");
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
 
-      try {
         register();
         const ctx = {
           ...makeCtx(),
@@ -1134,31 +1071,20 @@ describe("registerCommands", () => {
         await getHandler()("parse-session", ctx);
         expect(lastNotification?.message).toContain(sessionId);
         expect(lastNotification?.message).not.toContain("session:test-session-abc123.jsonl");
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+      });
     });
   });
 
   describe("warning swallowed regression (GLM bug 2)", () => {
     it("parse-session shows specific warning instead of generic message", async () => {
-      const { mkdtempSync, rmSync, writeFileSync: writeFile } = await import("node:fs");
-      const { tmpdir } = await import("node:os");
-      const { join } = await import("node:path");
-      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
       const sessionId = "test-session-fork1";
-      const sessionPath = join(tmpDir, `${sessionId}.jsonl`);
 
-      const header = JSON.stringify({
-        type: "session",
-        id: sessionId,
-        timestamp: new Date().toISOString(),
-        cwd: "/test",
-        parentSession: "/nonexistent/parent-session.jsonl",
-      });
-      writeFile(sessionPath, `${header}\n`, "utf8");
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId, {
+          parentSession: "/nonexistent/parent-session.jsonl",
+          messages: [],
+        });
 
-      try {
         register();
         const ctx = {
           ...makeCtx(),
@@ -1172,29 +1098,18 @@ describe("registerCommands", () => {
         await getHandler()("parse-session", ctx);
         expect(lastNotification?.message).toContain("Parent session not found");
         expect(lastNotification?.message).not.toContain("No messages to parse");
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+      });
     });
 
     it("parse-and-upsert-session shows specific warning instead of generic message", async () => {
-      const { mkdtempSync, rmSync, writeFileSync: writeFile } = await import("node:fs");
-      const { tmpdir } = await import("node:os");
-      const { join } = await import("node:path");
-      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
       const sessionId = "test-session-fork2";
-      const sessionPath = join(tmpDir, `${sessionId}.jsonl`);
 
-      const header = JSON.stringify({
-        type: "session",
-        id: sessionId,
-        timestamp: new Date().toISOString(),
-        cwd: "/test",
-        parentSession: "/nonexistent/parent-session.jsonl",
-      });
-      writeFile(sessionPath, `${header}\n`, "utf8");
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId, {
+          parentSession: "/nonexistent/parent-session.jsonl",
+          messages: [],
+        });
 
-      try {
         mockClient = createMockClient();
         (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
           success: true,
@@ -1213,9 +1128,7 @@ describe("registerCommands", () => {
         await getHandler()("parse-and-upsert-session", ctx);
         expect(lastNotification?.message).toContain("Parent session not found");
         expect(lastNotification?.message).not.toContain("No messages to parse");
-      } finally {
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+      });
     });
   });
 
@@ -1267,58 +1180,50 @@ describe("registerCommands", () => {
     });
 
     it("flush subcommand uses extracted parent ID when parent file exists", async () => {
-      const { mkdtempSync, rmSync, writeFileSync: writeFile } = await import("node:fs");
-      const { tmpdir } = await import("node:os");
-      const { join } = await import("node:path");
-      const tmpDir = mkdtempSync(join(tmpdir(), "hindsight-test-"));
       const sessionId = "test-session-123";
-      const parentPath = join(tmpDir, "parent-uuid-789.jsonl");
-
-      writeFile(
-        parentPath,
-        `${JSON.stringify({ type: "session", id: "parent-uuid-789", timestamp: new Date().toISOString(), cwd: "/test" })}\n`,
-        "utf8"
-      );
-
       const { enqueueAutoMessage, deleteAutoQueue, deleteToolQueue } = await import("../src/queue");
-      try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
 
-        let retainTags: string[] | undefined;
-        mockClient = createMockClient();
-        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(
-          async (params: { tags?: string[] }) => {
-            retainTags = params.tags;
-            return { success: true };
-          }
-        );
+      await withTempDir(async (tmpDir) => {
+        const parentPath = writeSessionFile(tmpDir, "parent-uuid-789", { messages: [] });
 
-        const ctx = {
-          ...makeCtx(),
-          sessionManager: {
-            ...makeCtx().sessionManager,
-            getHeader: () => ({
-              timestamp: new Date().toISOString(),
-              cwd: "/test",
-              parentSession: parentPath,
-            }),
-          },
-        } as unknown as ExtensionContext;
+        try {
+          enqueueAutoMessage(sessionId, {
+            entry: { message: { role: "user", content: "Hello" } },
+            store_method: "auto",
+          });
 
-        register();
-        await getHandler()("flush", ctx);
-        const parentTag = retainTags?.find((t: string) => t.startsWith("parent:"));
-        expect(parentTag).toBeDefined();
-        expect(parentTag).toBe("parent:parent-uuid-789");
-        expect(parentTag).not.toContain("/");
-      } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
-        rmSync(tmpDir, { recursive: true, force: true });
-      }
+          let retainTags: string[] | undefined;
+          mockClient = createMockClient();
+          (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(
+            async (params: { tags?: string[] }) => {
+              retainTags = params.tags;
+              return { success: true };
+            }
+          );
+
+          const ctx = {
+            ...makeCtx(),
+            sessionManager: {
+              ...makeCtx().sessionManager,
+              getHeader: () => ({
+                timestamp: new Date().toISOString(),
+                cwd: "/test",
+                parentSession: parentPath,
+              }),
+            },
+          } as unknown as ExtensionContext;
+
+          register();
+          await getHandler()("flush", ctx);
+          const parentTag = retainTags?.find((t: string) => t.startsWith("parent:"));
+          expect(parentTag).toBeDefined();
+          expect(parentTag).toBe("parent:parent-uuid-789");
+          expect(parentTag).not.toContain("/");
+        } finally {
+          deleteAutoQueue(sessionId);
+          deleteToolQueue(sessionId);
+        }
+      });
     });
   });
 
