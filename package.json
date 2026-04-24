@@ -18,8 +18,8 @@
   },
   "peerDependencies": {
     "typescript": "^5",
-    "@mariozechner/pi-coding-agent": ">=0.x",
-    "@sinclair/typebox": "^0.34.x"
+    "@mariozechner/pi-coding-agent": "0.70.0",
+    "typebox": "^1.x"
   },
   "dependencies": {
     "@vectorize-io/hindsight-client": "0.5.0",

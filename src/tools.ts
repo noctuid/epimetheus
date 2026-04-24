@@ -3,8 +3,8 @@
  */
 
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { type Static, Type } from "@sinclair/typebox";
 import type { Budget, RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-client";
+import { type Static, Type } from "typebox";
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig, MemoryType } from "./config";
 import { getHindsightMeta, shouldSessionBeRetained } from "./meta";
