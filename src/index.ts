@@ -27,8 +27,12 @@ import {
 let recallDisplayOverride: boolean | null = null;
 
 // Cache last recall message for context handler re-injection (recallPersist: true)
-// and for show-recall/popup command (lastRecallMessage?.details is the cached details)
+// Consumed once per turn by the context handler.
 let lastRecallMessage: ReturnType<typeof formatRecallMessage> | null = null;
+
+// Last recall details for the popup command — persists across turns
+// (not consumed by the context handler like lastRecallMessage is).
+let lastRecallDetails: RecallMessageDetails | null = null;
 
 /**
  * Reset module-level mutable state. Exported for testing only.
@@ -36,6 +40,7 @@ let lastRecallMessage: ReturnType<typeof formatRecallMessage> | null = null;
 export function _resetState(): void {
   recallDisplayOverride = null;
   lastRecallMessage = null;
+  lastRecallDetails = null;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -103,7 +108,7 @@ export default function (pi: ExtensionAPI) {
     pi,
     config,
     client,
-    () => lastRecallMessage?.details ?? null,
+    () => lastRecallDetails,
     () => recallDisplayOverride,
     (value) => {
       recallDisplayOverride = value;
@@ -171,6 +176,7 @@ export default function (pi: ExtensionAPI) {
     const result = await doAutoRecall(lastUserContent, ctx.signal, displayValue);
     if (result) {
       lastRecallMessage = result.recallMessage;
+      lastRecallDetails = result.recallMessage.details;
       // Only persist to session file when recallPersist is true
       if (config.recallPersist) {
         return { message: result.recallMessage };
@@ -200,6 +206,7 @@ export default function (pi: ExtensionAPI) {
     const cachedRecall = lastRecallMessage;
     lastRecallMessage = null; // Clear after reading (consume once per turn)
     if (cachedRecall) {
+      lastRecallDetails = cachedRecall.details;
       return { messages: [...filteredMessages, cachedRecall] } as Record<string, unknown>;
     }
 
@@ -245,12 +252,14 @@ export default function (pi: ExtensionAPI) {
   // Flush queues and reset recall cache on session switch
   pi.on("session_before_switch", async (_event, ctx: ExtensionContext) => {
     lastRecallMessage = null;
+    lastRecallDetails = null;
     await flushCurrentSession(ctx, "before session switch");
   });
 
   // Flush queues and reset recall cache before forking
   pi.on("session_before_fork", async (_event, ctx: ExtensionContext) => {
     lastRecallMessage = null;
+    lastRecallDetails = null;
     await flushCurrentSession(ctx, "before session fork");
   });
 
@@ -281,9 +290,9 @@ export default function (pi: ExtensionAPI) {
     display: boolean
   ): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
     // Clear stale recall on error/no-results (doAutoRecallImpl calls cacheDetails(null))
-    // On success, we set lastRecallMessage directly after getting the full result.
-    return doAutoRecallImpl(client, query, signal, display, config, () => {
+    return doAutoRecallImpl(client, query, signal, display, config, (details) => {
       lastRecallMessage = null;
+      lastRecallDetails = details;
     });
   }
 
