@@ -841,6 +841,279 @@ describe("real entrypoint bootstrap", () => {
     expect(recallMsg?.content).toContain("Ephemeral memory");
   });
 
+  // ============================================
+  // lastRecallDetails regression (integration)
+  //
+  // Bug: /hindsight popup always showed "No recall this session" because
+  // lastRecallMessage was consumed by the context handler (set to null)
+  // before the user could ever invoke the popup command. The same variable
+  // served two purposes: context re-injection (consumed once per turn) and
+  // popup details (needs to persist across turns).
+  //
+  // Fix: Added a separate lastRecallDetails variable that persists across
+  // the context handler's consumption of lastRecallMessage.
+  // These tests exercise the real handler flow (before_agent_start → context → popup).
+
+  it("popup command shows recall details after context handler consumes lastRecallMessage (recallPersist: true)", async () => {
+    activeConfig = { ...testConfig, recallPersist: true };
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Popup regression memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+    const commandHandler = (
+      pi.commands.get("hindsight") as {
+        handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+      }
+    ).handler;
+
+    // Step 1: before_agent_start performs recall and caches the message
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "What do I prefer?" }] },
+          },
+        ]),
+      },
+    });
+    await basHandler({ type: "before_agent_start" }, ctxBas);
+
+    // Step 2: context handler consumes lastRecallMessage (sets it to null)
+    const ctxContext = createMockContext();
+    await contextHandler(
+      {
+        type: "context",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "What do I prefer?" }],
+            customType: undefined,
+          },
+        ],
+      },
+      ctxContext
+    );
+
+    // Step 3: popup command should still work (lastRecallDetails persists)
+    let popupCalled = false;
+    const ctxPopup = createMockContext({
+      ui: {
+        ...createMockContext().ui,
+        custom: mock(async () => {
+          popupCalled = true;
+        }),
+      },
+    });
+    await commandHandler("popup", ctxPopup);
+
+    expect(popupCalled).toBe(true);
+    // The notification for "No recall this session" should NOT have been called
+    expect(ctxPopup.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("popup command shows recall details after context handler consumes lastRecallMessage (recallPersist: false)", async () => {
+    // recallPersist: false is the default
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Ephemeral popup memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+    const commandHandler = (
+      pi.commands.get("hindsight") as {
+        handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+      }
+    ).handler;
+
+    // Step 1: before_agent_start performs recall (not persisted, but cached)
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+          },
+        ]),
+      },
+    });
+    await basHandler({ type: "before_agent_start" }, ctxBas);
+
+    // Step 2: context handler consumes lastRecallMessage (sets it to null) and re-injects
+    const ctxContext = createMockContext();
+    await contextHandler(
+      {
+        type: "context",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+        ],
+      },
+      ctxContext
+    );
+
+    // Step 3: popup command should still work (lastRecallDetails persists)
+    let popupCalled = false;
+    const ctxPopup = createMockContext({
+      ui: {
+        ...createMockContext().ui,
+        custom: mock(async () => {
+          popupCalled = true;
+        }),
+      },
+    });
+    await commandHandler("popup", ctxPopup);
+
+    expect(popupCalled).toBe(true);
+    expect(ctxPopup.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("popup command shows 'No recall this session' when no recall has occurred this session", async () => {
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const commandHandler = (
+      pi.commands.get("hindsight") as {
+        handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+      }
+    ).handler;
+
+    const ctx = createMockContext();
+    await commandHandler("popup", ctx);
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith("No recall this session", "info");
+  });
+
+  it("lastRecallDetails is cleared on session switch", async () => {
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Session memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const switchHandler = pi.handlers.get("session_before_switch")!;
+    const commandHandler = (
+      pi.commands.get("hindsight") as {
+        handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+      }
+    ).handler;
+
+    // Step 1: Perform a recall
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+          },
+        ]),
+      },
+    });
+    await basHandler({ type: "before_agent_start" }, ctxBas);
+
+    // Step 2: Session switch clears lastRecallDetails
+    const ctxSwitch = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+    await switchHandler({ type: "session_before_switch" }, ctxSwitch);
+
+    // Step 3: popup should show "No recall this session"
+    const ctxPopup = createMockContext();
+    await commandHandler("popup", ctxPopup);
+    expect(ctxPopup.ui.notify).toHaveBeenCalledWith("No recall this session", "info");
+  });
+
+  it("lastRecallDetails is cleared on session fork", async () => {
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Fork memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const forkHandler = pi.handlers.get("session_before_fork")!;
+    const commandHandler = (
+      pi.commands.get("hindsight") as {
+        handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+      }
+    ).handler;
+
+    // Step 1: Perform a recall
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          {
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+          },
+        ]),
+      },
+    });
+    await basHandler({ type: "before_agent_start" }, ctxBas);
+
+    // Step 2: Session fork clears lastRecallDetails
+    const ctxFork = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+    await forkHandler({ type: "session_before_fork" }, ctxFork);
+
+    // Step 3: popup should show "No recall this session"
+    const ctxPopup = createMockContext();
+    await commandHandler("popup", ctxPopup);
+    expect(ctxPopup.ui.notify).toHaveBeenCalledWith("No recall this session", "info");
+  });
+
   it("context handler filters stale recalls when no recall cached", async () => {
     activeConfig = { ...testConfig, recallPersist: false };
     // No results → nothing cached by before_agent_start
