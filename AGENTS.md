@@ -11,4 +11,5 @@ Keep runtime logic (`src/index.ts` event handlers) and parsing logic (`src/docum
 ## Testing
 
 - **No simulation tests**: Do not reimplement production logic in tests (e.g., copying filtering/transform logic into a test helper). This gives false confidence — the test passes even if the real code breaks. Instead, exercise the real handlers via integration tests (invoke handlers from `createMockPi()`, call `parseAndUpsertSession()`, etc.). See `tests/bootstrap.test.ts` for the pattern.
+- **Test behavior, not implementation**: Test descriptions and assertions should describe observable behavior (e.g. "recall works on first message") not implementation details (e.g. "uses event.prompt").
 - **Run `bun run ci` after completing tasks**

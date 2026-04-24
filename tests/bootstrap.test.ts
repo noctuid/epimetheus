@@ -496,7 +496,7 @@ describe("real entrypoint bootstrap", () => {
     expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-hindsight", "🤯");
   });
 
-  it("session_start handler sets unhealthy status when config has warnings", async () => {
+  it("session_start handler sets healthy status when config has load warnings but server is reachable", async () => {
     activeWarning = "Some load warning";
 
     const pi = createMockPi();
@@ -507,7 +507,8 @@ describe("real entrypoint bootstrap", () => {
     const ctx = createMockContext();
     await handler({ type: "session_start" }, ctx);
 
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-hindsight", "🤯");
+    // Load warnings are cosmetic; server is reachable → healthy
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-hindsight", "🧠");
   });
 
   it("before_agent_start handler returns recall message when recallPersist is true", async () => {
@@ -542,9 +543,10 @@ describe("real entrypoint bootstrap", () => {
       },
     });
 
-    const result = (await handler({ type: "before_agent_start" }, ctx)) as
-      | Record<string, unknown>
-      | undefined;
+    const result = (await handler(
+      { type: "before_agent_start", prompt: "What do I prefer?" },
+      ctx
+    )) as Record<string, unknown> | undefined;
 
     expect(result).toBeDefined();
     expect(result?.message).toBeDefined();
@@ -587,7 +589,7 @@ describe("real entrypoint bootstrap", () => {
       },
     });
 
-    const result = (await handler({ type: "before_agent_start" }, ctx)) as
+    const result = (await handler({ type: "before_agent_start", prompt: "Hello" }, ctx)) as
       | Record<string, unknown>
       | undefined;
     const msg = result?.message as Record<string, unknown>;
@@ -627,7 +629,7 @@ describe("real entrypoint bootstrap", () => {
     });
 
     // before_agent_start should NOT return a message (not persisted)
-    const result = await basHandler({ type: "before_agent_start" }, ctxBas);
+    const result = await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
     expect(result).toBeUndefined();
 
     // But it should have cached the recall for the context handler to re-inject
@@ -648,6 +650,62 @@ describe("real entrypoint bootstrap", () => {
     const recallMsg = messages.find((m) => m.customType === "hindsight-recall");
     expect(recallMsg).toBeDefined();
     expect(recallMsg?.content).toContain("Cached memory");
+  });
+
+  it("before_agent_start performs recall on first message of session", async () => {
+    // Verifies that auto-recall uses event.prompt instead of scanning entries.
+    // getEntries() returns empty here (first message of session), confirming
+    // the handler doesn't depend on entries being populated.
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "First message memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const ctxBas = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => []), // First message — no entries yet
+      },
+    });
+
+    // event.prompt is available even though entries are empty
+    await basHandler({ type: "before_agent_start", prompt: "Hello from first message" }, ctxBas);
+
+    // Recall was performed and cached — context handler re-injects it
+    const contextHandler = pi.handlers.get("context")!;
+    const ctxContext = createMockContext();
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "Hello from first message" }],
+            customType: undefined,
+          },
+        ],
+      },
+      ctxContext
+    )) as Record<string, unknown> | undefined;
+
+    expect(contextResult).toBeDefined();
+    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
+    const recallMsg = messages.find((m) => m.customType === "hindsight-recall");
+    expect(recallMsg).toBeDefined();
+    expect(recallMsg?.content).toContain("First message memory");
   });
 
   // ============================================
@@ -697,9 +755,10 @@ describe("real entrypoint bootstrap", () => {
     });
 
     // Step 1: before_agent_start should return message (persisted) and cache it
-    const basResult = (await basHandler({ type: "before_agent_start" }, ctxBas)) as
-      | Record<string, unknown>
-      | undefined;
+    const basResult = (await basHandler(
+      { type: "before_agent_start", prompt: "What do I prefer?" },
+      ctxBas
+    )) as Record<string, unknown> | undefined;
     expect(basResult).toBeDefined();
     const basMsg = basResult?.message as Record<string, unknown>;
     expect(basMsg.customType).toBe("hindsight-recall");
@@ -762,7 +821,7 @@ describe("real entrypoint bootstrap", () => {
         ]),
       },
     });
-    await basHandler({ type: "before_agent_start" }, ctxBas);
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
 
     // Context handler receives stale recall from session
     const ctxContext = createMockContext();
@@ -819,7 +878,7 @@ describe("real entrypoint bootstrap", () => {
         ]),
       },
     });
-    const basResult = await basHandler({ type: "before_agent_start" }, ctxBas);
+    const basResult = await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
     expect(basResult).toBeUndefined(); // not persisted
 
     // Context handler re-injects the cached recall (ephemeral, for LLM this turn only)
@@ -893,7 +952,7 @@ describe("real entrypoint bootstrap", () => {
         ]),
       },
     });
-    await basHandler({ type: "before_agent_start" }, ctxBas);
+    await basHandler({ type: "before_agent_start", prompt: "What do I prefer?" }, ctxBas);
 
     // Step 2: context handler consumes lastRecallMessage (sets it to null)
     const ctxContext = createMockContext();
@@ -967,7 +1026,7 @@ describe("real entrypoint bootstrap", () => {
         ]),
       },
     });
-    await basHandler({ type: "before_agent_start" }, ctxBas);
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
 
     // Step 2: context handler consumes lastRecallMessage (sets it to null) and re-injects
     const ctxContext = createMockContext();
@@ -1052,7 +1111,7 @@ describe("real entrypoint bootstrap", () => {
         ]),
       },
     });
-    await basHandler({ type: "before_agent_start" }, ctxBas);
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
 
     // Step 2: Session switch clears lastRecallDetails
     const ctxSwitch = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
@@ -1102,7 +1161,7 @@ describe("real entrypoint bootstrap", () => {
         ]),
       },
     });
-    await basHandler({ type: "before_agent_start" }, ctxBas);
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
 
     // Step 2: Session fork clears lastRecallDetails
     const ctxFork = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
@@ -1142,7 +1201,7 @@ describe("real entrypoint bootstrap", () => {
         ]),
       },
     });
-    await basHandler({ type: "before_agent_start" }, ctxBas);
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
 
     // Context handler should filter out stale recall with nothing to re-inject
     const contextHandler = pi.handlers.get("context")!;

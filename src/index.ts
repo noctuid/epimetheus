@@ -16,12 +16,7 @@ import { prepareEntry, shouldRetainMessage } from "./prepare";
 import { enqueueAutoMessage } from "./queue";
 import { flushQueues, getQueueCount } from "./retention";
 import { registerTools } from "./tools";
-import {
-  extractParentSessionId,
-  extractTextFromContent,
-  getSessionDisplayName,
-  truncate,
-} from "./utils";
+import { extractParentSessionId, getSessionDisplayName, truncate } from "./utils";
 
 // Runtime toggle for recall display (overrides config)
 let recallDisplayOverride: boolean | null = null;
@@ -84,10 +79,12 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Set status bar indicator based on health
-  // Checks config validity and server connectivity
-  const configHealthy = validation.valid && !warning && validation.warnings.length === 0;
+  // Unhealthy when config is invalid (no client) or server is unreachable.
+  // Validation warnings (e.g. recallDisplay with recallPersist) are cosmetic
+  // and should not override a successful connectivity check.
+  const hasUsableConfig = validation.valid;
   pi.on("session_start", async (_event, ctx) => {
-    if (!configHealthy) {
+    if (!hasUsableConfig) {
       ctx.ui.setStatus("pi-hindsight", config.statusUnhealthy);
       return;
     }
@@ -146,34 +143,27 @@ export default function (pi: ExtensionAPI) {
   // Auto-recall on before_agent_start.
   // Always performs recall and caches the result for the context handler to re-inject.
   // Only returns the message (persisting it to session) when recallPersist is true.
-  pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
+  pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
     if (!client || !config.autoRecallEnabled) return;
 
-    // Get the last user message from the session entries
-    const entries = ctx.sessionManager.getEntries();
-    // Find the last user message
-    let lastUserContent: string | null = null;
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i];
-      if (entry && entry.type === "message" && entry.message?.role === "user") {
-        lastUserContent = extractTextFromContent(entry.message.content);
-        break;
-      }
-    }
+    // Use event.prompt directly — available before the user message is
+    // persisted to the session (fixes first-message recall).
+    const query = event.prompt;
+    if (!query) return;
 
-    if (!lastUserContent) return;
-
+    // display controls whether the recall message is shown in the TUI.
     // When recallPersist is true, always use display: true so the message is
     // added to the TUI chat container. The custom renderer dynamically checks
     // the runtime toggle on every render() call to show/hide the content.
-    // When recallPersist is false, the message is ephemeral (not in TUI), so
-    // display doesn't affect rendering — use the current config/override value.
+    // When recallPersist is false, the message is ephemeral (re-injected only
+    // by the context handler), so display controls the context handler's
+    // message visibility directly.
     const displayValue = config.recallPersist
       ? true
       : (recallDisplayOverride ?? config.recallDisplay);
 
     // Call shared recall helper
-    const result = await doAutoRecall(lastUserContent, ctx.signal, displayValue);
+    const result = await doAutoRecall(query, ctx.signal, displayValue);
     if (result) {
       lastRecallMessage = result.recallMessage;
       lastRecallDetails = result.recallMessage.details;
