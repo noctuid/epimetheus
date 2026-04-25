@@ -417,7 +417,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_ENABLED` | `enabled` | boolean | `true` |
 | `HINDSIGHT_API_URL` | `apiUrl` | string | *(required)* |
 | `HINDSIGHT_API_KEY` | `apiKey` | string | *(required)* |
-| `PI_HINDSIGHT_BANK_ID` | `bankId` | string | `"pi-default"` |
+| `PI_HINDSIGHT_BANK_ID` | `bankId` | string | *(required)* |
 | `PI_HINDSIGHT_TOOLS_ENABLED` | `toolsEnabled` | boolean | `true` |
 | `PI_HINDSIGHT_AUTO_RECALL_ENABLED` | `autoRecallEnabled` | boolean | `true` |
 | `PI_HINDSIGHT_AUTO_RECALL_BUDGET` | `autoRecallBudget` | `"low"` \| `"mid"` \| `"high"` | `"mid"` |

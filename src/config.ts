@@ -80,7 +80,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
   enabled: true,
   apiUrl: "",
   apiKey: "",
-  bankId: "pi-default",
+  bankId: "",
   toolsEnabled: true,
   autoRecallEnabled: true,
   autoRecallBudget: "mid",
@@ -717,6 +717,10 @@ export function validateConfig(config: HindsightConfig): {
 
   if (!config.apiKey) {
     errors.push("apiKey is required (set in config.json or HINDSIGHT_API_KEY env var)");
+  }
+
+  if (!config.bankId) {
+    errors.push("bankId is required (set in config.json or PI_HINDSIGHT_BANK_ID env var)");
   }
 
   if (config.hindsightContextMaxLength < 0) {

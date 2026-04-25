@@ -100,6 +100,15 @@ describe("validateConfig", () => {
     );
   });
 
+  it("errors when bankId is missing", () => {
+    const config = { ...validConfig, bankId: "" };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      "bankId is required (set in config.json or PI_HINDSIGHT_BANK_ID env var)"
+    );
+  });
+
   it("errors when retainContent.user is empty", () => {
     const config = {
       ...validConfig,
@@ -298,7 +307,7 @@ describe("loadConfig", () => {
     const { config } = loadConfig(TEST_DIR);
     expect(config.apiUrl).toBe("");
     expect(config.apiKey).toBe("");
-    expect(config.bankId).toBe("pi-default");
+    expect(config.bankId).toBe("");
     expect(config.enabled).toBe(true);
   });
 
@@ -1269,6 +1278,7 @@ describe("loadConfig", () => {
       JSON.stringify({
         apiUrl: "https://test.test",
         apiKey: "test-key",
+        bankId: "test-bank",
         toolFilter: {},
       })
     );
