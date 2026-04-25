@@ -290,6 +290,7 @@ export interface CapturedExtension {
   tools: Array<{ name: string; execute: (...args: unknown[]) => unknown; parameters: unknown }>;
   commands: Map<string, unknown>;
   renderers: Map<string, unknown>;
+  appendedEntries: { customType: string; data?: unknown }[];
 }
 
 /** Builder for mock ExtensionAPI instances with fluent configuration. */

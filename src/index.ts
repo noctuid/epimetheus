@@ -11,7 +11,7 @@ import type { RecallResponse } from "@vectorize-io/hindsight-client";
 import { HindsightClientWrapper } from "./client";
 import { registerCommands } from "./commands";
 import { loadConfig, validateConfig } from "./config";
-import { shouldSessionBeRetained } from "./meta";
+import { getHindsightMeta, shouldSessionBeRetained } from "./meta";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
 import { enqueueAutoMessage } from "./queue";
 import { flushQueues, getQueueCount } from "./retention";
@@ -84,6 +84,15 @@ export default function (pi: ExtensionAPI) {
   // and should not override a successful connectivity check.
   const hasUsableConfig = validation.valid;
   pi.on("session_start", async (_event, ctx) => {
+    // Auto-create session metadata if none exists, using retainSessionsByDefault
+    // as the default retained state. This ensures every session has explicit
+    // metadata, so toggle-retain and other commands work predictably.
+    const entries = ctx.sessionManager.getEntries();
+    const existingMeta = getHindsightMeta(entries);
+    if (!existingMeta) {
+      pi.appendEntry("hindsight-meta", { retained: config.retainSessionsByDefault });
+    }
+
     if (!hasUsableConfig) {
       ctx.ui.setStatus("pi-hindsight", config.statusUnhealthy);
       return;

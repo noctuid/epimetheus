@@ -147,7 +147,7 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
 |---------|---------|-------------|
 | `toolsEnabled` | `true` | Register hindsight_retain/recall/reflect tools for the agent |
 | `autoRecallEnabled` | `true` | Automatically recall relevant memories before each LLM call |
-| `autoRetainEnabled` | `true` | Automatically queue messages for retention on `message_end` |
+| `autoRetainEnabled` | `true` | Automatically queue messages for retention on `message_end` (see [Session Retention Control](#session-retention-control)) |
 | `autoRecallBudget` | `"mid"` | Recall retrieval budget. One of `"low"`, `"mid"`, `"high"`. Controls how many results Hindsight returns. |
 | `hindsightContextPrefix` | `"pi: "` | Prefix prepended to the session name or first message when building the `context` field for retained documents |
 | `hindsightContextMaxLength` | `100` | Maximum character length for the `context` field (after prefix). The context is truncated to this length. |
@@ -190,7 +190,27 @@ The extension shows a health indicator in pi's status bar:
 Both indicator texts are configurable via `statusHealthy` and `statusUnhealthy` options. If `enabled: false`, no status indicator is shown.
 
 ## Session Retention Control
-By default, all sessions are retained to Hindsight. You can change the default with `retainSessionsByDefault: false`, which prevents *new* sessions from being retained unless explicitly enabled (old resumed sessions are not affected).
+Session retention has two config settings that serve distinct purposes:
+
+- **`retainSessionsByDefault`** (default: `true`) — determines the `retained` state for sessions that don't have metadata. When a session starts and has no hindsight metadata, a metadata entry is automatically created with `retained` set to this value.
+- **`autoRetainEnabled`** (default: `true`) — controls whether messages are automatically queued on `message_end`. When disabled, no new messages enter the auto-queue, so there is nothing for the flush handlers to send (tool queue entries from `hindsight_retain` tool calls are still flushed normally).
+
+When a session starts, pi-hindsight checks whether the session file already has hindsight metadata. If it doesn't, a metadata entry is automatically created with `retained` set to `retainSessionsByDefault`. This means:
+
+- **New sessions**: get `retained: true` by default (matching `retainSessionsByDefault: true`)
+- **Old sessions resumed without metadata**: also get `retained` based on `retainSessionsByDefault` at the time they are opened
+- **Sessions with existing metadata**: keep whatever state was previously set (via toggle-retain, tag, etc.)
+
+The interaction between `autoRetainEnabled` and the session's `retained` state:
+
+| `autoRetainEnabled` | Session `retained` | Auto-queue | Auto-queue flush | `hindsight_retain` tool | Parse & upsert |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| `true` | `true` | ✅ | ✅ | ✅ | ✅ |
+| `true` | `false` | ❌ | N/A | ❌ | ❌ |
+| `false` | `true` | ❌ | N/A | ✅ | ✅ |
+| `false` | `false` | ❌ | N/A | ❌ | ❌ |
+
+When `autoRetainEnabled: false`, messages are never added to the auto-queue, so there is nothing to flush. The queue-flush handlers still run on switch/fork/shutdown (to drain any tool queue entries from agent `hindsight_retain` calls), but the auto-queue will always be empty. The `hindsight_retain` tool and manual parse/upsert commands are unaffected — they represent explicit user intent, not automatic behavior.
 
 Per-session control:
 - `/hindsight toggle-retain` — Toggle whether the current session should be retained

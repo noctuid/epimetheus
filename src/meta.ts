@@ -45,6 +45,11 @@ export function getHindsightMeta(
  * Checks the latest hindsight-meta entry for a retained field.
  * If no metadata entry exists or retained is undefined, falls back
  * to the retainSessionsByDefault config value.
+ *
+ * Note: The session_start handler auto-creates metadata with
+ * retained=retainSessionsByDefault when no metadata exists, so this
+ * fallback is only relevant before session_start fires or if
+ * metadata somehow gets into an inconsistent state.
  */
 export function shouldSessionBeRetained(
   entries: Array<{ type: string; customType?: string; data?: unknown }>,
