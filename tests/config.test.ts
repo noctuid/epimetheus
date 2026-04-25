@@ -1605,4 +1605,30 @@ describe("expandScopePlaceholders", () => {
     });
     expect(result).toEqual([["{session}:{parent}"]]);
   });
+
+  it("expands {cwd} placeholder", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{cwd}"]], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/project",
+    });
+    expect(result).toEqual([["cwd:/home/user/project"]]);
+  });
+
+  it("preserves {cwd} when sessionCwd is not provided", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{cwd}"]], {
+      sessionId: "abc-123",
+    });
+    expect(result).toEqual([["{cwd}"]]);
+  });
+
+  it("expands {cwd} alongside other placeholders", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{session}", "{cwd}"]], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/project",
+    });
+    expect(result).toEqual([["session:abc-123", "cwd:/home/user/project"]]);
+  });
 });

@@ -30,6 +30,7 @@ export interface ParsedSessionResult {
     parsedAt: string;
     sessionId: string;
     parentSessionId?: string;
+    cwd: string;
   };
   /** Path where the parsed session file was written on disk. */
   outputPath: string;
@@ -92,6 +93,7 @@ export function parseCurrentSession(
     parsedAt: new Date().toISOString(),
     sessionId: header.id,
     parentSessionId,
+    cwd: header.cwd,
   };
 
   // Write parsed session to disk for later review
@@ -119,6 +121,7 @@ export async function upsertToHindsight(
     tags: string[];
     sessionId: string;
     parentSessionId?: string;
+    sessionCwd?: string;
   },
   config: HindsightConfig,
   signal?: AbortSignal
@@ -127,7 +130,8 @@ export async function upsertToHindsight(
   const expandedScopes = expandSessionObservationScopes(
     config,
     params.sessionId,
-    params.parentSessionId
+    params.parentSessionId,
+    params.sessionCwd
   );
 
   const result = await client.retain(
@@ -179,6 +183,7 @@ export async function parseAndUpsertSession(
       tags: parsedSession.tags,
       sessionId: parsedSession.sessionId,
       parentSessionId: parsedSession.parentSessionId,
+      sessionCwd: parsedSession.cwd,
     },
     config,
     ctx.signal

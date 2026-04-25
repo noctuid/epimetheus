@@ -327,7 +327,7 @@ export default function (pi: ExtensionAPI) {
       sessionId,
       sessionName,
       header?.timestamp ?? new Date().toISOString(),
-      header?.cwd ?? ctx.cwd,
+      header?.cwd || ctx.cwd,
       parentSessionId,
       config,
       client,

@@ -42,6 +42,7 @@ export type ObservationScopes = "per_tag" | "combined" | "all_combinations" | st
 const SCOPE_PLACEHOLDERS: Record<string, string> = {
   "{session}": "session",
   "{parent}": "parent",
+  "{cwd}": "cwd",
 };
 
 export interface HindsightConfig {
@@ -564,7 +565,7 @@ function checkScopePlaceholderWarnings(scopes: string[][]): string[] {
  */
 export function expandScopePlaceholders(
   scopes: ObservationScopes,
-  params: { sessionId: string; parentSessionId?: string }
+  params: { sessionId: string; parentSessionId?: string; sessionCwd?: string }
 ): ObservationScopes {
   if (scopes === null || typeof scopes === "string") return scopes;
 
@@ -572,6 +573,9 @@ export function expandScopePlaceholders(
     group.map((tag) => {
       const prefix = SCOPE_PLACEHOLDERS[tag];
       if (prefix) {
+        if (prefix === "cwd") {
+          return params.sessionCwd ? `cwd:${params.sessionCwd}` : tag;
+        }
         const id =
           prefix === "parent" ? (params.parentSessionId ?? params.sessionId) : params.sessionId;
         return `${prefix}:${id}`;
@@ -588,12 +592,14 @@ export function expandScopePlaceholders(
 export function expandSessionObservationScopes(
   config: Pick<HindsightConfig, "observationScopes">,
   sessionId: string,
-  parentSessionId?: string
+  parentSessionId?: string,
+  sessionCwd?: string
 ): Exclude<ObservationScopes, null> | undefined {
   if (!config.observationScopes) return undefined;
   return expandScopePlaceholders(config.observationScopes, {
     sessionId,
     parentSessionId,
+    sessionCwd,
   }) as Exclude<ObservationScopes, null>;
 }
 
