@@ -7,15 +7,14 @@
       "dependencies": {
         "@vectorize-io/hindsight-client": "0.5.0",
         "jsonc-parser": "^3.3.1",
+        "typebox": "^1.1.24",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.4.12",
         "@types/bun": "latest",
       },
       "peerDependencies": {
-        "@mariozechner/pi-coding-agent": "0.70.0",
-        "typebox": "^1.x",
-        "typescript": "^5",
+        "@mariozechner/pi-coding-agent": "*",
       },
     },
   },
@@ -507,8 +506,6 @@
     "tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 
     "typebox": ["typebox@1.1.32", "", {}, "sha512-cbGoj7BCxGcFDJ/RR7wbyMe9IkO2SeNhwLdZWQ+xRtun9+ze9iM1pBND4SoFAxgonuJYrCIWnEQ7sE4bMVDYHA=="],
-
-    "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "uint8array-extras": ["uint8array-extras@1.5.0", "", {}, "sha512-rvKSBiC5zqCCiDZ9kAOszZcDvdAHwwIKJG33Ykj43OKcWsnmcBRL09YTU4nOeHZ8Y2a7l1MgTd08SBe9A8Qj6A=="],
 
