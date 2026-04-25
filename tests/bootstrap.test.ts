@@ -227,6 +227,443 @@ describe("real entrypoint bootstrap", () => {
     expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-hindsight", "🧠");
   });
 
+  it("session_start auto-creates metadata with retained=true when retainSessionsByDefault=true and no existing metadata", async () => {
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    // getEntries returns no hindsight-meta entries
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => []),
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    expect(pi.appendedEntries).toHaveLength(1);
+    expect(pi.appendedEntries[0]).toEqual({
+      customType: "hindsight-meta",
+      data: { retained: true },
+    });
+  });
+
+  it("session_start auto-creates metadata with retained=false when retainSessionsByDefault=false and no existing metadata", async () => {
+    activeConfig = { ...testConfig, retainSessionsByDefault: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => []),
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    expect(pi.appendedEntries).toHaveLength(1);
+    expect(pi.appendedEntries[0]).toEqual({
+      customType: "hindsight-meta",
+      data: { retained: false },
+    });
+  });
+
+  it("session_start does not auto-create metadata when it already exists", async () => {
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    // getEntries returns existing hindsight-meta
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ]),
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    expect(pi.appendedEntries).toHaveLength(0);
+  });
+
+  it("tool queue flushes on shutdown when autoRetainEnabled=false and session retained=true", async () => {
+    activeConfig = { ...testConfig, autoRetainEnabled: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const sessionId = BOOTSTRAP_SESSION;
+    const { enqueueToolMessage, readToolQueue, deleteAutoQueue, deleteToolQueue } =
+      require("../src/queue") as typeof import("../src/queue");
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+
+    // Simulate a tool retain (hindsight_retain tool queues to tool queue)
+    enqueueToolMessage(sessionId, {
+      content: "Important fact",
+      tags: ["harness:pi", `session:${sessionId}`],
+      timestamp: new Date().toISOString(),
+      store_method: "tool",
+    });
+    expect(readToolQueue(sessionId)).toHaveLength(1);
+
+    // Shutdown should flush the tool queue even though autoRetainEnabled=false
+    const shutdownHandler = pi.handlers.get("session_shutdown")!;
+    const ctx = createMockContext({ _sessionId: sessionId });
+    await shutdownHandler({ type: "session_shutdown" }, ctx);
+
+    expect(readToolQueue(sessionId)).toHaveLength(0);
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+  });
+
+  it("auto-queue stays empty on shutdown when autoRetainEnabled=false and session retained=true", async () => {
+    activeConfig = { ...testConfig, autoRetainEnabled: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const sessionId = BOOTSTRAP_SESSION;
+    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+      require("../src/queue") as typeof import("../src/queue");
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+
+    // message_end handler should NOT queue because autoRetainEnabled=false
+    const messageEndHandler = pi.handlers.get("message_end")!;
+    const ctx = createMockContext({ _sessionId: sessionId });
+    await messageEndHandler(
+      {
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+      },
+      ctx
+    );
+
+    expect(readAutoQueue(sessionId)).toHaveLength(0);
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+  });
+
+  // ============================================
+  // autoRetainEnabled × retained state combinations
+  //
+  // These tests verify the interaction table from the README:
+  // | autoRetainEnabled | retained | Auto-queue | Auto-queue flush | hindsight_retain | Parse & upsert |
+  // |:---:|:---:|:---:|:---:|:---:|:---:|
+  // | true  | true  | ✅ | ✅ | ✅ | ✅ |
+  // | true  | false | ❌ | N/A | ❌ | ❌ |
+  // | false | true  | ❌ | N/A | ✅ | ✅ |
+  // | false | false | ❌ | N/A | ❌ | ❌ |
+
+  it("autoRetainEnabled=true + retained=true: auto-queue works, tool works, parse-and-upsert works", async () => {
+    // Default config: autoRetainEnabled=true, retainSessionsByDefault=true
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const sessionId = BOOTSTRAP_SESSION;
+    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+      require("../src/queue") as typeof import("../src/queue");
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+
+    // Auto-queue: message_end should queue
+    const messageEndHandler = pi.handlers.get("message_end")!;
+    const ctx = createMockContext({ _sessionId: sessionId });
+    await messageEndHandler(
+      {
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+      },
+      ctx
+    );
+    expect(readAutoQueue(sessionId)).toHaveLength(1);
+
+    // Tool: hindsight_retain should succeed
+    const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
+    const toolResult = await retainTool.execute(
+      "test-call-id",
+      { content: "Important fact" },
+      undefined,
+      undefined,
+      createMockContext({ _sessionId: sessionId })
+    );
+    const details = (toolResult as { details: { success: boolean } }).details;
+    expect(details.success).toBe(true);
+
+    // Parse-and-upsert: should succeed (retained=true)
+    const { writeSessionFile, withTempDir } = await import("./fixtures");
+    await withTempDir(async (tmpDir) => {
+      const sessionPath = writeSessionFile(tmpDir, sessionId);
+      deleteAutoQueue(sessionId);
+      deleteToolQueue(sessionId);
+
+      const parseCtx = createMockContext({
+        _sessionId: sessionId,
+        sessionManager: {
+          ...createMockContext().sessionManager,
+          getSessionFile: mock(() => sessionPath),
+        },
+      });
+
+      const commandHandler = (
+        pi.commands.get("hindsight") as {
+          handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+        }
+      ).handler;
+      await commandHandler("parse-and-upsert-session", parseCtx);
+
+      const parseNotification = (parseCtx as unknown as { ui: { notify: ReturnType<typeof mock> } })
+        .ui.notify.mock.calls;
+      const lastCall = parseNotification[parseNotification.length - 1]!;
+      expect(lastCall[0]).toContain("Parsed and upserted");
+      expect(lastCall[0]).not.toContain("does not allow retention");
+    });
+
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+  });
+
+  it("autoRetainEnabled=true + retained=false: no auto-queue, tool blocked, parse-session blocked", async () => {
+    // Default autoRetainEnabled=true, but retained=false
+    activeConfig = { ...testConfig, retainSessionsByDefault: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const sessionId = BOOTSTRAP_SESSION;
+    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+      require("../src/queue") as typeof import("../src/queue");
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+
+    const ctx = createMockContext({
+      _sessionId: sessionId,
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ]),
+      },
+    });
+
+    // Auto-queue: message_end should NOT queue (retained=false)
+    const messageEndHandler = pi.handlers.get("message_end")!;
+    await messageEndHandler(
+      {
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+      },
+      ctx
+    );
+    expect(readAutoQueue(sessionId)).toHaveLength(0);
+
+    // Tool: hindsight_retain should be blocked (retained=false)
+    const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
+    const toolResult = await retainTool.execute(
+      "test-call-id",
+      { content: "Important fact" },
+      undefined,
+      undefined,
+      ctx
+    );
+    const toolDetails = (toolResult as { details: { success: boolean; error?: string } }).details;
+    expect(toolDetails.success).toBe(false);
+    expect(toolDetails.error).toContain("does not allow retention");
+
+    // Parse-and-upsert: should be blocked (retained=false)
+    // Need a session file so parseCurrentSession gets past the file check
+    const { writeSessionFile, withTempDir } = await import("./fixtures");
+    await withTempDir(async (tmpDir) => {
+      const sessionPath = writeSessionFile(tmpDir, sessionId);
+      const parseCtx = createMockContext({
+        _sessionId: sessionId,
+        sessionManager: {
+          ...createMockContext().sessionManager,
+          getSessionFile: mock(() => sessionPath),
+          getEntries: mock(() => [
+            { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+          ]),
+        },
+      });
+
+      const commandHandler = (
+        pi.commands.get("hindsight") as {
+          handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+        }
+      ).handler;
+      await commandHandler("parse-and-upsert-session", parseCtx);
+
+      const parseNotification = (parseCtx as unknown as { ui: { notify: ReturnType<typeof mock> } })
+        .ui.notify.mock.calls;
+      const lastCall = parseNotification[parseNotification.length - 1]!;
+      expect(lastCall[0]).toContain("does not allow retention");
+    });
+
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+  });
+
+  it("autoRetainEnabled=false + retained=true: no auto-queue, tool works, parse-and-upsert works", async () => {
+    activeConfig = { ...testConfig, autoRetainEnabled: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const sessionId = BOOTSTRAP_SESSION;
+    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+      require("../src/queue") as typeof import("../src/queue");
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+
+    const ctx = createMockContext({ _sessionId: sessionId });
+
+    // Auto-queue: message_end should NOT queue (autoRetainEnabled=false)
+    const messageEndHandler = pi.handlers.get("message_end")!;
+    await messageEndHandler(
+      {
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+      },
+      ctx
+    );
+    expect(readAutoQueue(sessionId)).toHaveLength(0);
+
+    // Tool: hindsight_retain should succeed (retained=true, autoRetainEnabled not checked)
+    const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
+    const toolResult = await retainTool.execute(
+      "test-call-id",
+      { content: "Important fact" },
+      undefined,
+      undefined,
+      ctx
+    );
+    const toolDetails = (toolResult as { details: { success: boolean } }).details;
+    expect(toolDetails.success).toBe(true);
+
+    // Parse-and-upsert: should succeed (retained=true, autoRetainEnabled not checked)
+    const { writeSessionFile, withTempDir } = await import("./fixtures");
+    await withTempDir(async (tmpDir) => {
+      const sessionPath = writeSessionFile(tmpDir, sessionId);
+      deleteAutoQueue(sessionId);
+      deleteToolQueue(sessionId);
+
+      const parseCtx = createMockContext({
+        _sessionId: sessionId,
+        sessionManager: {
+          ...createMockContext().sessionManager,
+          getSessionFile: mock(() => sessionPath),
+        },
+      });
+
+      const commandHandler = (
+        pi.commands.get("hindsight") as {
+          handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+        }
+      ).handler;
+      await commandHandler("parse-and-upsert-session", parseCtx);
+
+      const parseNotification = (parseCtx as unknown as { ui: { notify: ReturnType<typeof mock> } })
+        .ui.notify.mock.calls;
+      const lastCall = parseNotification[parseNotification.length - 1]!;
+      expect(lastCall[0]).toContain("Parsed and upserted");
+      expect(lastCall[0]).not.toContain("does not allow retention");
+    });
+
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+  });
+
+  it("autoRetainEnabled=false + retained=false: no auto-queue, tool blocked, parse-session blocked", async () => {
+    activeConfig = { ...testConfig, autoRetainEnabled: false, retainSessionsByDefault: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const sessionId = BOOTSTRAP_SESSION;
+    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+      require("../src/queue") as typeof import("../src/queue");
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+
+    const ctx = createMockContext({
+      _sessionId: sessionId,
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ]),
+      },
+    });
+
+    // Auto-queue: message_end should NOT queue
+    const messageEndHandler = pi.handlers.get("message_end")!;
+    await messageEndHandler(
+      {
+        type: "message_end",
+        message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+      },
+      ctx
+    );
+    expect(readAutoQueue(sessionId)).toHaveLength(0);
+
+    // Tool: hindsight_retain should be blocked (retained=false)
+    const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
+    const toolResult = await retainTool.execute(
+      "test-call-id",
+      { content: "Important fact" },
+      undefined,
+      undefined,
+      ctx
+    );
+    const toolDetails = (toolResult as { details: { success: boolean; error?: string } }).details;
+    expect(toolDetails.success).toBe(false);
+    expect(toolDetails.error).toContain("does not allow retention");
+
+    // Parse-and-upsert: should be blocked (retained=false)
+    const { writeSessionFile, withTempDir } = await import("./fixtures");
+    await withTempDir(async (tmpDir) => {
+      const sessionPath = writeSessionFile(tmpDir, sessionId);
+      const parseCtx = createMockContext({
+        _sessionId: sessionId,
+        sessionManager: {
+          ...createMockContext().sessionManager,
+          getSessionFile: mock(() => sessionPath),
+          getEntries: mock(() => [
+            { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+          ]),
+        },
+      });
+
+      const commandHandler = (
+        pi.commands.get("hindsight") as {
+          handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+        }
+      ).handler;
+      await commandHandler("parse-and-upsert-session", parseCtx);
+
+      const parseNotification = (parseCtx as unknown as { ui: { notify: ReturnType<typeof mock> } })
+        .ui.notify.mock.calls;
+      const lastCall = parseNotification[parseNotification.length - 1]!;
+      expect(lastCall[0]).toContain("does not allow retention");
+    });
+
+    deleteAutoQueue(sessionId);
+    deleteToolQueue(sessionId);
+  });
+
   it("context handler filters out hindsight-recall messages", async () => {
     const pi = createMockPi();
     const extension = await import("../src/index");
