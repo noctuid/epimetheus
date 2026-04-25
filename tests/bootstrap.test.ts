@@ -82,7 +82,7 @@ afterEach(() => {
   deleteAutoQueue(BOOTSTRAP_SESSION);
   deleteToolQueue(BOOTSTRAP_SESSION);
 
-  // Reset module-level mutable state (recallDisplayOverride, lastRecallMessage)
+  // Reset module-level mutable state (autoRecallDisplayOverride, lastRecallMessage)
   // to prevent test order dependencies — toggle-display tests mutate this state
   // and the module is cached by Bun's module system.
   const { _resetState } = require("../src/index") as typeof import("../src/index");
@@ -153,7 +153,7 @@ describe("real entrypoint bootstrap", () => {
   });
 
   it("renderer returns dynamic components that respect display toggle", async () => {
-    activeConfig = { ...testConfig, recallPersist: true, recallDisplay: false };
+    activeConfig = { ...testConfig, autoRecallPersist: true, autoRecallDisplay: false };
 
     const pi = createMockPi();
     const extension = await import("../src/index");
@@ -183,7 +183,7 @@ describe("real entrypoint bootstrap", () => {
       bg: (_name: string, text: string) => text,
     };
 
-    // Create collapsed component — default state: recallDisplay false → hidden
+    // Create collapsed component — default state: autoRecallDisplay false → hidden
     const collapsed = renderer(message, { expanded: false }, mockTheme)!;
     expect(collapsed.render(80)).toEqual([]);
 
@@ -948,8 +948,8 @@ describe("real entrypoint bootstrap", () => {
     expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-hindsight", "🧠");
   });
 
-  it("before_agent_start handler returns recall message when recallPersist is true", async () => {
-    activeConfig = { ...testConfig, recallPersist: true };
+  it("before_agent_start handler returns recall message when autoRecallPersist is true", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -989,13 +989,13 @@ describe("real entrypoint bootstrap", () => {
     expect(result?.message).toBeDefined();
     const msg = result?.message as Record<string, unknown>;
     expect(msg.customType).toBe("hindsight-recall");
-    // When recallPersist: true, display is always true so the message is added
+    // When autoRecallPersist: true, display is always true so the message is added
     // to the TUI chat container (renderer dynamically controls visibility)
     expect(msg.display).toBe(true);
   });
 
-  it("before_agent_start uses display: true even when recallDisplay: false and recallPersist: true", async () => {
-    activeConfig = { ...testConfig, recallPersist: true, recallDisplay: false };
+  it("before_agent_start uses display: true even when autoRecallDisplay: false and autoRecallPersist: true", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true, autoRecallDisplay: false };
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -1033,8 +1033,8 @@ describe("real entrypoint bootstrap", () => {
     expect(msg.display).toBe(true);
   });
 
-  it("before_agent_start caches recall but does not persist when recallPersist is false", async () => {
-    // activeConfig already has recallPersist: false from afterEach reset
+  it("before_agent_start caches recall but does not persist when autoRecallPersist is false", async () => {
+    // activeConfig already has autoRecallPersist: false from afterEach reset
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -1146,10 +1146,10 @@ describe("real entrypoint bootstrap", () => {
   });
 
   // ============================================
-  // recallPersist context filtering regression (integration)
+  // autoRecallPersist context filtering regression (integration)
   // ============================================
   //
-  // Bug: When recallPersist: true, before_agent_start injects a hindsight-recall
+  // Bug: When autoRecallPersist: true, before_agent_start injects a hindsight-recall
   // message into the session, but the context handler stripped ALL hindsight-recall
   // messages and never re-injected, so the LLM never saw recalled memories.
   //
@@ -1157,8 +1157,8 @@ describe("real entrypoint bootstrap", () => {
   // The context handler strips stale recalls and re-injects the cached recall.
   // These tests exercise the real handler flow (before_agent_start → context).
 
-  it("recallPersist: true - recall survives before_agent_start → context handler flow", async () => {
-    activeConfig = { ...testConfig, recallPersist: true };
+  it("autoRecallPersist: true - recall survives before_agent_start → context handler flow", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -1228,8 +1228,8 @@ describe("real entrypoint bootstrap", () => {
     expect(recallMsgs[0]?.content).toContain("Important memory");
   });
 
-  it("recallPersist: true - stale recalls filtered when no recall this turn", async () => {
-    activeConfig = { ...testConfig, recallPersist: true };
+  it("autoRecallPersist: true - stale recalls filtered when no recall this turn", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
     // recall returns no results this turn (simulating no new recall)
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
@@ -1281,8 +1281,8 @@ describe("real entrypoint bootstrap", () => {
     expect(messages).toHaveLength(1); // just user message
   });
 
-  it("recallPersist: false - recall cached by before_agent_start is re-injected by context", async () => {
-    // activeConfig already has recallPersist: false
+  it("autoRecallPersist: false - recall cached by before_agent_start is re-injected by context", async () => {
+    // activeConfig already has autoRecallPersist: false
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -1350,8 +1350,8 @@ describe("real entrypoint bootstrap", () => {
   // the context handler's consumption of lastRecallMessage.
   // These tests exercise the real handler flow (before_agent_start → context → popup).
 
-  it("popup command shows recall details after context handler consumes lastRecallMessage (recallPersist: true)", async () => {
-    activeConfig = { ...testConfig, recallPersist: true };
+  it("popup command shows recall details after context handler consumes lastRecallMessage (autoRecallPersist: true)", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -1424,8 +1424,8 @@ describe("real entrypoint bootstrap", () => {
     expect(ctxPopup.ui.notify).not.toHaveBeenCalled();
   });
 
-  it("popup command shows recall details after context handler consumes lastRecallMessage (recallPersist: false)", async () => {
-    // recallPersist: false is the default
+  it("popup command shows recall details after context handler consumes lastRecallMessage (autoRecallPersist: false)", async () => {
+    // autoRecallPersist: false is the default
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -1611,7 +1611,7 @@ describe("real entrypoint bootstrap", () => {
   });
 
   it("context handler filters stale recalls when no recall cached", async () => {
-    activeConfig = { ...testConfig, recallPersist: false };
+    activeConfig = { ...testConfig, autoRecallPersist: false };
     // No results → nothing cached by before_agent_start
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),

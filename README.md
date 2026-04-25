@@ -11,7 +11,7 @@ Status: This is currently alpha level software. I recommend waiting until I publ
   - [Example Configuration](#example-configuration)
   - [General Settings](#general-settings)
   - [Auto-Recall Settings](#auto-recall-settings)
-    - [recallPersist Tradeoffs](#recallpersist-tradeoffs)
+    - [autoRecallPersist Tradeoffs](#autorecallpersist-tradeoffs)
   - [Status Bar Indicator](#status-bar-indicator)
   - [Session Retention Control](#session-retention-control)
   - [Content Retention & Stripping Settings](#content-retention--stripping-settings)
@@ -116,8 +116,8 @@ Create a basic `~/.pi/agent/extensions/pi-hindsight/config.jsonc`:
   "apiKey": "unused",
   "bankId": "default",
   // read over tradeoffs before enabling
-  "recallPersist": true,
-  "recallDisplay": true,
+  "autoRecallPersist": true,
+  "autoRecallDisplay": true,
   // recommended to change from default or you will not get cross-session observations
   "observationScopes": [
     // observations about all pi sessions (could also be something like ["user:<me>"] if you add that as a constant tag)
@@ -129,7 +129,7 @@ Create a basic `~/.pi/agent/extensions/pi-hindsight/config.jsonc`:
   ]
 }
 ```
-See [recallPersist Tradeoffs](#recallpersist-tradeoffs) before enabling!
+See [autoRecallPersist Tradeoffs](#autorecallpersist-tradeoffs) before enabling!
 
 # Configuration
 Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json` or `config.jsonc` (JSONC has precedence).
@@ -142,8 +142,8 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
   "apiKey": "your-api-key",
   "bankId": "default",
   // store recalls in session file and show collapsable blocks; see caveat below!
-  "recallPersist": true,
-  "recallDisplay": true,
+  "autoRecallPersist": true,
+  "autoRecallDisplay": true,
   // if you want to reduce injected memory tokens (hindsight default: 4096, high: 8192)
   // see https://hindsight.vectorize.io/developer/retrieval#max-tokens-context-window-size
   "maxRecallTokens": 2048
@@ -171,25 +171,25 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `recallShowDateTime` | `true` | Include current date/time above recalled memories |
-| `recallDisplay` | `false` | Show recalled messages in the UI (only works with `recallPersist: true`) |
-| `recallPersist` | `false` | Save recall messages to session file (visible in TUI after restart). When `true`, uses `before_agent_start` event for visible, persisted messages. When `false`, uses `context` event for ephemeral messages not shown in TUI. |
+| `autoRecallDisplay` | `false` | Show recalled messages in the UI (only works with `autoRecallPersist: true`) |
+| `autoRecallPersist` | `false` | Save recall messages to session file (visible in TUI after restart). When `true`, uses `before_agent_start` event for visible, persisted messages. When `false`, uses `context` event for ephemeral messages not shown in TUI. |
 | `recallTypes` | `["observation"]` | Memory types to recall. Set to `null` or `[]` to recall all types. |
 
 > **Note:** observations are deduplicated consolidated information about memories and probably the most useful recall type. See [hindsight issue #826](https://github.com/vectorize-io/hindsight/issues/826) for more information.
 
-### recallPersist Tradeoffs
-When `recallPersist: true`:
+### autoRecallPersist Tradeoffs
+When `autoRecallPersist: true`:
 - Recall messages are visible in the TUI and saved to the session file
 - Uses `before_agent_start` event to inject messages
 - Context filtering in the `context` event prevents old recall messages from being re-sent to the LLM
 - **Important**: If pi-hindsight is not loaded, old recall messages in the session file will be sent to the LLM; if you stop using pi-hindsight, you should filter them out yourself or remove them from your session files
-- `recallDisplay: true` can be used to show recall messages to the user
+- `autoRecallDisplay: true` can be used to show recall messages to the user
 
-When `recallPersist: false` (default):
+When `autoRecallPersist: false` (default):
 - Recall messages are ephemeral - sent to LLM but not displayed or persisted except for the most recent message with `/hindsight popup`
 - Uses `context` event for injection
 - No risk of old recall messages polluting context
-- `recallDisplay: true` has no effect (memories are not stored and cannot be shown in chat; only the most recent is available via `/hindsight popup`)
+- `autoRecallDisplay: true` has no effect (memories are not stored and cannot be shown in chat; only the most recent is available via `/hindsight popup`)
 
 ## Status Bar Indicator
 The extension shows a health indicator in pi's status bar:
@@ -446,8 +446,8 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_MAX_RECALL_TOKENS` | `maxRecallTokens` | number \| null | `null` |
 | `PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE` | `recallPromptPreamble` | string | *(see defaults)* |
 | `PI_HINDSIGHT_RECALL_SHOW_DATETIME` | `recallShowDateTime` | boolean | `true` |
-| `PI_HINDSIGHT_RECALL_DISPLAY` | `recallDisplay` | boolean | `false` |
-| `PI_HINDSIGHT_RECALL_PERSIST` | `recallPersist` | boolean | `false` |
+| `PI_HINDSIGHT_AUTO_RECALL_DISPLAY` | `autoRecallDisplay` | boolean | `false` |
+| `PI_HINDSIGHT_AUTO_RECALL_PERSIST` | `autoRecallPersist` | boolean | `false` |
 | `PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS` | `recallMaxQueryChars` | number | `800` |
 | `PI_HINDSIGHT_RECALL_TYPES` | `recallTypes` | string[] (JSON) | `["observation"]` |
 | `PI_HINDSIGHT_CONSTANT_TAGS` | `constantTags` | string[] (JSON) | `["harness:pi"]` |

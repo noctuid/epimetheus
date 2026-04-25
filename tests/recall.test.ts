@@ -244,11 +244,11 @@ describe("formatRecallMessage", () => {
 });
 
 // ============================================
-// recallPersist behavior tests
+// autoRecallPersist behavior tests
 // ============================================
 
-describe("recallPersist behavior", () => {
-  describe("when recallPersist: true", () => {
+describe("autoRecallPersist behavior", () => {
+  describe("when autoRecallPersist: true", () => {
     it("recall message has display: false by default", () => {
       const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
       const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
@@ -257,14 +257,14 @@ describe("recallPersist behavior", () => {
       expect(message.customType).toBe("hindsight-recall");
     });
 
-    it("recall message can have display: true when recallDisplay is true", () => {
+    it("recall message can have display: true when autoRecallDisplay is true", () => {
       const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
       const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, true);
       expect(message.display).toBe(true);
     });
   });
 
-  describe("when recallPersist: false", () => {
+  describe("when autoRecallPersist: false", () => {
     it("recall message always has display: false", () => {
       const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
       const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
@@ -544,7 +544,7 @@ describe("hindsight-popup command", () => {
       expect(recallDetails?.count).toBe(2);
     });
 
-    it("works with recallPersist: true scenario", () => {
+    it("works with autoRecallPersist: true scenario", () => {
       const results: RecallResponse["results"] = [
         { id: "1", text: "Memory from before_agent_start" },
       ];
@@ -555,7 +555,7 @@ describe("hindsight-popup command", () => {
       expect(recallDetails?.count).toBe(1);
     });
 
-    it("works with recallPersist: false scenario", () => {
+    it("works with autoRecallPersist: false scenario", () => {
       const results: RecallResponse["results"] = [{ id: "1", text: "Memory from context event" }];
 
       const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);

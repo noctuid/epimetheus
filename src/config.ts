@@ -59,8 +59,8 @@ export interface HindsightConfig {
   maxRecallTokens: number | null;
   recallPromptPreamble: string;
   recallShowDateTime: boolean;
-  recallDisplay: boolean;
-  recallPersist: boolean;
+  autoRecallDisplay: boolean;
+  autoRecallPersist: boolean;
   recallMaxQueryChars: number;
   recallTypes: MemoryType[] | null;
   constantTags: string[];
@@ -92,8 +92,8 @@ const DEFAULT_CONFIG: HindsightConfig = {
   recallPromptPreamble:
     "[System note: The following is recalled memory context, NOT new user input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]",
   recallShowDateTime: true,
-  recallDisplay: false,
-  recallPersist: false,
+  autoRecallDisplay: false,
+  autoRecallPersist: false,
   recallMaxQueryChars: 800,
   recallTypes: ["observation"],
   constantTags: ["harness:pi"],
@@ -144,8 +144,8 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "maxRecallTokens",
   "recallPromptPreamble",
   "recallShowDateTime",
-  "recallDisplay",
-  "recallPersist",
+  "autoRecallDisplay",
+  "autoRecallPersist",
   "recallMaxQueryChars",
   "recallTypes",
   "constantTags",
@@ -346,8 +346,8 @@ function setConfigValue(
     case "autoRecallEnabled":
     case "autoRetainEnabled":
     case "recallShowDateTime":
-    case "recallDisplay":
-    case "recallPersist":
+    case "autoRecallDisplay":
+    case "autoRecallPersist":
     case "retainSessionsByDefault":
     case "flushOnCompact": {
       if (typeof value === "boolean") {
@@ -675,8 +675,8 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_MAX_RECALL_TOKENS: "maxRecallTokens",
     PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE: "recallPromptPreamble",
     PI_HINDSIGHT_RECALL_SHOW_DATETIME: "recallShowDateTime",
-    PI_HINDSIGHT_RECALL_DISPLAY: "recallDisplay",
-    PI_HINDSIGHT_RECALL_PERSIST: "recallPersist",
+    PI_HINDSIGHT_AUTO_RECALL_DISPLAY: "autoRecallDisplay",
+    PI_HINDSIGHT_AUTO_RECALL_PERSIST: "autoRecallPersist",
     PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS: "recallMaxQueryChars",
     PI_HINDSIGHT_RECALL_TYPES: "recallTypes",
     PI_HINDSIGHT_CONSTANT_TAGS: "constantTags",
@@ -849,10 +849,10 @@ export function validateConfig(config: HindsightConfig): {
     }
   }
 
-  // Warn if recallDisplay is true but recallPersist is false
-  if (config.recallDisplay && !config.recallPersist) {
+  // Warn if autoRecallDisplay is true but autoRecallPersist is false
+  if (config.autoRecallDisplay && !config.autoRecallPersist) {
     warnings.push(
-      "recallDisplay: true has no effect when recallPersist: false (memories are not stored and cannot be shown in chat; only the most recent is available via /hindsight popup)"
+      "autoRecallDisplay: true has no effect when autoRecallPersist: false (memories are not stored and cannot be shown in chat; only the most recent is available via /hindsight popup)"
     );
   }
 

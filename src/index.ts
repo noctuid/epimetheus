@@ -19,9 +19,9 @@ import { registerTools } from "./tools";
 import { extractParentSessionId, getSessionDisplayName, truncate } from "./utils";
 
 // Runtime toggle for recall display (overrides config)
-let recallDisplayOverride: boolean | null = null;
+let autoRecallDisplayOverride: boolean | null = null;
 
-// Cache last recall message for context handler re-injection (recallPersist: true)
+// Cache last recall message for context handler re-injection (autoRecallPersist: true)
 // Consumed once per turn by the context handler.
 let lastRecallMessage: ReturnType<typeof formatRecallMessage> | null = null;
 
@@ -33,7 +33,7 @@ let lastRecallDetails: RecallMessageDetails | null = null;
  * Reset module-level mutable state. Exported for testing only.
  */
 export function _resetState(): void {
-  recallDisplayOverride = null;
+  autoRecallDisplayOverride = null;
   lastRecallMessage = null;
   lastRecallDetails = null;
 }
@@ -80,7 +80,7 @@ export default function (pi: ExtensionAPI) {
 
   // Set status bar indicator based on health
   // Unhealthy when config is invalid (no client) or server is unreachable.
-  // Validation warnings (e.g. recallDisplay with recallPersist) are cosmetic
+  // Validation warnings (e.g. autoRecallDisplay with autoRecallPersist) are cosmetic
   // and should not override a successful connectivity check.
   const hasUsableConfig = validation.valid;
   pi.on("session_start", async (_event, ctx) => {
@@ -115,9 +115,9 @@ export default function (pi: ExtensionAPI) {
     config,
     client,
     () => lastRecallDetails,
-    () => recallDisplayOverride,
+    () => autoRecallDisplayOverride,
     (value) => {
-      recallDisplayOverride = value;
+      autoRecallDisplayOverride = value;
     },
     {
       configPath,
@@ -130,7 +130,7 @@ export default function (pi: ExtensionAPI) {
   // Getter for current recall display state — used by dynamic renderers
   // to re-check toggle state on every render pass, enabling immediate
   // show/hide when the user toggles display.
-  const getRecallDisplay = () => recallDisplayOverride ?? config.recallDisplay;
+  const getRecallDisplay = () => autoRecallDisplayOverride ?? config.autoRecallDisplay;
 
   // Register custom message renderer for hindsight-recall messages.
   // Uses dynamic components that check the runtime toggle on every render()
@@ -151,7 +151,7 @@ export default function (pi: ExtensionAPI) {
 
   // Auto-recall on before_agent_start.
   // Always performs recall and caches the result for the context handler to re-inject.
-  // Only returns the message (persisting it to session) when recallPersist is true.
+  // Only returns the message (persisting it to session) when autoRecallPersist is true.
   pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
     if (!client || !config.autoRecallEnabled) return;
 
@@ -161,23 +161,23 @@ export default function (pi: ExtensionAPI) {
     if (!query) return;
 
     // display controls whether the recall message is shown in the TUI.
-    // When recallPersist is true, always use display: true so the message is
+    // When autoRecallPersist is true, always use display: true so the message is
     // added to the TUI chat container. The custom renderer dynamically checks
     // the runtime toggle on every render() call to show/hide the content.
-    // When recallPersist is false, the message is ephemeral (re-injected only
+    // When autoRecallPersist is false, the message is ephemeral (re-injected only
     // by the context handler), so display controls the context handler's
     // message visibility directly.
-    const displayValue = config.recallPersist
+    const displayValue = config.autoRecallPersist
       ? true
-      : (recallDisplayOverride ?? config.recallDisplay);
+      : (autoRecallDisplayOverride ?? config.autoRecallDisplay);
 
     // Call shared recall helper
     const result = await doAutoRecall(query, ctx.signal, displayValue);
     if (result) {
       lastRecallMessage = result.recallMessage;
       lastRecallDetails = result.recallMessage.details;
-      // Only persist to session file when recallPersist is true
-      if (config.recallPersist) {
+      // Only persist to session file when autoRecallPersist is true
+      if (config.autoRecallPersist) {
         return { message: result.recallMessage };
       }
     }
@@ -200,8 +200,8 @@ export default function (pi: ExtensionAPI) {
 
     // Re-inject the cached recall from before_agent_start.
     // before_agent_start always does the recall and caches the message here.
-    // When recallPersist: true, the message was also persisted to the session file;
-    // when recallPersist: false, it's ephemeral (re-injected here only for this turn).
+    // When autoRecallPersist: true, the message was also persisted to the session file;
+    // when autoRecallPersist: false, it's ephemeral (re-injected here only for this turn).
     const cachedRecall = lastRecallMessage;
     lastRecallMessage = null; // Clear after reading (consume once per turn)
     if (cachedRecall) {
@@ -433,11 +433,11 @@ export interface RecallMessageDetails {
  * Precondition: results must be non-empty (caller checks results.length > 0).
  *
  * The `display` parameter controls TUI visibility:
- * - When recallPersist is true, display is always true (message is persisted to
+ * - When autoRecallPersist is true, display is always true (message is persisted to
  *   session and added to chat container; the custom renderer dynamically checks
  *   the runtime toggle to show/hide content).
- * - When recallPersist is false, the caller passes the current
- *   recallDisplay/override value, which may be true or false. However, since
+ * - When autoRecallPersist is false, the caller passes the current
+ *   autoRecallDisplay/override value, which may be true or false. However, since
  *   the message is ephemeral (not added to the TUI chat container), the
  *   display value has no practical effect on rendering — it only controls
  *   whether pi's addMessageToChat adds a CustomMessageComponent.
