@@ -473,6 +473,20 @@ describe("filterContent with toolFilter", () => {
     const filtered = filterContent(content, "assistant", retainContentWithTools, toolFilter);
     expect(filtered).toHaveLength(1);
   });
+
+  it("passes toolCall blocks without name field with include filter", () => {
+    const content = [
+      { type: "toolCall", id: "call-1" }, // no name field
+    ];
+
+    const toolFilter: ToolFilter = {
+      toolCall: { include: ["read"] },
+    };
+
+    // toolCall without name should pass (can't determine tool, fail-open)
+    const filtered = filterContent(content, "assistant", retainContentWithTools, toolFilter);
+    expect(filtered).toHaveLength(1);
+  });
 });
 
 describe("prepareEntry with toolFilter", () => {
