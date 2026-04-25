@@ -78,8 +78,8 @@ export function createStatusSubcommand(
 
       // Active recall settings
       lines.push("\n== Auto Recall Settings ==");
-      lines.push(`  Persist: ${config.recallPersist}`);
-      lines.push(`  Display: ${config.recallDisplay}`);
+      lines.push(`  Persist: ${config.autoRecallPersist}`);
+      lines.push(`  Display: ${config.autoRecallDisplay}`);
       lines.push(`  Types: ${config.recallTypes ? config.recallTypes.join(", ") : "all"}`);
       lines.push(`  Budget: ${config.autoRecallBudget}`);
 

@@ -11,29 +11,29 @@ import type { Subcommand } from "./types";
 /**
  * Create the toggle-display subcommand — toggle recall message visibility.
  *
- * When recallPersist is false, recall messages are never shown in the TUI,
- * so this command warns and does nothing. When recallPersist is true, toggles
+ * When autoRecallPersist is false, recall messages are never shown in the TUI,
+ * so this command warns and does nothing. When autoRecallPersist is true, toggles
  * the display override between visible and hidden.
  */
 export function createToggleDisplaySubcommand(
   config: HindsightConfig,
-  getRecallDisplayOverride: () => boolean | null,
-  setRecallDisplayOverride: (value: boolean | null) => void
+  getAutoRecallDisplayOverride: () => boolean | null,
+  setAutoRecallDisplayOverride: (value: boolean | null) => void
 ): Subcommand {
   return {
     description: "Toggle recall message display",
     handler: async (_args: string, ctx: ExtensionContext) => {
-      // Cannot toggle when recallPersist is false (memories not stored, cannot show in chat)
-      if (!config.recallPersist) {
+      // Cannot toggle when autoRecallPersist is false (memories not stored, cannot show in chat)
+      if (!config.autoRecallPersist) {
         ctx.ui.notify(
-          "Cannot toggle display: recallPersist is false (memories are not stored and cannot be shown in chat; only the most recent is available via /hindsight popup)",
+          "Cannot toggle display: autoRecallPersist is false (memories are not stored and cannot be shown in chat; only the most recent is available via /hindsight popup)",
           "warning"
         );
         return;
       }
       // Toggle from current state (default from config)
-      const currentState = getRecallDisplayOverride() ?? config.recallDisplay;
-      setRecallDisplayOverride(!currentState);
+      const currentState = getAutoRecallDisplayOverride() ?? config.autoRecallDisplay;
+      setAutoRecallDisplayOverride(!currentState);
       ctx.ui.notify(`Recall display: ${!currentState ? "visible" : "hidden"}`, "info");
     },
   };

@@ -34,8 +34,8 @@ import type { Subcommand } from "./types";
  * @param config - Resolved Hindsight configuration.
  * @param client - Hindsight client wrapper, or null if not configured.
  * @param getRecallDetails - Getter for the last recall details (cached per session).
- * @param getRecallDisplayOverride - Getter for the runtime display override.
- * @param setRecallDisplayOverride - Setter for the runtime display override.
+ * @param getAutoRecallDisplayOverride - Getter for the runtime display override.
+ * @param setAutoRecallDisplayOverride - Setter for the runtime display override.
  * @param configMeta - Metadata about config source (file path, env vars, warnings).
  */
 export function registerCommands(
@@ -43,8 +43,8 @@ export function registerCommands(
   config: HindsightConfig,
   client: HindsightClientWrapper | null,
   getRecallDetails: () => RecallMessageDetails | null,
-  getRecallDisplayOverride: () => boolean | null,
-  setRecallDisplayOverride: (value: boolean | null) => void,
+  getAutoRecallDisplayOverride: () => boolean | null,
+  setAutoRecallDisplayOverride: (value: boolean | null) => void,
   configMeta: {
     configPath?: string;
     envVars: string[];
@@ -62,8 +62,8 @@ export function registerCommands(
     "remove-tag": createRemoveTagSubcommand(pi),
     "toggle-display": createToggleDisplaySubcommand(
       config,
-      getRecallDisplayOverride,
-      setRecallDisplayOverride
+      getAutoRecallDisplayOverride,
+      setAutoRecallDisplayOverride
     ),
     popup: createPopupSubcommand(getRecallDetails),
     status: createStatusSubcommand(client, config, getRecallDetails),

@@ -22,7 +22,7 @@ describe("registerCommands", () => {
   let mockPi: { registerCommand: ReturnType<typeof mock>; appendEntry: ReturnType<typeof mock> };
   let mockClient: HindsightClientWrapper | null;
   let recallDetails: RecallMessageDetails | null;
-  let recallDisplayOverride: boolean | null;
+  let autoRecallDisplayOverride: boolean | null;
   let lastNotification: { message: string; type: string } | null;
   let appendedEntries: { customType: string; data?: unknown }[];
   let sessionEntries: unknown[];
@@ -32,7 +32,7 @@ describe("registerCommands", () => {
     // Fresh state for every test — prevents mockClient mutation from leaking
     registeredCommands = new Map();
     recallDetails = null;
-    recallDisplayOverride = null;
+    autoRecallDisplayOverride = null;
     lastNotification = null;
     appendedEntries = [];
     sessionEntries = [];
@@ -55,9 +55,9 @@ describe("registerCommands", () => {
       config,
       client,
       () => recallDetails,
-      () => recallDisplayOverride,
+      () => autoRecallDisplayOverride,
       () => {
-        recallDisplayOverride = !recallDisplayOverride;
+        autoRecallDisplayOverride = !autoRecallDisplayOverride;
       },
       { configPath: undefined, envVars: [], warning: undefined, validationWarnings: [] }
     );
@@ -74,9 +74,9 @@ describe("registerCommands", () => {
       statusTestConfig,
       mockClient,
       () => recallDetails,
-      () => recallDisplayOverride,
+      () => autoRecallDisplayOverride,
       () => {
-        recallDisplayOverride = !recallDisplayOverride;
+        autoRecallDisplayOverride = !autoRecallDisplayOverride;
       },
       meta
     );
@@ -963,28 +963,28 @@ describe("registerCommands", () => {
   });
 
   describe("toggle-display subcommand", () => {
-    it("warns when recallPersist is false", async () => {
-      register(); // recallPersist: false by default
+    it("warns when autoRecallPersist is false", async () => {
+      register(); // autoRecallPersist: false by default
       await getHandler()("toggle-display", makeCtx());
       expect(lastNotification?.message).toContain("Cannot toggle display");
-      expect(lastNotification?.message).toContain("recallPersist is false");
+      expect(lastNotification?.message).toContain("autoRecallPersist is false");
     });
 
-    it("toggles display from hidden to visible when recallPersist is true", async () => {
-      register({ ...statusTestConfig, recallPersist: true, recallDisplay: false });
+    it("toggles display from hidden to visible when autoRecallPersist is true", async () => {
+      register({ ...statusTestConfig, autoRecallPersist: true, autoRecallDisplay: false });
       await getHandler()("toggle-display", makeCtx());
       expect(lastNotification?.message).toContain("Recall display: visible");
     });
 
-    it("toggles display from visible to hidden when recallPersist is true", async () => {
-      register({ ...statusTestConfig, recallPersist: true, recallDisplay: true });
+    it("toggles display from visible to hidden when autoRecallPersist is true", async () => {
+      register({ ...statusTestConfig, autoRecallPersist: true, autoRecallDisplay: true });
       await getHandler()("toggle-display", makeCtx());
       expect(lastNotification?.message).toContain("Recall display: hidden");
     });
 
     it("respects existing override", async () => {
-      recallDisplayOverride = true;
-      register({ ...statusTestConfig, recallPersist: true, recallDisplay: false });
+      autoRecallDisplayOverride = true;
+      register({ ...statusTestConfig, autoRecallPersist: true, autoRecallDisplay: false });
       await getHandler()("toggle-display", makeCtx());
       expect(lastNotification?.message).toContain("Recall display: hidden");
     });

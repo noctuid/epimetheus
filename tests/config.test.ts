@@ -30,8 +30,8 @@ const validConfig: HindsightConfig = {
   maxRecallTokens: null,
   recallPromptPreamble: "Test",
   recallShowDateTime: true,
-  recallDisplay: false,
-  recallPersist: false,
+  autoRecallDisplay: false,
+  autoRecallPersist: false,
   recallMaxQueryChars: 800,
   recallTypes: ["observation"] as ("world" | "experience" | "observation")[] | null,
   constantTags: ["test"],
@@ -142,17 +142,17 @@ describe("validateConfig", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("warns when recallDisplay is true but recallPersist is false", () => {
-    const config = { ...validConfig, recallDisplay: true, recallPersist: false };
+  it("warns when autoRecallDisplay is true but autoRecallPersist is false", () => {
+    const config = { ...validConfig, autoRecallDisplay: true, autoRecallPersist: false };
     const result = validateConfig(config);
     expect(result.valid).toBe(true);
     expect(result.warnings).toContain(
-      "recallDisplay: true has no effect when recallPersist: false (memories are not stored and cannot be shown in chat; only the most recent is available via /hindsight popup)"
+      "autoRecallDisplay: true has no effect when autoRecallPersist: false (memories are not stored and cannot be shown in chat; only the most recent is available via /hindsight popup)"
     );
   });
 
-  it("does not warn when recallDisplay is true and recallPersist is true", () => {
-    const config = { ...validConfig, recallDisplay: true, recallPersist: true };
+  it("does not warn when autoRecallDisplay is true and autoRecallPersist is true", () => {
+    const config = { ...validConfig, autoRecallDisplay: true, autoRecallPersist: true };
     const result = validateConfig(config);
     expect(result.valid).toBe(true);
     expect(result.warnings).toHaveLength(0);
@@ -311,56 +311,56 @@ describe("loadConfig", () => {
     expect(config.enabled).toBe(true);
   });
 
-  it("recallDisplay defaults to false", () => {
+  it("autoRecallDisplay defaults to false", () => {
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallDisplay).toBe(false);
+    expect(config.autoRecallDisplay).toBe(false);
   });
 
-  it("recallDisplay can be set via config file", () => {
+  it("autoRecallDisplay can be set via config file", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
         apiUrl: "https://test.test",
         apiKey: "test-key",
-        recallDisplay: true,
+        autoRecallDisplay: true,
       })
     );
 
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallDisplay).toBe(true);
+    expect(config.autoRecallDisplay).toBe(true);
   });
 
-  it("recallDisplay can be set via PI_HINDSIGHT_RECALL_DISPLAY env var", () => {
-    process.env.PI_HINDSIGHT_RECALL_DISPLAY = "true";
+  it("autoRecallDisplay can be set via PI_HINDSIGHT_AUTO_RECALL_DISPLAY env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_DISPLAY = "true";
 
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallDisplay).toBe(true);
+    expect(config.autoRecallDisplay).toBe(true);
   });
 
-  it("recallPersist defaults to false", () => {
+  it("autoRecallPersist defaults to false", () => {
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallPersist).toBe(false);
+    expect(config.autoRecallPersist).toBe(false);
   });
 
-  it("recallPersist can be set via config file", () => {
+  it("autoRecallPersist can be set via config file", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
         apiUrl: "https://test.test",
         apiKey: "test-key",
-        recallPersist: true,
+        autoRecallPersist: true,
       })
     );
 
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallPersist).toBe(true);
+    expect(config.autoRecallPersist).toBe(true);
   });
 
-  it("recallPersist can be set via PI_HINDSIGHT_RECALL_PERSIST env var", () => {
-    process.env.PI_HINDSIGHT_RECALL_PERSIST = "true";
+  it("autoRecallPersist can be set via PI_HINDSIGHT_AUTO_RECALL_PERSIST env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_PERSIST = "true";
 
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallPersist).toBe(true);
+    expect(config.autoRecallPersist).toBe(true);
   });
 
   it('recallTypes defaults to ["observation"]', () => {
