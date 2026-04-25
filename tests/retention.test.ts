@@ -829,4 +829,54 @@ describe("observationScopes", () => {
       ["user:alice"],
     ]);
   });
+
+  it("expands {cwd} placeholder in observation_scopes at queue time", () => {
+    const configWithScopes: HindsightConfig = {
+      ...defaultConfig,
+      observationScopes: [["{cwd}"], ["{session}", "{cwd}"]],
+    };
+    const success = queueToolRetain(
+      TEST_SESSION_ID,
+      "Remember this",
+      undefined,
+      undefined,
+      "/home/user/project",
+      undefined,
+      configWithScopes
+    );
+
+    expect(success).toBe(true);
+    const entries = readToolQueue(TEST_SESSION_ID);
+    expect(entries[0]?.observation_scopes).toEqual([
+      ["cwd:/home/user/project"],
+      [`session:${TEST_SESSION_ID}`, "cwd:/home/user/project"],
+    ]);
+  });
+
+  it("expands {cwd} placeholder during flushAutoQueue", async () => {
+    enqueueAutoMessage(TEST_SESSION_ID, {
+      entry: { message: { role: "user", content: "Hello" } },
+      store_method: "auto",
+    });
+
+    const configWithScopes: HindsightConfig = {
+      ...defaultConfig,
+      observationScopes: [["{cwd}"], ["user:alice"]],
+    };
+
+    const mockWrapper = createMockWrapper();
+    await flushAutoQueue(
+      TEST_SESSION_ID,
+      "Test Session",
+      "2024-01-01T00:00:00Z",
+      "/home/user/project",
+      undefined,
+      configWithScopes,
+      mockWrapper as unknown as HindsightClientWrapper
+    );
+
+    expect(mockWrapper.retainCalls).toHaveLength(1);
+    const retainCall = mockWrapper.retainCalls[0] as { observationScopes?: unknown };
+    expect(retainCall.observationScopes).toEqual([["cwd:/home/user/project"], ["user:alice"]]);
+  });
 });

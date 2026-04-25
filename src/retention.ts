@@ -46,7 +46,12 @@ export function queueToolRetain(
   ];
 
   // Expand placeholders in observation scopes at queue time
-  const expandedScopes = expandSessionObservationScopes(config, sessionId, parentSessionId);
+  const expandedScopes = expandSessionObservationScopes(
+    config,
+    sessionId,
+    parentSessionId,
+    sessionCwd
+  );
 
   const entry: ToolQueueEntry = {
     content,
@@ -101,7 +106,12 @@ export async function flushAutoQueue(
   const contentItems = autoEntries.map((entry) => entry.entry);
 
   // Expand placeholders in observation scopes
-  const expandedScopes = expandSessionObservationScopes(config, sessionId, parentSessionId);
+  const expandedScopes = expandSessionObservationScopes(
+    config,
+    sessionId,
+    parentSessionId,
+    sessionCwd
+  );
 
   const result = await client.retain(
     {

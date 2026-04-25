@@ -198,6 +198,7 @@ export function createUpsertAllParsedSubcommand(
               tags: parsed.tags,
               sessionId: parsed.sessionId ?? sessionId,
               parentSessionId: parsed.parentSessionId,
+              sessionCwd: parsed.cwd,
             },
             config,
             ctx.signal

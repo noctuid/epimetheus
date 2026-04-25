@@ -117,7 +117,16 @@ Create a basic `~/.pi/agent/extensions/pi-hindsight/config.jsonc`:
   "bankId": "default",
   // read over tradeoffs before enabling
   "recallPersist": true,
-  "recallDisplay": true
+  "recallDisplay": true,
+  // recommended to change from default or you will not get cross-session observations
+  "observationScopes": [
+    // observations about all pi sessions (could also be something like ["user:<me>"] if you add that as a constant tag)
+    ["harness:pi"],
+    // observations for session
+    ["{session}"],
+    // for specific directories
+    ["{cwd}"]
+  ]
 }
 ```
 See [recallPersist Tradeoffs](#recallpersist-tradeoffs) before enabling!
@@ -351,29 +360,39 @@ Controls how observations are scoped during consolidation. When `null` (default)
 
 **Custom scope groups:** An array of tag arrays, where each inner array defines a group of tags for one consolidation pass. This gives full control over which tag combinations produce separate observations.
 
-**Placeholder expansion:** In custom scope groups, `{session}` expands to `session:<sessionId>` and `{parent}` expands to `parent:<parentId>` at retain time. Placeholders must be used as standalone tags — e.g. `["{session}"]` not `["{session}:extra"]`. Non-exact placeholder usage will produce a config warning. This is useful for creating per-session or per-conversation-thread observation scopes.
+**Placeholder expansion:** In custom scope groups, the following placeholders expand at retain time:
 
-Example — Create separate observation scopes for user, assistant, session, and parent conversation thread:
+| Placeholder | Expands to | Description |
+|-------------|-----------|-------------|
+| `{session}` | `session:<sessionId>` | Per-session observations |
+| `{parent}` | `parent:<parentId>` | Cross-fork observations (falls back to session ID if no parent) |
+| `{cwd}` | `cwd:<path>` | Per-directory observations |
+
+Placeholders must be used as standalone tags — e.g. `["{session}"]` not `["{session}:extra"]`. Non-exact placeholder usage will produce a config warning. This is useful for creating per-session, per-conversation-thread, or per-directory observation scopes.
+
+Example — Create separate observation scopes for user, assistant, session, parent conversation thread, and working directory:
 ```jsonc
 {
   "observationScopes": [
     ["user:alice"],           // observations scoped to alice's facts
     ["assistant:code"],       // observations scoped to specific assistant
     ["{session}"],            // expands to session:<id> — per-session observations
-    ["{parent}"]              // expands to parent:<id> — cross fork observations
+    ["{parent}"],            // expands to parent:<id> — cross fork observations
+    ["{cwd}"]                // expands to cwd:<path> — per-directory observations
   ]
 }
 ```
 
-This would create four consolidation passes, each producing its own set of observations:
+This would create five consolidation passes, each producing its own set of observations:
 1. One for facts specific to user `alice`
 2. One for facts specific to assistant `code`
 3. One for the current session's observations
 4. One for the full parent thread context
+5. One for the current working directory
 
 Or via environment variable as a JSON string:
 ```bash
-export PI_HINDSIGHT_OBSERVATION_SCOPES='[["session:abc","user:alice"],["project:foo"]]'
+export PI_HINDSIGHT_OBSERVATION_SCOPES='[["{session}","user:alice"],["project:foo"]]'
 ```
 
 Note: This is currently a config-only setting and not exposed as a parameter on the `hindsight_retain` tool. The configured scope applies to all retains (both auto and tool-initiated).
