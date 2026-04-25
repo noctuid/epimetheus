@@ -17,12 +17,14 @@
     "@types/bun": "latest"
   },
   "peerDependencies": {
-    "typescript": "^5",
-    "@mariozechner/pi-coding-agent": "0.70.0",
-    "typebox": "^1.x"
+    "@mariozechner/pi-coding-agent": "*"
   },
   "dependencies": {
     "@vectorize-io/hindsight-client": "0.5.0",
-    "jsonc-parser": "^3.3.1"
+    "jsonc-parser": "^3.3.1",
+    "typebox": "^1.1.24"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
   }
 }
