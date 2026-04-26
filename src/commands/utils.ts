@@ -18,6 +18,17 @@ import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
 import { deleteAutoQueue } from "../queue";
 import { extractParentSessionId, getSessionDisplayName } from "../utils";
 
+/** Notification level for early-exit results from {@link parseCurrentSession}. */
+export type ParseExitLevel = "error" | "warning";
+
+/** Early-exit result from {@link parseCurrentSession} (no session file, retention disabled, etc.). */
+export interface ParseExitResult {
+  /** Human-readable message describing why parsing did not proceed. */
+  message: string;
+  /** Notification level — "error" for hard failures, "warning" for user-configured blocks. */
+  level: ParseExitLevel;
+}
+
 /** Result of parsing a session file for subcommand handlers. */
 export interface ParsedSessionResult {
   /** The parsed session data ready for retention or disk output. */
@@ -36,21 +47,24 @@ export interface ParsedSessionResult {
   outputPath: string;
 }
 
+/** Return type of {@link parseCurrentSession}: success data or a structured early exit. */
+export type ParseCurrentSessionResult = ParsedSessionResult | ParseExitResult;
+
 /**
  * Parse the current session file into a structured object for retention/export.
  *
  * Validates the session file exists, checks retention state, builds document tags
  * and context, and writes the parsed session to disk for later review.
- * Returns a {@link ParsedSessionResult} on success, or a string message on early exit
- * (e.g. "No session file found", "No messages to parse").
+ * Returns a {@link ParsedSessionResult} on success, or a {@link ParseExitResult} on early exit
+ * (e.g. no session file, retention disabled, parent not found).
  */
 export function parseCurrentSession(
   ctx: ExtensionContext,
   config: HindsightConfig
-): ParsedSessionResult | string {
+): ParseCurrentSessionResult {
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile || !existsSync(sessionFile)) {
-    return "No session file found";
+    return { message: "No session file found", level: "error" };
   }
 
   const { header, entries: originalEntries } = parseSessionFile(sessionFile);
@@ -61,16 +75,20 @@ export function parseCurrentSession(
   );
 
   if (warning) {
-    return warning;
+    return { message: warning, level: "warning" };
   }
 
   if (messages.length === 0) {
-    return "No messages to parse";
+    return { message: "No messages to parse", level: "warning" };
   }
 
   // Check retention state
   if (!shouldSessionBeRetained(originalEntries, config)) {
-    return "Session does not allow retention. Use /hindsight toggle-retain to enable retention.";
+    return {
+      message:
+        "Session does not allow retention. Use /hindsight toggle-retain to enable retention.",
+      level: "warning",
+    };
   }
 
   // Build tags from metadata
@@ -164,11 +182,11 @@ export async function parseAndUpsertSession(
   ctx: ExtensionContext,
   config: HindsightConfig,
   client: HindsightClientWrapper
-): Promise<string> {
+): Promise<{ message: string; level: "info" | ParseExitLevel }> {
   const result = parseCurrentSession(ctx, config);
 
-  if (typeof result === "string") {
-    return result;
+  if ("message" in result) {
+    return { message: result.message, level: result.level };
   }
 
   const { parsedSession } = result;
@@ -194,5 +212,8 @@ export async function parseAndUpsertSession(
   // (raw content with their own tags/metadata), not included in the session upsert.
   deleteAutoQueue(parsedSession.sessionId);
 
-  return `Parsed and upserted ${parsedSession.messages.length} messages`;
+  return {
+    message: `Parsed and upserted ${parsedSession.messages.length} messages`,
+    level: "info",
+  };
 }

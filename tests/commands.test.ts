@@ -324,6 +324,7 @@ describe("registerCommands", () => {
       register();
       await getHandler()("parse-and-upsert-session", makeCtx());
       expect(lastNotification?.message).toContain("No session file found");
+      expect(lastNotification?.type).toBe("error");
     });
 
     it("deletes queued messages after upsert to prevent duplication", async () => {
@@ -794,6 +795,7 @@ describe("registerCommands", () => {
       register();
       await getHandler()("parse-session", makeCtx());
       expect(lastNotification?.message).toContain("No session file found");
+      expect(lastNotification?.type).toBe("error");
     });
   });
 
@@ -1098,6 +1100,7 @@ describe("registerCommands", () => {
         await getHandler()("parse-session", ctx);
         expect(lastNotification?.message).toContain("Parent session not found");
         expect(lastNotification?.message).not.toContain("No messages to parse");
+        expect(lastNotification?.type).toBe("warning");
       });
     });
 
@@ -1128,6 +1131,7 @@ describe("registerCommands", () => {
         await getHandler()("parse-and-upsert-session", ctx);
         expect(lastNotification?.message).toContain("Parent session not found");
         expect(lastNotification?.message).not.toContain("No messages to parse");
+        expect(lastNotification?.type).toBe("warning");
       });
     });
   });

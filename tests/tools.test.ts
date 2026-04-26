@@ -210,9 +210,13 @@ describe("hindsight_retain", () => {
       undefined,
       undefined,
       ctx
-    )) as { details: { success: boolean; error: string } };
+    )) as {
+      content: { type: string; text: string }[];
+      details: { success: boolean; error: string };
+    };
     expect(result.details.success).toBe(false);
     expect(result.details.error).toContain("does not allow retention");
+    expect(result.content[0]!.text).toContain("Warning:");
   });
 });
 

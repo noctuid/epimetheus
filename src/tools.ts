@@ -111,7 +111,7 @@ export function registerTools(
           content: [
             {
               type: "text",
-              text: "Session does not allow retention. Use /hindsight toggle-retain to enable retention.",
+              text: "Warning: Session does not allow retention. Use /hindsight toggle-retain to enable retention.",
             },
           ],
           details: { success: false, error: "session does not allow retention" },

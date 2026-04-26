@@ -73,7 +73,7 @@ export function createToggleRetainSubcommand(
         // Parse and upsert the full session
         try {
           const result = await parseAndUpsertSession(ctx, config, client);
-          ctx.ui.notify(`Session retention: enabled. ${result}.`, "info");
+          ctx.ui.notify(`Session retention: enabled. ${result.message}.`, result.level);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           ctx.ui.notify(

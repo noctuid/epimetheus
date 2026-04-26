@@ -508,6 +508,7 @@ describe("real entrypoint bootstrap", () => {
         .ui.notify.mock.calls;
       const lastCall = parseNotification[parseNotification.length - 1]!;
       expect(lastCall[0]).toContain("does not allow retention");
+      expect(lastCall[1]).toBe("warning");
     });
 
     deleteAutoQueue(sessionId);
@@ -658,6 +659,7 @@ describe("real entrypoint bootstrap", () => {
         .ui.notify.mock.calls;
       const lastCall = parseNotification[parseNotification.length - 1]!;
       expect(lastCall[0]).toContain("does not allow retention");
+      expect(lastCall[1]).toBe("warning");
     });
 
     deleteAutoQueue(sessionId);

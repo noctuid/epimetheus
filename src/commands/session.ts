@@ -91,9 +91,8 @@ export function createParseSessionSubcommand(config: HindsightConfig): Subcomman
     handler: async (_args: string, ctx: ExtensionContext) => {
       const result = parseCurrentSession(ctx, config);
 
-      if (typeof result === "string") {
-        // Error or early exit message from parsing
-        ctx.ui.notify(result, result.includes("not allow") ? "warning" : "error");
+      if ("message" in result) {
+        ctx.ui.notify(result.message, result.level);
         return;
       }
 
@@ -122,7 +121,7 @@ export function createParseAndUpsertSessionSubcommand(
 
       try {
         const result = await parseAndUpsertSession(ctx, config, client);
-        ctx.ui.notify(result, "info");
+        ctx.ui.notify(result.message, result.level);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         ctx.ui.notify(`Parse-and-upsert failed: ${msg}`, "error");
