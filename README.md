@@ -20,7 +20,6 @@ Status: This is currently alpha level software. I recommend waiting until I publ
     - [strip](#strip)
     - [toolFilter](#toolfilter)
     - [entities](#entities)
-    - [Examples](#examples)
   - [Environment Variables](#environment-variables)
 - [Deviations from Official Integrations](#deviations-from-official-integrations)
 - [Additional Details](#additional-details)
@@ -291,6 +290,17 @@ Can also be set via environment variable as a JSON string:
 export PI_HINDSIGHT_RETAIN_CONTENT='{"assistant":["text"],"user":["text"],"toolResult":[]}'
 ```
 
+**Example — Keep only user and assistant text messages (no tool calls/results):**
+```json
+{
+  "retainContent": {
+    "assistant": ["text"],
+    "user": ["text"],
+    "toolResult": []
+  }
+}
+```
+
 ### `strip`
 Controls which metadata fields are removed before queuing:
 
@@ -310,6 +320,21 @@ Controls which metadata fields are removed before queuing:
 Can also be set via environment variable as a JSON string:
 ```bash
 export PI_HINDSIGHT_STRIP='{"topLevel":[],"message":["toolCallId"]}'
+```
+
+**Example — Include tool results, strip toolCallId:**
+```json
+{
+  "retainContent": {
+    "assistant": ["text", "thinking", "toolCall"],
+    "user": ["text"],
+    "toolResult": ["text"]
+  },
+  "strip": {
+    "topLevel": ["type", "id", "parentId"],
+    "message": ["api", "provider", "model", "usage", "cost", "stopReason", "timestamp", "responseId", "toolCallId"]
+  }
+}
 ```
 
 ### `toolFilter`
@@ -440,34 +465,6 @@ export PI_HINDSIGHT_OBSERVATION_SCOPES='[["{session}","user:alice"],["project:fo
 ```
 
 Note: This is currently a config-only setting and not exposed as a parameter on the `hindsight_retain` tool. The configured scope applies to all retains (both auto and tool-initiated).
-
-### Examples
-
-**Keep only user and assistant text messages (no tool calls/results):**
-```json
-{
-  "retainContent": {
-    "assistant": ["text"],
-    "user": ["text"],
-    "toolResult": []
-  }
-}
-```
-
-**Include tool results, strip toolCallId:**
-```json
-{
-  "retainContent": {
-    "assistant": ["text", "thinking", "toolCall"],
-    "user": ["text"],
-    "toolResult": ["text"]
-  },
-  "strip": {
-    "topLevel": ["type", "id", "parentId"],
-    "message": ["api", "provider", "model", "usage", "cost", "stopReason", "timestamp", "responseId", "toolCallId"]
-  }
-}
-```
 
 ## Environment Variables
 Configuration options can also be set via environment variables (override config file). This can be used to use different configurations for different wrapper scripts or for different directories by using [mise](https://mise.jdx.dev/installing-mise.html) or [direnv](https://direnv.net/).
