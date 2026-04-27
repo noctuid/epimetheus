@@ -20,6 +20,8 @@ Status: This is currently alpha level software. I recommend waiting until I publ
     - [strip](#strip)
     - [toolFilter](#toolfilter)
     - [entities](#entities)
+  - [observationScopes](#observationscopes)
+    - [Project scope for relocatable projects](#project-scope-for-relocatable-projects)
   - [Environment Variables](#environment-variables)
 - [Deviations from Official Integrations](#deviations-from-official-integrations)
 - [Additional Details](#additional-details)
@@ -66,7 +68,7 @@ Additionally:
 - Avoids breaking prompt caching - recall messages are appended at the end of the context for a single turn only; the canonical conversation history (which determines cache validity) grows normally with each turn, so caching should work as expected
 - Queues content to retain to disk to avoid loss if hindsight is down; also allows deferring processing or reprocessing to potentially lower costs
 - Properly handles forking when ingesting full sessions: forks will not duplicate parent content and will only contain new content
-- Provides automatic tags: session id, parent session id, store method (tool or auto), and any configured tags like `harness:pi` (default)
+- Provides automatic tags: session id, parent session id, cwd, basedir (cwd basename), project (configurable name, falls back to basedir), store method (tool or auto), and any configured tags like `harness:pi` (default)
 - Allows choosing what content to retain and stripping unnecessary fields to reduce tokens/cost
 
 # Local Quickstart
@@ -125,8 +127,11 @@ Create a basic `~/.pi/agent/extensions/pi-hindsight/config.jsonc`:
   "observationScopes": [
     // observations across all your sessions; replace <me> with your identifier
     ["user:<me>"],
-    // observations for specific directories
-    ["{cwd}"],
+    // observations for this project (use PI_HINDSIGHT_PROJECT_NAME for a stable name)
+    ["{project}"],
+    // per-directory observations using the full path; use instead of {project} if you want
+    // observations tied to an exact directory
+    // ["{cwd}"],
     // per-session observations; only include if you continuously resume the same session or really want observations about individual sessions
     // ["{session}"]
   ]
@@ -427,24 +432,56 @@ Placeholders must be used as standalone tags — e.g. `["{session}"]` not `["{se
 **Choosing your scopes:**
 - **Per-session observations** (`["{session}"]`) — facts within a single session only — this is rarely useful unless you frequently resume the same session over and over. In practice, you'll get more value from:
 - **Per-user** (`["user:<me>"]`) — facts that span all your sessions/documents and memories storied manually with `hindsight_retain` tool, even across different harnesses. Add `"user:<me>"` to `constantTags` and use it as a scope. This is the most broadly useful scope.
+- **Per-project** (`["{project}"]`) — facts about a specific project, independent of directory. The project tag defaults to the cwd basename but can be overridden with `PI_HINDSIGHT_PROJECT_NAME`. This is ideal when a project might change directories or have multiple working copies — observations stay linked to the project identity rather than a specific path. See the [project scope example](#project-scope-for-relocatable-projects) below.
 - **Per-directory** (`["{cwd}"]`) — facts about a specific project/codebase, consolidated across all sessions in that directory
+- **Per-basedir** (`["{basedir}"]`) — facts scoped by directory name (basename). Less precise than `{cwd}` but works across different parent paths with the same directory name
 - **Per-harness** (`["harness:pi"]`) — facts that span all pi sessions (included as a default constant tag)
 
 
-Recommended example — Per-user scope plus per-directory scope:
+Recommended example — Per-user scope plus per-project scope:
 ```jsonc
 {
   "constantTags": ["harness:pi", "user:<me>"],
   "observationScopes": [
     ["user:<me>"],   // observations across all your sessions
-    ["{cwd}"]         // observations only from sessions in this directory
+    ["{project}"]     // observations scoped to this project (basedir or PI_HINDSIGHT_PROJECT_NAME)
   ]
 }
 ```
 
 This creates two consolidation passes:
 1. One for facts that span all your sessions (even across different harnesses, assuming you've also tagged those documents with `user:<me>`)
-2. One for facts specific to the current project directory
+2. One for facts specific to the current project (identified by `PI_HINDSIGHT_PROJECT_NAME` or the cwd basename)
+
+### Project scope for relocatable projects
+
+Use `{project}` when you want observations tied to a project identity rather than a specific directory path. By default `{project}` expands to the cwd basename, so observations automatically follow the project across directory moves (e.g., `~/projects/myapp` → `~/work/myapp` — the `cwd` tag changes but the `project` tag stays the same).
+
+You only need to set `PI_HINDSIGHT_PROJECT_NAME` when you have multiple directories with the same basename that should have separate observations (e.g., `~/work/myapp` vs `~/personal/myapp`) — give each a unique project name:
+
+Set `PI_HINDSIGHT_PROJECT_NAME` per directory in, e.g. `.env` with [direnv](https://direnv.net/) or [mise](https://mise.jdx.dev/):
+
+```bash
+# In .env per project directory (loaded by direnv or mise):
+export PI_HINDSIGHT_PROJECT_NAME=myapp
+```
+
+```jsonc
+{
+  "constantTags": ["harness:pi", "user:<me>"],
+  "observationScopes": [
+    ["user:<me>"],    // observations across all your sessions
+    ["{project}"]      // observations for "myapp" regardless of directory
+  ]
+}
+```
+
+**When to use `{project}` vs `{cwd}` vs `{basedir}`:**
+- `{project}` (recommended) — Observations scoped by project name (cwd basename by default). Automatically follows directory moves. Set `PI_HINDSIGHT_PROJECT_NAME` only to disambiguate directories with the same basename.
+- `{cwd}` — Use when you want observations tied to an exact directory path. Different directories with the same basename produce separate observations.
+- `{basedir}` — Use when you want observations grouped by directory name regardless of parent path. All directories named `myapp` share observations.
+
+> **Note:** Since `basedir:` and `project:` tags are generated at retain time, re-parsing and re-ingesting a session (via `/hindsight parse-and-upsert-session`) will use the *current* basedir or `PI_HINDSIGHT_PROJECT_NAME`. This means you can change the project identity of an existing session by updating the env var and re-ingesting — useful for correcting or migrating project names after the fact. The `cwd:` tag is fixed from the session header and does not change on re-parse (unless you manually change it).
 
 Full example with all available scopes:
 ```jsonc
@@ -453,7 +490,9 @@ Full example with all available scopes:
   "observationScopes": [
     ["user:<me>"],    // observations across all your sessions
     ["harness:pi"],   // observations across all pi sessions
-    ["{cwd}"],        // observations scoped to this project directory
+    ["{project}"],    // observations scoped to this project (PI_HINDSIGHT_PROJECT_NAME or basedir)
+    ["{cwd}"],        // observations scoped to this exact directory path
+    ["{basedir}"],    // observations scoped to this directory name
     ["{session}"],    // observations scoped to this session only (rarely needed)
     ["{parent}"]     // observations scoped to the parent conversation thread
   ]
@@ -497,11 +536,14 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_RETAIN_CONTENT` | `retainContent` | RetainContent (JSON) | *(see retainContent default)* |
 | `PI_HINDSIGHT_STRIP` | `strip` | StripConfig (JSON) | *(see strip default)* |
 | `PI_HINDSIGHT_TOOL_FILTER` | `toolFilter` | ToolFilter (JSON) | *(see toolFilter default)* |
+| `PI_HINDSIGHT_PROJECT_NAME` | *(not in config)* | string | *(falls back to cwd basename)* |
 | `PI_HINDSIGHT_ENTITIES` | `entities` | EntityInput[] (JSON) | `[]` |
 | `PI_HINDSIGHT_OBSERVATION_SCOPES` | `observationScopes` | ObservationScopes (JSON or preset string) | `null` (required) |
 | `PI_HINDSIGHT_STATUS_HEALTHY` | `statusHealthy` | string | `"🧠"` |
 | `PI_HINDSIGHT_STATUS_UNHEALTHY` | `statusUnhealthy` | string | `"🤯"` |
 </details>
+
+> **Note:** `PI_HINDSIGHT_PROJECT_NAME` is a special environment variable that controls the `project:` auto-tag and `{project}` observation scope placeholder. Unlike other env vars, it does not correspond to a config file key — it is read at tag-build time and falls back to the cwd basename if not set. This makes it ideal for setting per-directory in `.env` (with direnv or mise) to disambiguate directories that share the same basename.
 
 # Deviations from Official Integrations
 
@@ -577,7 +619,7 @@ There are multiple other Hindsight integrations for Pi:
 | Cached context (anti-pattern) | ❌ | ❌ | ❌ | ✅⁵ |
 | Linked host recall (multiple servers) | ❌ | ❌ | ❌ | ✅⁶ |
 | **Retain** |
-| Rich automatic tagging (session, cwd, parent) | ✅ | ❌ | ❌ | ✅ |
+| Rich automatic tagging (session, cwd, basedir, project, parent) | ✅ | ❌ | ❌ | ✅ |
 | Operational tool filtering | ✅ | ✅¹³ | ✅¹³ | ❌ |
 | Configurable tool result inclusion | ✅ | ❌ | ❌ | ❌ |
 | Hashtag extraction from prompts | ❌ | ✅ | ✅ | ✅ |

@@ -175,6 +175,8 @@ describe("queueToolRetain", () => {
     expect(entries[0]?.tags).toContain("harness:pi");
     expect(entries[0]?.tags).toContain(`session:${TEST_SESSION_ID}`);
     expect(entries[0]?.tags).toContain("cwd:/home/user/project");
+    expect(entries[0]?.tags).toContain("basedir:project");
+    expect(entries[0]?.tags).toContain("project:project");
     expect(entries[0]?.tags).toContain("store_method:tool");
     expect(entries[0]?.tags).toContain("parent:parent-123");
     expect(entries[0]?.tags).toContain("topic:test");

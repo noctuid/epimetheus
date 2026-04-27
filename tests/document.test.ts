@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { HindsightConfig } from "../src/config";
 import {
   buildDocumentContent,
@@ -574,6 +574,8 @@ describe("document tags", () => {
     expect(tags).toContain("project:test");
     expect(tags).toContain("session:test-123");
     expect(tags).toContain(`cwd:${TEST_HOME}`);
+    expect(tags).toContain(`basedir:${basename(TEST_HOME)}`);
+    expect(tags).toContain(`project:${basename(TEST_HOME)}`);
     expect(tags).toContain("store_method:auto");
     expect(tags).toContain("parent:test-123");
   });

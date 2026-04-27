@@ -933,6 +933,7 @@ describe("registerCommands", () => {
           context: "test",
           timestamp: new Date().toISOString(),
           tags: [],
+          cwd: "/test/project",
         }),
         "utf8"
       );

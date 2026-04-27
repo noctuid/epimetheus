@@ -9,6 +9,8 @@ import { join } from "node:path";
 import {
   extractParentSessionId,
   extractTextFromContent,
+  getBasedir,
+  getProjectName,
   getSessionDisplayName,
   truncate,
 } from "../src/utils";
@@ -233,5 +235,47 @@ describe("getSessionDisplayName", () => {
     );
     expect(result.length).toBe(100);
     expect(result.endsWith("…")).toBe(true);
+  });
+});
+
+describe("getBasedir", () => {
+  it("returns the basename of a path", () => {
+    expect(getBasedir("/home/user/projects/myapp")).toBe("myapp");
+  });
+
+  it("returns the last component for nested paths", () => {
+    expect(getBasedir("/a/b/c")).toBe("c");
+  });
+
+  it("handles single-level paths", () => {
+    expect(getBasedir("/root")).toBe("root");
+  });
+});
+
+describe("getProjectName", () => {
+  it("returns PI_HINDSIGHT_PROJECT_NAME when set", () => {
+    const original = process.env.PI_HINDSIGHT_PROJECT_NAME;
+    process.env.PI_HINDSIGHT_PROJECT_NAME = "custom-project";
+    try {
+      expect(getProjectName("/home/user/myapp")).toBe("custom-project");
+    } finally {
+      if (original === undefined) {
+        delete process.env.PI_HINDSIGHT_PROJECT_NAME;
+      } else {
+        process.env.PI_HINDSIGHT_PROJECT_NAME = original;
+      }
+    }
+  });
+
+  it("falls back to cwd basename when PI_HINDSIGHT_PROJECT_NAME is not set", () => {
+    const original = process.env.PI_HINDSIGHT_PROJECT_NAME;
+    delete process.env.PI_HINDSIGHT_PROJECT_NAME;
+    try {
+      expect(getProjectName("/home/user/myapp")).toBe("myapp");
+    } finally {
+      if (original !== undefined) {
+        process.env.PI_HINDSIGHT_PROJECT_NAME = original;
+      }
+    }
   });
 });

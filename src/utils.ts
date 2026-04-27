@@ -3,6 +3,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 /**
  * Truncate a string to max character count (code points, not code units).
@@ -86,6 +87,23 @@ export function extractTextFromContent(content: unknown): string | null {
   }
 
   return textBlocks.length > 0 ? textBlocks.join("\n") : null;
+}
+
+/**
+ * Get the base directory name from a cwd path.
+ * E.g. "/home/user/projects/myapp" → "myapp"
+ */
+export function getBasedir(cwd: string): string {
+  return basename(cwd);
+}
+
+/**
+ * Get the project name, falling back to basedir if not set via env var.
+ * Uses PI_HINDSIGHT_PROJECT_NAME environment variable if set,
+ * otherwise derives from the cwd basename.
+ */
+export function getProjectName(cwd: string): string {
+  return process.env.PI_HINDSIGHT_PROJECT_NAME || basename(cwd);
 }
 
 /**

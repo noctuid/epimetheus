@@ -303,6 +303,20 @@ describe("loadConfig", () => {
     expect(warning).toContain("Unknown config key in file: unknownKey");
   });
 
+  it("rejects projectName in config file (PI_HINDSIGHT_PROJECT_NAME is env-only)", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        projectName: "my-project",
+      })
+    );
+
+    const { warning } = loadConfig(TEST_DIR);
+    expect(warning).toContain("Unknown config key in file: projectName");
+  });
+
   it("uses defaults when no config file exists", () => {
     const { config } = loadConfig(TEST_DIR);
     expect(config.apiUrl).toBe("");
@@ -1653,5 +1667,59 @@ describe("expandScopePlaceholders", () => {
       sessionCwd: "/home/user/project",
     });
     expect(result).toEqual([["session:abc-123", "cwd:/home/user/project"]]);
+  });
+
+  it("expands {basedir} placeholder", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{basedir}"]], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+    });
+    expect(result).toEqual([["basedir:myapp"]]);
+  });
+
+  it("preserves {basedir} when sessionCwd is not provided", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{basedir}"]], {
+      sessionId: "abc-123",
+    });
+    expect(result).toEqual([["{basedir}"]]);
+  });
+
+  it("expands {project} placeholder with projectName", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{project}"]], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+      projectName: "custom-project",
+    });
+    expect(result).toEqual([["project:custom-project"]]);
+  });
+
+  it("expands {project} placeholder falling back to cwd basename when projectName is not provided", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{project}"]], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+    });
+    expect(result).toEqual([["project:myapp"]]);
+  });
+
+  it("preserves {project} when neither projectName nor sessionCwd is provided", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{project}"]], {
+      sessionId: "abc-123",
+    });
+    expect(result).toEqual([["{project}"]]);
+  });
+
+  it("expands {basedir} and {project} alongside other placeholders", () => {
+    const { expandScopePlaceholders } = require("../src/config");
+    const result = expandScopePlaceholders([["{session}", "{basedir}", "{project}"]], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+      projectName: "custom-project",
+    });
+    expect(result).toEqual([["session:abc-123", "basedir:myapp", "project:custom-project"]]);
   });
 });

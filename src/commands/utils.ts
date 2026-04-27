@@ -16,7 +16,7 @@ import {
 } from "../document";
 import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
 import { deleteAutoQueue } from "../queue";
-import { extractParentSessionId, getSessionDisplayName } from "../utils";
+import { extractParentSessionId, getProjectName, getSessionDisplayName } from "../utils";
 
 /** Notification level for early-exit results from {@link parseCurrentSession}. */
 export type ParseExitLevel = "error" | "warning";
@@ -139,7 +139,7 @@ export async function upsertToHindsight(
     tags: string[];
     sessionId: string;
     parentSessionId?: string;
-    sessionCwd?: string;
+    sessionCwd: string;
   },
   config: HindsightConfig,
   signal?: AbortSignal
@@ -149,7 +149,8 @@ export async function upsertToHindsight(
     config,
     params.sessionId,
     params.parentSessionId,
-    params.sessionCwd
+    params.sessionCwd,
+    getProjectName(params.sessionCwd)
   );
 
   const result = await client.retain(

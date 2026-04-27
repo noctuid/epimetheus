@@ -3,7 +3,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { Budget } from "@vectorize-io/hindsight-client";
 import { type ParseError, parse as parseJsonc } from "jsonc-parser";
@@ -43,6 +43,8 @@ const SCOPE_PLACEHOLDERS: Record<string, string> = {
   "{session}": "session",
   "{parent}": "parent",
   "{cwd}": "cwd",
+  "{basedir}": "basedir",
+  "{project}": "project",
 };
 
 export interface HindsightConfig {
@@ -565,7 +567,7 @@ function checkScopePlaceholderWarnings(scopes: string[][]): string[] {
  */
 export function expandScopePlaceholders(
   scopes: ObservationScopes,
-  params: { sessionId: string; parentSessionId?: string; sessionCwd?: string }
+  params: { sessionId: string; parentSessionId?: string; sessionCwd?: string; projectName?: string }
 ): ObservationScopes {
   if (scopes === null || typeof scopes === "string") return scopes;
 
@@ -575,6 +577,14 @@ export function expandScopePlaceholders(
       if (prefix) {
         if (prefix === "cwd") {
           return params.sessionCwd ? `cwd:${params.sessionCwd}` : tag;
+        }
+        if (prefix === "basedir") {
+          return params.sessionCwd ? `basedir:${basename(params.sessionCwd)}` : tag;
+        }
+        if (prefix === "project") {
+          const name =
+            params.projectName || (params.sessionCwd ? basename(params.sessionCwd) : undefined);
+          return name ? `project:${name}` : tag;
         }
         const id =
           prefix === "parent" ? (params.parentSessionId ?? params.sessionId) : params.sessionId;
@@ -593,13 +603,15 @@ export function expandSessionObservationScopes(
   config: Pick<HindsightConfig, "observationScopes">,
   sessionId: string,
   parentSessionId?: string,
-  sessionCwd?: string
+  sessionCwd?: string,
+  projectName?: string
 ): Exclude<ObservationScopes, null> | undefined {
   if (!config.observationScopes) return undefined;
   return expandScopePlaceholders(config.observationScopes, {
     sessionId,
     parentSessionId,
     sessionCwd,
+    projectName,
   }) as Exclude<ObservationScopes, null>;
 }
 

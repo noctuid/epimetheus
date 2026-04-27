@@ -15,7 +15,7 @@ import {
   readAutoQueue,
   readToolQueue,
 } from "./queue";
-import { truncate } from "./utils";
+import { getBasedir, getProjectName, truncate } from "./utils";
 
 /**
  * Queue a tool retain entry with complete tags.
@@ -34,11 +34,14 @@ export function queueToolRetain(
   config: Pick<HindsightConfig, "constantTags" | "observationScopes">,
   sessionTags?: string[]
 ): boolean {
+  const projectName = getProjectName(sessionCwd);
   // Build complete tags at queue time
   const tags = [
     ...config.constantTags,
     `session:${sessionId}`,
     `cwd:${sessionCwd}`,
+    `basedir:${getBasedir(sessionCwd)}`,
+    `project:${projectName}`,
     `store_method:tool`,
     `parent:${parentSessionId ?? sessionId}`,
     ...(userTags ?? []),
@@ -50,7 +53,8 @@ export function queueToolRetain(
     config,
     sessionId,
     parentSessionId,
-    sessionCwd
+    sessionCwd,
+    projectName
   );
 
   const entry: ToolQueueEntry = {
@@ -87,10 +91,13 @@ export async function flushAutoQueue(
   // Build tags: base session tags + session metadata tags
   const meta = entries ? getHindsightMeta(entries) : null;
   const sessionTags = meta?.tags ?? [];
+  const projectName = getProjectName(sessionCwd);
   const tags = [
     ...config.constantTags,
     `session:${sessionId}`,
     `cwd:${sessionCwd}`,
+    `basedir:${getBasedir(sessionCwd)}`,
+    `project:${projectName}`,
     `store_method:auto`,
     `parent:${parentSessionId ?? sessionId}`,
     ...sessionTags,
@@ -110,7 +117,8 @@ export async function flushAutoQueue(
     config,
     sessionId,
     parentSessionId,
-    sessionCwd
+    sessionCwd,
+    projectName
   );
 
   const result = await client.retain(

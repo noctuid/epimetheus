@@ -5,7 +5,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { HindsightConfig, RetainContent, ToolFilter } from "./config";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
-import { extractParentSessionId, extractTextFromContent, truncate } from "./utils";
+import {
+  extractParentSessionId,
+  extractTextFromContent,
+  getBasedir,
+  getProjectName,
+  truncate,
+} from "./utils";
 
 export interface SessionHeader {
   type: "session";
@@ -292,6 +298,8 @@ export function buildDocumentTags(
     ...config.constantTags,
     `session:${header.id}`,
     `cwd:${header.cwd}`,
+    `basedir:${getBasedir(header.cwd)}`,
+    `project:${getProjectName(header.cwd)}`,
     `store_method:${options?.storeMethod ?? "auto"}`,
   ];
 
