@@ -10,6 +10,7 @@ import {
   loadConfig,
   type ObservationScopes,
   type ToolFilterMode,
+  type ToolName,
   validateConfig,
 } from "../src/config";
 import { HINDSIGHT_ENV_KEYS, saveEnvKeys } from "./fixtures";
@@ -109,6 +110,44 @@ describe("validateConfig", () => {
     expect(result.errors).toContain(
       "bankId is required (set in config.json or PI_HINDSIGHT_BANK_ID env var)"
     );
+  });
+
+  it("warns when toolsEnabled array contains invalid tool names", () => {
+    const config = {
+      ...validConfig,
+      toolsEnabled: ["retain", "invalid"] as ToolName[],
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("invalid values"))).toBe(true);
+  });
+
+  it("accepts toolsEnabled as empty array (no tools, equivalent to false)", () => {
+    const config = { ...validConfig, toolsEnabled: [] as ToolName[] };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+  });
+
+  it("warns when toolsEnabled array has duplicates", () => {
+    const config = {
+      ...validConfig,
+      toolsEnabled: ["retain", "retain"] as ToolName[],
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("duplicate values"))).toBe(true);
+  });
+
+  it("accepts toolsEnabled as boolean true", () => {
+    const config = { ...validConfig, toolsEnabled: true };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts toolsEnabled as valid array", () => {
+    const config = { ...validConfig, toolsEnabled: ["retain", "reflect"] as ["retain", "reflect"] };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
   });
 
   it("errors when retainContent.user is empty", () => {
@@ -377,6 +416,110 @@ describe("loadConfig", () => {
 
     const { config } = loadConfig(TEST_DIR);
     expect(config.autoRecallPersist).toBe(true);
+  });
+
+  // ============================================
+  // toolsEnabled tests
+  // ============================================
+
+  it("toolsEnabled defaults to true", () => {
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.toolsEnabled).toBe(true);
+  });
+
+  it("toolsEnabled can be set to false via config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        toolsEnabled: false,
+      })
+    );
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.toolsEnabled).toBe(false);
+  });
+
+  it("toolsEnabled can be set to array of tool names via config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        toolsEnabled: ["retain", "recall"],
+      })
+    );
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.toolsEnabled).toEqual(["retain", "recall"]);
+  });
+
+  it("toolsEnabled can be set to array via PI_HINDSIGHT_TOOLS_ENABLED env var", () => {
+    process.env.PI_HINDSIGHT_TOOLS_ENABLED = '["retain"]';
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.toolsEnabled).toEqual(["retain"]);
+  });
+
+  it("toolsEnabled env var supports boolean string", () => {
+    process.env.PI_HINDSIGHT_TOOLS_ENABLED = "false";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.toolsEnabled).toBe(false);
+  });
+
+  it("warns on invalid tool names in toolsEnabled array via config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        toolsEnabled: ["retain", "invalid"],
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(warning).toContain("invalid tool names");
+    expect(config.toolsEnabled).toBe(true); // falls back to default
+  });
+
+  it("warns on invalid toolsEnabled env var JSON", () => {
+    process.env.PI_HINDSIGHT_TOOLS_ENABLED = "not-json";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(warning).toContain("invalid JSON");
+    expect(config.toolsEnabled).toBe(true); // falls back to default
+  });
+
+  it("warns on empty string toolsEnabled env var", () => {
+    process.env.PI_HINDSIGHT_TOOLS_ENABLED = "";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(warning).toBeDefined();
+    expect(config.toolsEnabled).toBe(true); // falls back to default
+  });
+
+  it("toolsEnabled env var empty array is equivalent to false", () => {
+    process.env.PI_HINDSIGHT_TOOLS_ENABLED = "[]";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.toolsEnabled).toEqual([]);
+  });
+
+  it("toolsEnabled config file null falls back to default with warning", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        toolsEnabled: null,
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(warning).toBeDefined();
+    expect(config.toolsEnabled).toBe(true); // falls back to default
   });
 
   it('recallTypes defaults to ["observation"]', () => {

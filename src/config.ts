@@ -52,12 +52,16 @@ export type TagsMatch = NonNullable<
   Required<import("@vectorize-io/hindsight-client").RecallRequest>["tags_match"]
 >;
 
+export type ToolName = "retain" | "recall" | "reflect";
+
+const VALID_TOOL_NAMES: ToolName[] = ["retain", "recall", "reflect"];
+
 export interface HindsightConfig {
   enabled: boolean;
   apiUrl: string;
   apiKey: string;
   bankId: string;
-  toolsEnabled: boolean;
+  toolsEnabled: ToolName[] | boolean;
   autoRecallEnabled: boolean;
   autoRecallBudget: Budget;
   autoRetainEnabled: boolean;
@@ -354,8 +358,58 @@ function setConfigValue(
   value: unknown
 ): string | undefined {
   switch (key) {
+    case "toolsEnabled": {
+      // Accept boolean for backward compat (true = all, false = none) or array of tool names
+      if (typeof value === "boolean") {
+        config[key] = value;
+        return;
+      }
+      if (Array.isArray(value)) {
+        const validTools = VALID_TOOL_NAMES;
+        const invalid = value.filter(
+          (t) => typeof t !== "string" || !validTools.includes(t as ToolName)
+        );
+        if (invalid.length > 0) {
+          config[key] = DEFAULT_CONFIG[key] as ToolName[] | boolean;
+          return `toolsEnabled: invalid tool names: ${invalid.join(", ")}. Valid: ${validTools.join(", ")}. Using default.`;
+        }
+        config[key] = value as ToolName[];
+        return;
+      }
+      // String value from env var
+      const strVal = String(value);
+      const lower = strVal.toLowerCase();
+      if (lower === "true") {
+        config[key] = true;
+        return;
+      }
+      if (lower === "false") {
+        config[key] = false;
+        return;
+      }
+      // Try parsing as JSON array
+      try {
+        const parsed = JSON.parse(strVal);
+        if (Array.isArray(parsed)) {
+          const validTools = VALID_TOOL_NAMES;
+          const invalid = parsed.filter(
+            (t: unknown) => typeof t !== "string" || !validTools.includes(t as ToolName)
+          );
+          if (invalid.length > 0) {
+            config[key] = DEFAULT_CONFIG[key] as ToolName[] | boolean;
+            return `toolsEnabled: invalid tool names: ${invalid.join(", ")}. Valid: ${validTools.join(", ")}. Using default.`;
+          }
+          config[key] = parsed as ToolName[];
+          return;
+        }
+        config[key] = DEFAULT_CONFIG[key] as ToolName[] | boolean;
+        return `toolsEnabled must be a boolean or array of tool names. Using default.`;
+      } catch {
+        config[key] = DEFAULT_CONFIG[key] as ToolName[] | boolean;
+        return `toolsEnabled contains invalid JSON. Using default.`;
+      }
+    }
     case "enabled":
-    case "toolsEnabled":
     case "autoRecallEnabled":
     case "autoRetainEnabled":
     case "recallShowDateTime":
@@ -837,6 +891,22 @@ export function validateConfig(config: HindsightConfig): {
 
   if (!config.bankId) {
     errors.push("bankId is required (set in config.json or PI_HINDSIGHT_BANK_ID env var)");
+  }
+
+  // Validate toolsEnabled
+  if (Array.isArray(config.toolsEnabled)) {
+    const validTools = VALID_TOOL_NAMES;
+    const invalid = config.toolsEnabled.filter((t) => !validTools.includes(t));
+    if (invalid.length > 0) {
+      warnings.push(
+        `toolsEnabled contains invalid values: ${invalid.join(", ")}. Valid: ${validTools.join(", ")}`
+      );
+    }
+    // Check for duplicates
+    const unique = new Set(config.toolsEnabled);
+    if (unique.size !== config.toolsEnabled.length) {
+      warnings.push("toolsEnabled contains duplicate values");
+    }
   }
 
   if (config.hindsightContextMaxLength < 0) {

@@ -6,7 +6,7 @@ import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agen
 import type { Budget, RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-client";
 import { type Static, Type } from "typebox";
 import type { HindsightClientWrapper } from "./client";
-import type { HindsightConfig, MemoryType } from "./config";
+import type { HindsightConfig, MemoryType, ToolName } from "./config";
 import { getHindsightMeta, shouldSessionBeRetained } from "./meta";
 import { queueToolRetain } from "./retention";
 import { extractParentSessionId } from "./utils";
@@ -57,228 +57,249 @@ interface ReflectDetails {
 }
 
 /**
+ * Check if a specific tool is enabled based on config.toolsEnabled.
+ * - `true` (default): all tools enabled
+ * - `false`: no tools enabled
+ * - array of tool names: only listed tools enabled
+ */
+function isToolEnabled(config: HindsightConfig, tool: ToolName): boolean {
+  const { toolsEnabled } = config;
+  if (typeof toolsEnabled === "boolean") return toolsEnabled;
+  return toolsEnabled.includes(tool);
+}
+
+/**
  * Register hindsight_retain, hindsight_recall, and hindsight_reflect tools.
- * hindsight_retain is always available (queues to disk).
- * hindsight_recall and hindsight_reflect are only available when client is provided.
+ * hindsight_retain is always available (queues to disk) when enabled.
+ * hindsight_recall and hindsight_reflect are only available when client is provided and enabled.
  */
 export function registerTools(
   pi: ExtensionAPI,
   config: HindsightConfig,
   client: HindsightClientWrapper | null
 ): void {
-  if (!config.toolsEnabled) return;
+  // Register hindsight_retain if enabled
+  if (isToolEnabled(config, "retain")) {
+    // hindsight_retain - always available, just queues to disk
+    pi.registerTool({
+      name: "hindsight_retain",
+      label: "Hindsight Retain",
+      description:
+        "Store information to long-term memory. Use for facts, preferences, decisions, or anything worth remembering across sessions",
+      parameters: Type.Object({
+        content: Type.String({ description: "Information to store" }),
+        tags: Type.Optional(
+          Type.Array(Type.String(), {
+            description: "Tags for recall filtering, e.g. 'topic:billing'",
+          })
+        ),
+        metadata: Type.Optional(
+          Type.Record(Type.String(), Type.String(), {
+            description:
+              "Extra context for fact extraction. Returned with recalled memories but can't use for recall filtering.",
+          })
+        ),
+      }),
 
-  // hindsight_retain - always available, just queues to disk
-  pi.registerTool({
-    name: "hindsight_retain",
-    label: "Hindsight Retain",
-    description:
-      "Store information to long-term memory. Use for facts, preferences, decisions, or anything worth remembering across sessions",
-    parameters: Type.Object({
-      content: Type.String({ description: "Information to store" }),
-      tags: Type.Optional(
-        Type.Array(Type.String(), {
-          description: "Tags for recall filtering, e.g. 'topic:billing'",
-        })
-      ),
-      metadata: Type.Optional(
-        Type.Record(Type.String(), Type.String(), {
-          description:
-            "Extra context for fact extraction. Returned with memories but cannot filter by on recall.",
-        })
-      ),
-    }),
+      async execute(
+        _toolCallId,
+        params,
+        _signal,
+        _onUpdate,
+        ctx
+      ): Promise<AgentToolResult<RetainDetails>> {
+        const sessionId = ctx.sessionManager.getSessionId();
+        if (!sessionId) {
+          return {
+            content: [{ type: "text", text: "Failed to store memory: no active session" }],
+            details: { success: false, error: "no active session" },
+          };
+        }
 
-    async execute(
-      _toolCallId,
-      params,
-      _signal,
-      _onUpdate,
-      ctx
-    ): Promise<AgentToolResult<RetainDetails>> {
-      const sessionId = ctx.sessionManager.getSessionId();
-      if (!sessionId) {
+        // Check if session is retained
+        const entries = ctx.sessionManager.getEntries();
+        if (!shouldSessionBeRetained(entries, config)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Warning: Session does not allow retention. Use /hindsight toggle-retain to enable retention.",
+              },
+            ],
+            details: { success: false, error: "session does not allow retention" },
+          };
+        }
+
+        const header = ctx.sessionManager.getHeader();
+        const parentSessionId = extractParentSessionId(header?.parentSession);
+
+        // Get session tags from metadata
+        const meta = getHindsightMeta(entries);
+        const sessionTags = meta?.tags;
+
+        const success = queueToolRetain(
+          sessionId,
+          params.content,
+          params.tags,
+          params.metadata,
+          ctx.cwd,
+          parentSessionId,
+          config,
+          sessionTags
+        );
+        if (!success) {
+          return {
+            content: [{ type: "text", text: "Failed to queue memory for storage." }],
+            details: { success: false, error: "enqueue failed" },
+          };
+        }
+
         return {
-          content: [{ type: "text", text: "Failed to store memory: no active session" }],
-          details: { success: false, error: "no active session" },
+          content: [{ type: "text", text: "Memory queued for storage." }],
+          details: { success: true },
         };
-      }
+      },
+    });
+  }
 
-      // Check if session is retained
-      const entries = ctx.sessionManager.getEntries();
-      if (!shouldSessionBeRetained(entries, config)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Warning: Session does not allow retention. Use /hindsight toggle-retain to enable retention.",
-            },
-          ],
-          details: { success: false, error: "session does not allow retention" },
-        };
-      }
-
-      const header = ctx.sessionManager.getHeader();
-      const parentSessionId = extractParentSessionId(header?.parentSession);
-
-      // Get session tags from metadata
-      const meta = getHindsightMeta(entries);
-      const sessionTags = meta?.tags;
-
-      const success = queueToolRetain(
-        sessionId,
-        params.content,
-        params.tags,
-        params.metadata,
-        ctx.cwd,
-        parentSessionId,
-        config,
-        sessionTags
-      );
-      if (!success) {
-        return {
-          content: [{ type: "text", text: "Failed to queue memory for storage." }],
-          details: { success: false, error: "enqueue failed" },
-        };
-      }
-
-      return {
-        content: [{ type: "text", text: "Memory queued for storage." }],
-        details: { success: true },
-      };
-    },
-  });
-
-  // hindsight_recall - only available when client is configured
+  // recall and reflect require client
   if (!client) return;
 
-  pi.registerTool({
-    name: "hindsight_recall",
-    label: "Hindsight Recall",
-    description: "Search long-term memory",
-    parameters: Type.Object({
-      query: Type.String({ description: "Search query" }),
-      tags: Type.Optional(
-        Type.Array(Type.String(), {
-          description: "Filter by tags",
-        })
-      ),
-      tagsMatch: Type.Optional(TagsMatchSchema),
-      // TODO: Consider adding tag_groups for complex tag matching (may be unnecessary and overly complex)
-      types: Type.Optional(
-        Type.Array(MemoryTypeSchema, {
-          description:
-            "Filter by type: `world` (external facts), `experience` (user-specific), `observation` (consolidated patterns). Default: all types.",
-        })
-      ),
-      budget: Type.Optional(BudgetSchema),
-    }),
+  // Register hindsight_recall if enabled
+  if (isToolEnabled(config, "recall")) {
+    pi.registerTool({
+      name: "hindsight_recall",
+      label: "Hindsight Recall",
+      description: "Search long-term memory",
+      parameters: Type.Object({
+        query: Type.String({ description: "Search query" }),
+        tags: Type.Optional(
+          Type.Array(Type.String(), {
+            description: "Filter by tags",
+          })
+        ),
+        tagsMatch: Type.Optional(TagsMatchSchema),
+        // TODO: Consider adding tag_groups for complex tag matching (may be unnecessary and overly complex)
+        types: Type.Optional(
+          Type.Array(MemoryTypeSchema, {
+            description:
+              "Filter by type: `world` (external facts), `experience` (user-specific), `observation` (consolidated patterns). Default: all types.",
+          })
+        ),
+        budget: Type.Optional(BudgetSchema),
+      }),
 
-    async execute(
-      _toolCallId,
-      params,
-      signal,
-      _onUpdate,
-      _ctx
-    ): Promise<AgentToolResult<RecallDetails>> {
-      // Use config default if not specified, otherwise use params
-      const types = params.types ?? config.recallTypes ?? undefined;
-      const result = await client.recall(
-        {
-          query: params.query,
-          tags: params.tags,
-          tagsMatch: params.tagsMatch as TagsMatch | undefined,
-          types: types as MemoryType[] | undefined,
-          budget: params.budget as Budget | undefined,
-        },
-        signal
-      );
+      async execute(
+        _toolCallId,
+        params,
+        signal,
+        _onUpdate,
+        _ctx
+      ): Promise<AgentToolResult<RecallDetails>> {
+        // Use config default if not specified, otherwise use params
+        const types = params.types ?? config.recallTypes ?? undefined;
+        const result = await client.recall(
+          {
+            query: params.query,
+            tags: params.tags,
+            tagsMatch: params.tagsMatch as TagsMatch | undefined,
+            types: types as MemoryType[] | undefined,
+            budget: params.budget as Budget | undefined,
+          },
+          signal
+        );
 
-      if (!result.success) {
+        if (!result.success) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed to recall memories: ${result.error ?? "unknown error"}`,
+              },
+            ],
+            details: { success: false, error: result.error },
+          };
+        }
+
+        const response = result.response;
+        const results = response?.results ?? [];
+
+        if (results.length === 0) {
+          return {
+            content: [{ type: "text", text: "No relevant memories found." }],
+            details: { success: true, response },
+          };
+        }
+
+        const text = results.map((r, i) => `${i + 1}. ${r.text}`).join("\n");
+
         return {
-          content: [
-            { type: "text", text: `Failed to recall memories: ${result.error ?? "unknown error"}` },
-          ],
-          details: { success: false, error: result.error },
-        };
-      }
-
-      const response = result.response;
-      const results = response?.results ?? [];
-
-      if (results.length === 0) {
-        return {
-          content: [{ type: "text", text: "No relevant memories found." }],
+          content: [{ type: "text", text }],
           details: { success: true, response },
         };
-      }
+      },
+    });
+  }
 
-      const text = results.map((r, i) => `${i + 1}. ${r.text}`).join("\n");
+  // Register hindsight_reflect if enabled
+  if (isToolEnabled(config, "reflect")) {
+    pi.registerTool({
+      name: "hindsight_reflect",
+      label: "Hindsight Reflect",
+      description:
+        "Synthesize an answer from memories using multi-step reasoning. Use recall for raw facts or observations and reflect for answers, topic summaries, etc. requiring synthesis across many memories. Budget defaults to 'low'; higher budgets are much slower and should only be used if necessary",
+      parameters: Type.Object({
+        query: Type.String({ description: "Question to answer" }),
+        tags: Type.Optional(
+          Type.Array(Type.String(), {
+            description: "Filter by tags",
+          })
+        ),
+        tagsMatch: Type.Optional(TagsMatchSchema),
+        budget: Type.Optional(BudgetSchema),
+      }),
 
-      return {
-        content: [{ type: "text", text }],
-        details: { success: true, response },
-      };
-    },
-  });
+      async execute(
+        _toolCallId,
+        params,
+        signal,
+        _onUpdate,
+        _ctx
+      ): Promise<AgentToolResult<ReflectDetails>> {
+        const result = await client.reflect(
+          {
+            query: params.query,
+            tags: params.tags,
+            tagsMatch: params.tagsMatch as TagsMatch | undefined,
+            budget: params.budget as Budget | undefined,
+          },
+          signal
+        );
 
-  // hindsight_reflect - only available when client is configured
-  pi.registerTool({
-    name: "hindsight_reflect",
-    label: "Hindsight Reflect",
-    description:
-      "Synthesize an answer from memories using multi-step reasoning. Use recall for raw facts or observations and reflect for answers, topic summaries, etc. requiring synthesis across many memories. Budget defaults to 'low'; higher budgets are much slower and should only be used if necessary",
-    parameters: Type.Object({
-      query: Type.String({ description: "Question to answer" }),
-      tags: Type.Optional(
-        Type.Array(Type.String(), {
-          description: "Filter by tags",
-        })
-      ),
-      tagsMatch: Type.Optional(TagsMatchSchema),
-      budget: Type.Optional(BudgetSchema),
-    }),
+        if (!result.success) {
+          return {
+            content: [
+              { type: "text", text: `Failed to reflect: ${result.error ?? "unknown error"}` },
+            ],
+            details: { success: false, error: result.error },
+          };
+        }
 
-    async execute(
-      _toolCallId,
-      params,
-      signal,
-      _onUpdate,
-      _ctx
-    ): Promise<AgentToolResult<ReflectDetails>> {
-      const result = await client.reflect(
-        {
-          query: params.query,
-          tags: params.tags,
-          tagsMatch: params.tagsMatch as TagsMatch | undefined,
-          budget: params.budget as Budget | undefined,
-        },
-        signal
-      );
+        const response = result.response;
+        const text = response?.text;
 
-      if (!result.success) {
+        if (!text) {
+          return {
+            content: [{ type: "text", text: "No relevant memories found to reflect on." }],
+            details: { success: true, response },
+          };
+        }
+
         return {
-          content: [
-            { type: "text", text: `Failed to reflect: ${result.error ?? "unknown error"}` },
-          ],
-          details: { success: false, error: result.error },
-        };
-      }
-
-      const response = result.response;
-      const text = response?.text;
-
-      if (!text) {
-        return {
-          content: [{ type: "text", text: "No relevant memories found to reflect on." }],
+          content: [{ type: "text", text }],
           details: { success: true, response },
         };
-      }
-
-      return {
-        content: [{ type: "text", text }],
-        details: { success: true, response },
-      };
-    },
-  });
+      },
+    });
+  }
 }
