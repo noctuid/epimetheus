@@ -22,7 +22,7 @@ const TagsMatchSchema = Type.Union(
   ],
   {
     description:
-      "How to match tags: 'any', 'all', 'any_strict', 'all_strict' (any/all - OR/AND, strict - excludes untagged). Default: 'any'.",
+      "Match mode: 'any'(OR)/'all'(AND), '_strict' variants exclude untagged. Default: 'any'.",
   }
 );
 type TagsMatch = Static<typeof TagsMatchSchema>;
@@ -72,19 +72,19 @@ export function registerTools(
   pi.registerTool({
     name: "hindsight_retain",
     label: "Hindsight Retain",
-    description: `Store information to long-term memory. Hindsight automatically extracts structured facts, resolves entities, and indexes for retrieval. Use this for facts, preferences, decisions, or any information worth remembering for future sessions.`,
+    description:
+      "Store information to long-term memory. Use for facts, preferences, decisions, or anything worth remembering across sessions",
     parameters: Type.Object({
-      content: Type.String({ description: "The information to store" }),
+      content: Type.String({ description: "Information to store" }),
       tags: Type.Optional(
         Type.Array(Type.String(), {
-          description:
-            "Tags for filtering during recall. Use namespaced tags like 'topic:billing' or 'priority:high'.",
+          description: "Tags for recall filtering, e.g. 'topic:billing'",
         })
       ),
       metadata: Type.Optional(
         Type.Record(Type.String(), Type.String(), {
           description:
-            "Additional context included in fact extraction prompt (improves accuracy). Returned with recalled memories for client-side filtering.",
+            "Extra context for fact extraction. Returned with memories but cannot filter by on recall.",
         })
       ),
     }),
@@ -155,18 +155,12 @@ export function registerTools(
   pi.registerTool({
     name: "hindsight_recall",
     label: "Hindsight Recall",
-    description: `Search long-term memory using multi-strategy retrieval.
-
-**Memory Types:**
-- \`world\`: General knowledge, external facts (e.g., "The Eiffel Tower is in Paris")
-- \`experience\`: Personal events, user-specific facts (e.g., "User prefers dark mode")
-- \`observation\`: Consolidated patterns synthesized from facts (e.g., "User consistently prefers async communication")`,
+    description: "Search long-term memory",
     parameters: Type.Object({
-      query: Type.String({ description: "What to search for" }),
+      query: Type.String({ description: "Search query" }),
       tags: Type.Optional(
         Type.Array(Type.String(), {
-          description:
-            "Filter by tags. A memory tagged 'user:alice' is only returned when tags=['user:alice'].",
+          description: "Filter by tags",
         })
       ),
       tagsMatch: Type.Optional(TagsMatchSchema),
@@ -174,7 +168,7 @@ export function registerTools(
       types: Type.Optional(
         Type.Array(MemoryTypeSchema, {
           description:
-            'Filter by memory type. Default: all types. Common alternative would be ["observation"] to avoid duplication.',
+            "Filter by type: `world` (external facts), `experience` (user-specific), `observation` (consolidated patterns). Default: all types.",
         })
       ),
       budget: Type.Optional(BudgetSchema),
@@ -232,22 +226,13 @@ export function registerTools(
   pi.registerTool({
     name: "hindsight_reflect",
     label: "Hindsight Reflect",
-    description: `Generate a synthesized answer from long-term memory. Unlike recall which returns raw facts, reflect uses the bank's identity, mental models, and multi-step reasoning to produce a contextual markdown answer.
-
-Best for:
-- Answering questions that require synthesizing multiple memories
-- Getting a coherent summary of what's known about a topic
-- When you need a reasoned perspective rather than raw fact retrieval
-
-Use recall instead when you just need raw facts or latency matters.
-
-**Performance:** Reflect runs an agentic loop with up to 10 iterations of multi-tool search + LLM calls, making it substantially slower than recall (seconds vs milliseconds). Budget defaults to 'low'; increase only if necessary as higher budgets take much longer.`,
+    description:
+      "Synthesize an answer from memories using multi-step reasoning. Use recall for raw facts or observations and reflect for answers, topic summaries, etc. requiring synthesis across many memories. Budget defaults to 'low'; higher budgets are much slower and should only be used if necessary",
     parameters: Type.Object({
-      query: Type.String({ description: "The question to answer using memories" }),
+      query: Type.String({ description: "Question to answer" }),
       tags: Type.Optional(
         Type.Array(Type.String(), {
-          description:
-            "Filter memories by tags during reflection. Only memories matching the tags will be considered.",
+          description: "Filter by tags",
         })
       ),
       tagsMatch: Type.Optional(TagsMatchSchema),
