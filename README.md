@@ -168,7 +168,7 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable or disable the extension. When `false`, the extension runs in a lightweight disabled mode (see [Disabled Mode](#disabled-mode)). |
-| `toolsEnabled` | `true` | Register hindsight_retain/recall/reflect tools for the agent |
+| `toolsEnabled` | `true` | Which tools to register: `true` (all), `false` (none), or array of tool names (`"retain"`, `"recall"`, `"reflect"`) |
 | `autoRecallEnabled` | `true` | Automatically recall relevant memories before each LLM call |
 | `autoRetainEnabled` | `true` | Automatically queue messages for retention on `message_end` (see [Session Retention Control](#session-retention-control)) |
 | `autoRecallBudget` | `"mid"` | Recall retrieval budget. One of `"low"`, `"mid"`, `"high"`. Controls how many results Hindsight returns. |
@@ -579,7 +579,7 @@ Configuration options can also be set via environment variables (override config
 | `HINDSIGHT_API_URL` | `apiUrl` | string | *(required)* |
 | `HINDSIGHT_API_KEY` | `apiKey` | string | *(required)* |
 | `PI_HINDSIGHT_BANK_ID` | `bankId` | string | *(required)* |
-| `PI_HINDSIGHT_TOOLS_ENABLED` | `toolsEnabled` | boolean | `true` |
+| `PI_HINDSIGHT_TOOLS_ENABLED` | `toolsEnabled` | boolean \| JSON array of tool names | `true` |
 | `PI_HINDSIGHT_AUTO_RECALL_ENABLED` | `autoRecallEnabled` | boolean | `true` |
 | `PI_HINDSIGHT_AUTO_RECALL_BUDGET` | `autoRecallBudget` | `"low"` \| `"mid"` \| `"high"` | `"mid"` |
 | `PI_HINDSIGHT_AUTO_RETAIN_ENABLED` | `autoRetainEnabled` | boolean | `true` |
@@ -761,7 +761,7 @@ There are multiple other Hindsight integrations for Pi:
 - Use subcommands to avoid cluttering global command list
 
 # Tools
-When `toolsEnabled: true` (default), the following tools are available for the agent:
+When `toolsEnabled: true` (default), all three tools are available. Set to an array of tool names (`"retain"`, `"recall"`, `"reflect"`) to register only specific tools, or `false` to disable all tools.
 
 | Tool | Description |
 |------|-------------|

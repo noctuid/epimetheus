@@ -92,7 +92,7 @@ afterEach(() => {
 describe("registerTools", () => {
   it("does not register any tools when toolsEnabled is false", () => {
     const pi = createMockPi();
-    const config = { ...testConfig, toolsEnabled: false };
+    const config = { ...testConfig, toolsEnabled: false as const };
     registerTools(pi, config, createMockClient());
     expect(pi.tools).toHaveLength(0);
   });
@@ -115,6 +115,42 @@ describe("registerTools", () => {
     registerTools(pi, testConfig, null);
     expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_recall")).toBe(false);
     expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_reflect")).toBe(false);
+  });
+
+  it("registers only listed tools when toolsEnabled is an array", () => {
+    const pi = createMockPi();
+    const config = { ...testConfig, toolsEnabled: ["retain", "recall"] as ["retain", "recall"] };
+    registerTools(pi, config, createMockClient());
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_retain")).toBe(true);
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_recall")).toBe(true);
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_reflect")).toBe(false);
+    expect(pi.tools).toHaveLength(2);
+  });
+
+  it("registers only retain when toolsEnabled is ['retain', 'recall'] and client is null", () => {
+    const pi = createMockPi();
+    const config = { ...testConfig, toolsEnabled: ["retain", "recall"] as ["retain", "recall"] };
+    registerTools(pi, config, null);
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_retain")).toBe(true);
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_recall")).toBe(false);
+    expect(pi.tools).toHaveLength(1);
+  });
+
+  it("registers no tools when toolsEnabled is ['recall'] and client is null", () => {
+    const pi = createMockPi();
+    const config = { ...testConfig, toolsEnabled: ["recall"] as ["recall"] };
+    registerTools(pi, config, null);
+    expect(pi.tools).toHaveLength(0);
+  });
+
+  it("registers only recall when toolsEnabled is ['recall'] with client", () => {
+    const pi = createMockPi();
+    const config = { ...testConfig, toolsEnabled: ["recall"] as ["recall"] };
+    registerTools(pi, config, createMockClient());
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_retain")).toBe(false);
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_recall")).toBe(true);
+    expect(pi.tools.some((t: ToolDef) => t.name === "hindsight_reflect")).toBe(false);
+    expect(pi.tools).toHaveLength(1);
   });
 });
 
