@@ -11,10 +11,13 @@
     "check": "biome check . && ! grep -n '[[:space:]]$' src/*.ts *.md",
     "check:fix": "biome check . --write && sed -i'' -e 's/[[:space:]]*$//' src/*.ts *.md",
     "typecheck": "bun run --bun tsc --noEmit",
+    "commitlint": "commitlint",
     "ci": "bun run check && bun run typecheck && bun test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
+    "@commitlint/cli": "^20.5.2",
+    "@commitlint/config-conventional": "^20.5.0",
     "@types/bun": "latest"
   },
   "peerDependencies": {

@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       - name: Cache node_modules
         id: cache-node-modules
@@ -25,6 +27,8 @@ jobs:
         run: bun run check
       - name: Typecheck
         run: bun run typecheck
+      - name: Lint commit messages
+        run: bun run commitlint --from ${{ github.event.pull_request.base.sha || github.event.before }} --to ${{ github.sha }}
 
   test:
     runs-on: ubuntu-latest
