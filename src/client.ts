@@ -11,7 +11,7 @@ import {
   type RecallResponse,
   type ReflectResponse,
 } from "@vectorize-io/hindsight-client";
-import type { HindsightConfig, ObservationScopes } from "./config";
+import type { HindsightConfig, ObservationScopes, TagGroupInput } from "./config";
 
 export interface RetainOptions {
   content: string;
@@ -30,6 +30,7 @@ export interface RecallOptions {
   query: string;
   tags?: string[];
   tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+  tagGroups?: TagGroupInput[];
   types?: ("world" | "experience" | "observation")[];
   budget?: Budget;
   maxTokens?: number | null;
@@ -50,6 +51,8 @@ export interface ReflectOptions {
   // exclude_mental_model_ids, tag_groups, max_tokens, include, response_schema):
   // - fact_types / exclude_mental_models: can be added if the client SDK is updated
   //   or when switching to the generated SDK directly
+  // - tag_groups: can be added for reflect similar to recall if needed but
+  //   probably overly complex (seems unlikely LLM tool needs advanced tags)
   // - max_tokens: not currently configurable (default 4096 output)
   // - response_schema: not adding for now as structured output seems less useful
   //   for coding agent integration
@@ -194,6 +197,7 @@ export class HindsightClientWrapper {
         this.client.recall(this.config.bankId, options.query, {
           tags: options.tags,
           tagsMatch: options.tagsMatch,
+          tagGroups: options.tagGroups,
           types: options.types,
           budget: options.budget ?? this.config.autoRecallBudget,
           maxTokens: options.maxTokens ?? this.config.maxRecallTokens ?? undefined,

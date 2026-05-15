@@ -24,7 +24,7 @@
     "@mariozechner/pi-coding-agent": "*"
   },
   "dependencies": {
-    "@vectorize-io/hindsight-client": "0.5.0",
+    "@vectorize-io/hindsight-client": "0.6.1",
     "jsonc-parser": "^3.3.1",
     "typebox": "^1.1.24"
   },

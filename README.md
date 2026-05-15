@@ -207,6 +207,7 @@ This ensures that disabling the extension does not leave stale data in your sess
 | `recallTypes` | `["observation"]` | Memory types to recall. Set to `null` or `[]` to recall all types. |
 | `autoRecallTags` | `null` | Tags to filter by during auto-recall. Supports same placeholders as observation scopes (`{session}`, `{parent}`, `{cwd}`, `{basedir}`, `{project}`). `null` means no tag filtering (recall from entire bank). See [autoRecallTags](#autorecalltags). |
 | `autoRecallTagsMatch` | `"any"` | How to match `autoRecallTags`: `"any"` (OR, includes untagged), `"all"` (AND, includes untagged), `"any_strict"` (OR, excludes untagged), `"all_strict"` (AND, excludes untagged). |
+| `autoRecallTagGroups` | `null` | Compound boolean tag expressions for auto-recall. Combined with `autoRecallTags` when both are set. Supports same placeholders. See [autoRecallTags](#autorecalltags). |
 
 > **Note:** observations are deduplicated consolidated information about memories and probably the most useful recall type. See [hindsight issue #826](https://github.com/vectorize-io/hindsight/issues/826) for more information.
 
@@ -525,6 +526,10 @@ Tags to filter by during auto-recall. When set, only memories matching these tag
 
 When `autoRecallTags` is `null` (default), no tag filtering is applied and `autoRecallTagsMatch` is ignored — auto-recall searches the entire bank.
 
+**`autoRecallTagGroups`** provides compound boolean tag expressions for auto-recall filtering. When both `autoRecallTags` and `autoRecallTagGroups` are set, both are sent to the Hindsight API and combined. Tag groups support nested `and`/`or`/`not` expressions for complex filtering. Each leaf node has a `tags` array and an optional `match` mode. Groups in the top-level array are AND-ed together. See [the relevant hindsight documentation](https://hindsight.vectorize.io/developer/api/recall#tag_groups) for more information.
+
+Supports the same placeholder expansion as `observationScopes`, expanded at recall time using the current session context.
+
 **Example — Project-scoped recall:**
 ```jsonc
 {
@@ -532,6 +537,19 @@ When `autoRecallTags` is `null` (default), no tag filtering is applied and `auto
   "autoRecallTagsMatch": "any_strict"
 }
 ```
+
+**Example — Project-scoped recall excluding current session:**
+```jsonc
+{
+  "autoRecallTagGroups": [
+    // Match memories from this project AND NOT from this session
+    { "tags": ["{project}"], "match": "any_strict" },
+    { "not": { "tags": ["{session}"], "match": "any_strict" } }
+  ]
+}
+```
+
+> **Caveat:** Excluding the current session's memories with `not` means you won't recall memories from *the current session*. This is usually fine because the LLM already has the current conversation in context. However, after a session compaction (when old messages are removed from the context window), you *might* want those memories — they just won't be added to Hindsight until the session switches, ends, is compacted (depending on your `flushOnCompact` setting), or manually flushed. In practice, `not: ... {session}` is useful when you want to avoid wasting recall tokens on information the LLM already knows from the current conversation.
 
 **Recall types and tag matching:**
 
@@ -594,6 +612,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_RECALL_TYPES` | `recallTypes` | string[] (JSON) | `["observation"]` |
 | `PI_HINDSIGHT_AUTO_RECALL_TAGS` | `autoRecallTags` | string[] (JSON) | `null` |
 | `PI_HINDSIGHT_AUTO_RECALL_TAGS_MATCH` | `autoRecallTagsMatch` | string | `"any"` |
+| `PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS` | `autoRecallTagGroups` | TagGroupInput[] (JSON) | `null` |
 | `PI_HINDSIGHT_CONSTANT_TAGS` | `constantTags` | string[] (JSON) | `["harness:pi"]` |
 | `PI_HINDSIGHT_FLUSH_ON_COMPACT` | `flushOnCompact` | boolean | `false` |
 | `PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT` | `retainSessionsByDefault` | boolean | `true` |

@@ -10,7 +10,13 @@ import { Box, type Component, Text } from "@mariozechner/pi-tui";
 import type { RecallResponse } from "@vectorize-io/hindsight-client";
 import { HindsightClientWrapper } from "./client";
 import { registerCommands } from "./commands";
-import { expandAutoRecallTags, loadConfig, validateConfig } from "./config";
+import {
+  expandAutoRecallTagGroups,
+  expandAutoRecallTags,
+  loadConfig,
+  type TagGroupInput,
+  validateConfig,
+} from "./config";
 import { getHindsightMeta, shouldSessionBeRetained } from "./meta";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
 import { enqueueAutoMessage } from "./queue";
@@ -343,12 +349,17 @@ export default function (pi: ExtensionAPI) {
     parentSessionId?: string
   ): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
     // Expand recall tag placeholders with session context
-    const expandedTags = expandAutoRecallTags(config.autoRecallTags, {
+    const placeholderParams = {
       sessionId,
       sessionCwd,
       parentSessionId,
       projectName: getProjectName(sessionCwd),
-    });
+    };
+    const expandedTags = expandAutoRecallTags(config.autoRecallTags, placeholderParams);
+    const expandedTagGroups = expandAutoRecallTagGroups(
+      config.autoRecallTagGroups,
+      placeholderParams
+    );
     const recallConfig: AutoRecallConfig = {
       recallMaxQueryChars: config.recallMaxQueryChars,
       recallTypes: config.recallTypes,
@@ -356,6 +367,7 @@ export default function (pi: ExtensionAPI) {
       recallShowDateTime: config.recallShowDateTime,
       autoRecallTags: expandedTags,
       autoRecallTagsMatch: config.autoRecallTagsMatch,
+      autoRecallTagGroups: expandedTagGroups,
     };
     // Clear stale recall on error/no-results (doAutoRecallImpl calls cacheDetails(null))
     return doAutoRecallImpl(client, query, signal, display, recallConfig, (details) => {
@@ -623,6 +635,7 @@ export interface RecallClient {
       types?: ("world" | "experience" | "observation")[];
       tags?: string[];
       tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+      tagGroups?: TagGroupInput[];
     },
     signal: AbortSignal | undefined
   ) => Promise<{
@@ -642,6 +655,7 @@ export interface AutoRecallConfig {
   recallShowDateTime: boolean;
   autoRecallTags: string[] | null;
   autoRecallTagsMatch: "any" | "all" | "any_strict" | "all_strict";
+  autoRecallTagGroups: TagGroupInput[] | null;
 }
 
 /**
@@ -680,6 +694,7 @@ export async function doAutoRecallImpl(
         types: config.recallTypes ?? undefined,
         tags: config.autoRecallTags ?? undefined,
         tagsMatch: config.autoRecallTags ? config.autoRecallTagsMatch : undefined,
+        tagGroups: config.autoRecallTagGroups ?? undefined,
       },
       abortSignal
     );

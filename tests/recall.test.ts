@@ -846,6 +846,7 @@ describe("doAutoRecallImpl", () => {
     recallShowDateTime: true,
     autoRecallTags: null,
     autoRecallTagsMatch: "any",
+    autoRecallTagGroups: null,
   };
 
   // Create a mock AbortSignal
@@ -1422,6 +1423,153 @@ describe("doAutoRecallImpl", () => {
       );
 
       expect(receivedTagsMatch).toBeUndefined();
+    });
+  });
+
+  describe("recall tagGroups filtering", () => {
+    it("passes autoRecallTagGroups to client when configured", async () => {
+      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
+      let receivedTagGroups: unknown;
+
+      const mockClient: RecallClient = {
+        recall: async (opts: {
+          query: string;
+          tags?: string[];
+          tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+          tagGroups?: import("../src/config").TagGroupInput[];
+          types?: ("world" | "experience" | "observation")[];
+        }) => {
+          receivedTagGroups = opts.tagGroups;
+          return { success: true, response: { results } };
+        },
+      };
+
+      await doAutoRecallImpl(
+        mockClient,
+        "test query",
+        mockSignal,
+        false,
+        {
+          ...defaultConfig,
+          autoRecallTagGroups: [
+            { tags: ["project:myapp"], match: "any_strict" },
+            { not: { tags: ["session:abc"] } },
+          ],
+        },
+        () => {}
+      );
+
+      expect(receivedTagGroups).toEqual([
+        { tags: ["project:myapp"], match: "any_strict" },
+        { not: { tags: ["session:abc"] } },
+      ]);
+    });
+
+    it("passes undefined tagGroups when autoRecallTagGroups is null", async () => {
+      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
+      let receivedTagGroups: unknown;
+
+      const mockClient: RecallClient = {
+        recall: async (opts: {
+          query: string;
+          tags?: string[];
+          tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+          tagGroups?: import("../src/config").TagGroupInput[];
+          types?: ("world" | "experience" | "observation")[];
+        }) => {
+          receivedTagGroups = opts.tagGroups;
+          return { success: true, response: { results } };
+        },
+      };
+
+      await doAutoRecallImpl(
+        mockClient,
+        "test query",
+        mockSignal,
+        false,
+        { ...defaultConfig, autoRecallTagGroups: null },
+        () => {}
+      );
+
+      expect(receivedTagGroups).toBeUndefined();
+    });
+
+    it("sends both tags/tagGroups when both are configured", async () => {
+      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
+      let receivedTags: string[] | undefined;
+      let receivedTagsMatch: string | undefined;
+      let receivedTagGroups: unknown;
+
+      const mockClient: RecallClient = {
+        recall: async (opts: {
+          query: string;
+          tags?: string[];
+          tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+          tagGroups?: import("../src/config").TagGroupInput[];
+          types?: ("world" | "experience" | "observation")[];
+        }) => {
+          receivedTags = opts.tags;
+          receivedTagsMatch = opts.tagsMatch;
+          receivedTagGroups = opts.tagGroups;
+          return { success: true, response: { results } };
+        },
+      };
+
+      // Both autoRecallTags and autoRecallTagGroups set - both are sent to the API
+      await doAutoRecallImpl(
+        mockClient,
+        "test query",
+        mockSignal,
+        false,
+        {
+          ...defaultConfig,
+          autoRecallTags: ["project:myapp"],
+          autoRecallTagsMatch: "any_strict",
+          autoRecallTagGroups: [{ tags: ["project:myapp"], match: "any_strict" }],
+        },
+        () => {}
+      );
+
+      expect(receivedTags).toEqual(["project:myapp"]);
+      expect(receivedTagsMatch).toBe("any_strict");
+      expect(receivedTagGroups).toEqual([{ tags: ["project:myapp"], match: "any_strict" }]);
+    });
+
+    it("passes tags/tagsMatch when tagGroups is null", async () => {
+      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
+      let receivedTags: string[] | undefined;
+      let receivedTagsMatch: string | undefined;
+
+      const mockClient: RecallClient = {
+        recall: async (opts: {
+          query: string;
+          tags?: string[];
+          tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+          tagGroups?: import("../src/config").TagGroupInput[];
+          types?: ("world" | "experience" | "observation")[];
+        }) => {
+          receivedTags = opts.tags;
+          receivedTagsMatch = opts.tagsMatch;
+          return { success: true, response: { results } };
+        },
+      };
+
+      await doAutoRecallImpl(
+        mockClient,
+        "test query",
+        mockSignal,
+        false,
+        {
+          ...defaultConfig,
+          autoRecallTags: ["project:myapp"],
+          autoRecallTagsMatch: "any_strict",
+          autoRecallTagGroups: null,
+        },
+        () => {}
+      );
+
+      expect(receivedTags).toEqual(["project:myapp"]);
+      expect(receivedTagsMatch).toBe("any_strict");
     });
   });
 });

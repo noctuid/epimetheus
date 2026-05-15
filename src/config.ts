@@ -5,7 +5,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
-import type { Budget } from "@vectorize-io/hindsight-client";
+import type {
+  Budget,
+  TagGroupAndInput,
+  TagGroupLeaf,
+  TagGroupNotInput,
+  TagGroupOrInput,
+} from "@vectorize-io/hindsight-client";
 import { type ParseError, parse as parseJsonc } from "jsonc-parser";
 
 export interface RetainContent {
@@ -52,6 +58,17 @@ export type TagsMatch = NonNullable<
   Required<import("@vectorize-io/hindsight-client").RecallRequest>["tags_match"]
 >;
 
+/** Compound tag group types from Hindsight SDK for recursive boolean tag expressions. */
+export type {
+  TagGroupAndInput,
+  TagGroupLeaf,
+  TagGroupNotInput,
+  TagGroupOrInput,
+} from "@vectorize-io/hindsight-client";
+
+/** Union of all tag group input types. */
+export type TagGroupInput = TagGroupLeaf | TagGroupAndInput | TagGroupOrInput | TagGroupNotInput;
+
 export type ToolName = "retain" | "recall" | "reflect";
 
 const VALID_TOOL_NAMES: ToolName[] = ["retain", "recall", "reflect"];
@@ -76,6 +93,7 @@ export interface HindsightConfig {
   recallTypes: MemoryType[] | null;
   autoRecallTags: string[] | null;
   autoRecallTagsMatch: TagsMatch;
+  autoRecallTagGroups: TagGroupInput[] | null;
   constantTags: string[];
   retainContent: RetainContent;
   strip: StripConfig;
@@ -111,6 +129,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
   recallTypes: ["observation"],
   autoRecallTags: null,
   autoRecallTagsMatch: "any",
+  autoRecallTagGroups: null,
   constantTags: ["harness:pi"],
   retainContent: {
     assistant: ["text", "thinking", "toolCall"],
@@ -165,6 +184,7 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "recallTypes",
   "autoRecallTags",
   "autoRecallTagsMatch",
+  "autoRecallTagGroups",
   "constantTags",
   "retainContent",
   "strip",
@@ -189,6 +209,66 @@ function parseBoolean(
     value: defaultValue,
     warning: `Invalid boolean value "${value}", expected "true" or "false". Using default: ${defaultValue}`,
   };
+}
+
+/**
+ * Validate a tag_groups array value (recursive structure).
+ * Returns true if valid, undefined if invalid.
+ */
+function validateTagGroups(value: unknown[]): true | undefined {
+  for (const item of value) {
+    if (!validateTagGroupItem(item)) return undefined;
+  }
+  return true;
+}
+
+/**
+ * Validate a single tag group item (leaf, and, or, not).
+ * Returns true if valid, false if invalid.
+ */
+function validateTagGroupItem(item: unknown): boolean {
+  if (typeof item !== "object" || item === null) return false;
+  const obj = item as Record<string, unknown>;
+  if ("tags" in obj) {
+    // TagGroupLeaf: { tags: string[], match?: TagsMatch }
+    if (
+      !Array.isArray(obj.tags) ||
+      obj.tags.length === 0 ||
+      !obj.tags.every((t: unknown) => typeof t === "string")
+    )
+      return false;
+    if ("match" in obj) {
+      const validMatches: TagsMatch[] = ["any", "all", "any_strict", "all_strict"];
+      if (!validMatches.includes(obj.match as TagsMatch)) return false;
+    }
+    // Should only have tags/match keys
+    const allowedKeys = new Set(["tags", "match"]);
+    for (const key of Object.keys(obj)) {
+      if (!allowedKeys.has(key)) return false;
+    }
+    return true;
+  }
+  if ("and" in obj) {
+    // TagGroupAnd: { and: TagGroupInput[] }
+    // Only 'and' key allowed (no mixing compound types)
+    if (Object.keys(obj).length !== 1) return false;
+    if (!Array.isArray(obj.and) || obj.and.length === 0) return false;
+    return (obj.and as unknown[]).every((child: unknown) => validateTagGroupItem(child));
+  }
+  if ("or" in obj) {
+    // TagGroupOr: { or: TagGroupInput[] }
+    // Only 'or' key allowed (no mixing compound types)
+    if (Object.keys(obj).length !== 1) return false;
+    if (!Array.isArray(obj.or) || obj.or.length === 0) return false;
+    return (obj.or as unknown[]).every((child: unknown) => validateTagGroupItem(child));
+  }
+  if ("not" in obj) {
+    // TagGroupNot: { not: TagGroupInput }
+    // Only 'not' key allowed (no mixing compound types)
+    if (Object.keys(obj).length !== 1) return false;
+    return validateTagGroupItem(obj.not);
+  }
+  return false;
 }
 
 function parseJsonArray(
@@ -538,6 +618,56 @@ function setConfigValue(
       config[key] = DEFAULT_CONFIG[key] as TagsMatch;
       return `Invalid autoRecallTagsMatch "${strValue}", expected one of: ${validMatches.join(", ")}. Using default.`;
     }
+    case "autoRecallTagGroups": {
+      if (value === null || value === undefined || value === "") {
+        config[key] = null;
+        return;
+      }
+      if (Array.isArray(value)) {
+        if (value.length === 0) {
+          config[key] = null;
+          return;
+        }
+        const validation = validateTagGroups(value);
+        if (validation !== undefined) {
+          config[key] = value as TagGroupInput[];
+          return;
+        }
+        config[key] = DEFAULT_CONFIG[key] as TagGroupInput[] | null;
+        return "autoRecallTagGroups must be an array of tag group objects. Using default.";
+      }
+      // String value from env var - parse as JSON
+      if (typeof value === "string") {
+        try {
+          const parsed = JSON.parse(value);
+          if (parsed === null) {
+            config[key] = null;
+            return;
+          }
+          if (!Array.isArray(parsed)) {
+            config[key] = DEFAULT_CONFIG[key] as TagGroupInput[] | null;
+            return `autoRecallTagGroups must be a JSON array, got ${typeof parsed}. Using default.`;
+          }
+          if (parsed.length === 0) {
+            config[key] = null;
+            return;
+          }
+          const validation = validateTagGroups(parsed);
+          if (validation !== undefined) {
+            config[key] = parsed as TagGroupInput[];
+            return;
+          }
+          config[key] = DEFAULT_CONFIG[key] as TagGroupInput[] | null;
+          return "autoRecallTagGroups must be an array of tag group objects. Using default.";
+        } catch {
+          config[key] = DEFAULT_CONFIG[key] as TagGroupInput[] | null;
+          return "autoRecallTagGroups contains invalid JSON. Using default.";
+        }
+      }
+      // Non-string, non-array, non-null value (e.g. object from config file)
+      config[key] = DEFAULT_CONFIG[key] as TagGroupInput[] | null;
+      return "autoRecallTagGroups must be an array of tag group objects. Using default.";
+    }
     case "constantTags": {
       if (Array.isArray(value)) {
         config[key] = value;
@@ -765,6 +895,83 @@ export function expandAutoRecallTags(
   return tags.map((tag) => expandPlaceholder(tag, params));
 }
 
+/**
+ * Recursively validate placeholder usage in tag_groups.
+ * Warns on non-exact placeholder matches in any leaf tag array.
+ */
+function validateTagGroupsPlaceholders(
+  groups: TagGroupInput[],
+  placeholderPatterns: string[],
+  warnings: string[]
+): void {
+  for (const group of groups) {
+    validateTagGroupItemPlaceholders(group, placeholderPatterns, warnings);
+  }
+}
+
+function validateTagGroupItemPlaceholders(
+  item: TagGroupInput,
+  placeholderPatterns: string[],
+  warnings: string[]
+): void {
+  if ("tags" in item) {
+    // TagGroupLeaf
+    for (const tag of item.tags) {
+      for (const placeholder of placeholderPatterns) {
+        if (tag !== placeholder && tag.includes(placeholder)) {
+          warnings.push(
+            `autoRecallTagGroups: tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. "${placeholder}" not "${tag}")`
+          );
+        }
+      }
+    }
+  } else if ("and" in item) {
+    for (const child of item.and) {
+      validateTagGroupItemPlaceholders(child, placeholderPatterns, warnings);
+    }
+  } else if ("or" in item) {
+    for (const child of item.or) {
+      validateTagGroupItemPlaceholders(child, placeholderPatterns, warnings);
+    }
+  } else if ("not" in item) {
+    validateTagGroupItemPlaceholders(item.not, placeholderPatterns, warnings);
+  }
+}
+
+/**
+ * Expand placeholder patterns in auto-recall tag_groups.
+ * E.g. ["{project}"] -> ["project:myapp"] in leaf tag arrays.
+ * Only exact placeholder matches are expanded.
+ * Returns null when tagGroups is null (no recall tag group filtering).
+ */
+export function expandAutoRecallTagGroups(
+  tagGroups: TagGroupInput[] | null,
+  params: PlaceholderParams
+): TagGroupInput[] | null {
+  if (!tagGroups) return null;
+  return tagGroups.map((group) => expandTagGroupItem(group, params));
+}
+
+function expandTagGroupItem(item: TagGroupInput, params: PlaceholderParams): TagGroupInput {
+  if ("tags" in item) {
+    // TagGroupLeaf
+    return {
+      ...item,
+      tags: item.tags.map((tag) => expandPlaceholder(tag, params)),
+    };
+  }
+  if ("and" in item) {
+    return { and: item.and.map((child) => expandTagGroupItem(child, params)) };
+  }
+  if ("or" in item) {
+    return { or: item.or.map((child) => expandTagGroupItem(child, params)) };
+  }
+  if ("not" in item) {
+    return { not: expandTagGroupItem(item.not, params) };
+  }
+  return item;
+}
+
 export function loadConfig(extensionsDir?: string): {
   config: HindsightConfig;
   configPath?: string;
@@ -843,6 +1050,7 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_RECALL_TYPES: "recallTypes",
     PI_HINDSIGHT_AUTO_RECALL_TAGS: "autoRecallTags",
     PI_HINDSIGHT_AUTO_RECALL_TAGS_MATCH: "autoRecallTagsMatch",
+    PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS: "autoRecallTagGroups",
     PI_HINDSIGHT_CONSTANT_TAGS: "constantTags",
     PI_HINDSIGHT_FLUSH_ON_COMPACT: "flushOnCompact",
     PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT: "retainSessionsByDefault",
@@ -1049,6 +1257,18 @@ export function validateConfig(config: HindsightConfig): {
           );
         }
       }
+    }
+  }
+
+  // Validate autoRecallTagGroups
+  if (config.autoRecallTagGroups !== null) {
+    const placeholderPatterns = Object.keys(SCOPE_PLACEHOLDERS);
+    validateTagGroupsPlaceholders(config.autoRecallTagGroups, placeholderPatterns, warnings);
+    // Warn if both autoRecallTags and autoRecallTagGroups are set (both are combined at recall time)
+    if (config.autoRecallTags !== null) {
+      warnings.push(
+        "Both autoRecallTags and autoRecallTagGroups are set. Both will be sent to the recall API — tags/tagsMatch and tag_groups are combined. Consider using only autoRecallTagGroups if you want all tag logic in one place."
+      );
     }
   }
 

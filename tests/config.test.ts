@@ -37,6 +37,7 @@ const validConfig: HindsightConfig = {
   recallTypes: ["observation"] as ("world" | "experience" | "observation")[] | null,
   autoRecallTags: null,
   autoRecallTagsMatch: "any",
+  autoRecallTagGroups: null,
   constantTags: ["test"],
   retainContent: {
     assistant: ["text"],
@@ -2141,5 +2142,495 @@ describe("expandAutoRecallTags", () => {
       sessionId: "abc-123",
     });
     expect(result).toEqual(["parent:abc-123"]);
+  });
+});
+
+describe("autoRecallTagGroups", () => {
+  it("defaults to null (no tag group filtering)", () => {
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+  });
+
+  it("can be set via config file with leaf groups", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [
+          { tags: ["project:myapp"], match: "any_strict" },
+          { tags: ["user:alice"], match: "all" },
+        ],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toEqual([
+      { tags: ["project:myapp"], match: "any_strict" },
+      { tags: ["user:alice"], match: "all" },
+    ]);
+  });
+
+  it("can be set via config file with nested and/or/not", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [
+          {
+            or: [
+              { tags: ["project:myapp"], match: "any_strict" },
+              { tags: ["user:alice"], match: "any_strict" },
+            ],
+          },
+          { not: { tags: ["session:abc-123"], match: "any_strict" } },
+        ],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toEqual([
+      {
+        or: [
+          { tags: ["project:myapp"], match: "any_strict" },
+          { tags: ["user:alice"], match: "any_strict" },
+        ],
+      },
+      { not: { tags: ["session:abc-123"], match: "any_strict" } },
+    ]);
+  });
+
+  it("can include placeholders", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [
+          { tags: ["{project}"], match: "any_strict" },
+          { not: { tags: ["{session}"], match: "any_strict" } },
+        ],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toEqual([
+      { tags: ["{project}"], match: "any_strict" },
+      { not: { tags: ["{session}"], match: "any_strict" } },
+    ]);
+  });
+
+  it("null from config file means no filtering", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: null,
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+  });
+
+  it("empty array means no filtering", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+  });
+
+  it("can be set via PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS =
+      '[{"tags":["project:myapp"],"match":"any_strict"}]';
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toEqual([{ tags: ["project:myapp"], match: "any_strict" }]);
+  });
+
+  it("null via env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS = "null";
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+  });
+
+  it("empty array via env var means no filtering", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS = "[]";
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+  });
+
+  it("warns on invalid JSON in env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS = "not-json";
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups contains invalid JSON");
+  });
+
+  it("warns on non-array JSON in env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS = '"not-array"';
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be a JSON array");
+  });
+
+  it("warns on non-array value from config file (e.g. bare object)", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: { tags: ["a"] },
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on invalid tag group structure", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ invalid: true }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on non-array tags in leaf", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: "not-an-array" }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on non-string items in tags array", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: ["valid", 42] }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on invalid match value in leaf", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: ["valid"], match: "invalid" }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on empty and/or arrays in compound groups", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ and: [] }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on invalid child in compound group", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ and: [{ invalid: true }] }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("env var overrides config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: ["old"] }],
+      })
+    );
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS = '[{"tags":["new"],"match":"any_strict"}]';
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toEqual([{ tags: ["new"], match: "any_strict" }]);
+  });
+
+  it("validates non-exact placeholder usage in tag groups", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: ["{project}:extra"] }],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toEqual([{ tags: ["{project}:extra"] }]);
+    const { warnings } = validateConfig(config);
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("{project}");
+    expect(warnings[0]).toContain("standalone");
+  });
+
+  it("validates non-exact placeholder in nested not group", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ not: { tags: ["{session}:extra"] } }],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    const { warnings } = validateConfig(config);
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("{session}");
+  });
+
+  it("warns when both autoRecallTags and autoRecallTagGroups are set", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTags: ["project:myapp"],
+        autoRecallTagGroups: [{ tags: ["project:myapp"], match: "any_strict" }],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    const { warnings } = validateConfig(config);
+    expect(
+      warnings.some((w) => w.includes("Both autoRecallTags and autoRecallTagGroups are set"))
+    ).toBe(true);
+  });
+
+  it("no warning when only autoRecallTagGroups is set", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: ["project:myapp"], match: "any_strict" }],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    const { warnings } = validateConfig(config);
+    expect(
+      warnings.some((w) => w.includes("Both autoRecallTags and autoRecallTagGroups are set"))
+    ).toBe(false);
+  });
+
+  it("accepts leaf without match field (match is optional)", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: ["project:myapp"] }],
+      })
+    );
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toEqual([{ tags: ["project:myapp"] }]);
+  });
+
+  it("warns on extra keys in leaf", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: ["valid"], extra: true }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on empty tags array in leaf", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ tags: [] }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+
+  it("warns on mixed compound keys (and + or)", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTagGroups: [{ and: [{ tags: ["a"] }], or: [{ tags: ["b"] }] }],
+      })
+    );
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTagGroups).toBe(null);
+    expect(warning).toContain("autoRecallTagGroups must be an array of tag group objects");
+  });
+});
+
+describe("expandAutoRecallTagGroups", () => {
+  it("returns null unchanged", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    expect(expandAutoRecallTagGroups(null, { sessionId: "abc-123" })).toBe(null);
+  });
+
+  it("expands {project} in leaf tags", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups([{ tags: ["{project}"], match: "any_strict" }], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+    });
+    expect(result).toEqual([{ tags: ["project:myapp"], match: "any_strict" }]);
+  });
+
+  it("expands {session} in nested not group", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups(
+      [{ not: { tags: ["{session}"], match: "any_strict" } }],
+      { sessionId: "abc-123" }
+    );
+    expect(result).toEqual([{ not: { tags: ["session:abc-123"], match: "any_strict" } }]);
+  });
+
+  it("expands {project} with explicit projectName", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups([{ tags: ["{project}"], match: "any_strict" }], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+      projectName: "custom-project",
+    });
+    expect(result).toEqual([{ tags: ["project:custom-project"], match: "any_strict" }]);
+  });
+
+  it("expands placeholders in or group", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups(
+      [
+        {
+          or: [
+            { tags: ["{project}"], match: "any_strict" },
+            { tags: ["{cwd}"], match: "any_strict" },
+          ],
+        },
+      ],
+      { sessionId: "abc-123", sessionCwd: "/home/user/myapp" }
+    );
+    expect(result).toEqual([
+      {
+        or: [
+          { tags: ["project:myapp"], match: "any_strict" },
+          { tags: ["cwd:/home/user/myapp"], match: "any_strict" },
+        ],
+      },
+    ]);
+  });
+
+  it("expands placeholders in and group", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups(
+      [
+        {
+          and: [
+            { tags: ["{project}"], match: "any_strict" },
+            { not: { tags: ["{session}"], match: "any_strict" } },
+          ],
+        },
+      ],
+      { sessionId: "abc-123", sessionCwd: "/home/user/myapp" }
+    );
+    expect(result).toEqual([
+      {
+        and: [
+          { tags: ["project:myapp"], match: "any_strict" },
+          { not: { tags: ["session:abc-123"], match: "any_strict" } },
+        ],
+      },
+    ]);
+  });
+
+  it("leaves literal tags unchanged", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups(
+      [{ tags: ["project:myapp", "user:alice"], match: "any" }],
+      { sessionId: "abc-123" }
+    );
+    expect(result).toEqual([{ tags: ["project:myapp", "user:alice"], match: "any" }]);
+  });
+
+  it("keeps unresolvable placeholders as-is", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups([{ tags: ["{cwd}", "{project}"], match: "any" }], {
+      sessionId: "abc-123",
+    });
+    expect(result).toEqual([{ tags: ["{cwd}", "{project}"], match: "any" }]);
+  });
+
+  it("expands {parent} placeholder", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups([{ tags: ["{parent}"], match: "any_strict" }], {
+      sessionId: "abc-123",
+      parentSessionId: "parent-456",
+    });
+    expect(result).toEqual([{ tags: ["parent:parent-456"], match: "any_strict" }]);
+  });
+
+  it("expands {basedir} placeholder", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups([{ tags: ["{basedir}"], match: "any_strict" }], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+    });
+    expect(result).toEqual([{ tags: ["basedir:myapp"], match: "any_strict" }]);
+  });
+
+  it("preserves match field during expansion", () => {
+    const { expandAutoRecallTagGroups } = require("../src/config");
+    const result = expandAutoRecallTagGroups([{ tags: ["{project}"], match: "all_strict" }], {
+      sessionId: "abc-123",
+      sessionCwd: "/home/user/myapp",
+    });
+    expect(result).toEqual([{ tags: ["project:myapp"], match: "all_strict" }]);
   });
 });

@@ -5,7 +5,7 @@
     "": {
       "name": "pi-hindsight",
       "dependencies": {
-        "@vectorize-io/hindsight-client": "0.5.0",
+        "@vectorize-io/hindsight-client": "0.6.1",
         "jsonc-parser": "^3.3.1",
         "typebox": "^1.1.24",
       },
@@ -325,7 +325,7 @@
 
     "@types/yauzl": ["@types/yauzl@2.10.3", "", { "dependencies": { "@types/node": "*" } }, "sha512-oJoftv0LSuaDZE3Le4DbKX+KS9G36NzOeSap90UIK0yMA/NhKJhqlSGtNDORNRaIbQfzjXDrQa0ytJ6mNRGz/Q=="],
 
-    "@vectorize-io/hindsight-client": ["@vectorize-io/hindsight-client@0.5.0", "", {}, "sha512-Ob4hSIpx1bb1BU0A7SDPQdFkDhJPi+haA1HoaQFrE2qz2VanSeoKulGEmnbH5RgVJuKRTjqQPAYrgiBN5r3Xlg=="],
+    "@vectorize-io/hindsight-client": ["@vectorize-io/hindsight-client@0.6.1", "", {}, "sha512-MFe7jCoypRg2kXu1Yxmq/OWsX3hwXYjy+CM3bgXZYntVu9TVxSUNxhNdz3Do/bhZpI2wqh/XDcygAP8DzIMSIA=="],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 

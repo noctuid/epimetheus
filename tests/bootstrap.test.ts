@@ -1944,4 +1944,55 @@ describe("real entrypoint bootstrap", () => {
     expect(receivedTags).toBeUndefined();
     expect(receivedTagsMatch).toBeUndefined();
   });
+
+  it("before_agent_start expands {project} in autoRecallTagGroups and passes to client.recall", async () => {
+    activeConfig = {
+      ...testConfig,
+      autoRecallPersist: false,
+      autoRecallTagGroups: [
+        { tags: ["{project}"], match: "any_strict" },
+        { not: { tags: ["{session}"], match: "any_strict" } },
+      ],
+    };
+
+    let receivedTagGroups: unknown;
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock((opts: { tagGroups?: unknown }) => {
+        receivedTagGroups = opts.tagGroups;
+        return Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Memory" }] },
+        });
+      }),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("before_agent_start")!;
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getHeader: mock(() => ({
+          id: "test-session-123",
+          timestamp: "2026-01-01T00:00:00Z",
+          cwd: "/home/user/myapp",
+          parentSession: undefined,
+        })),
+      },
+    });
+
+    await handler({ type: "before_agent_start", prompt: "Hello" }, ctx);
+
+    // {project} should expand to project:myapp, {session} to session:test-session-123
+    expect(receivedTagGroups).toEqual([
+      { tags: ["project:myapp"], match: "any_strict" },
+      { not: { tags: ["session:test-session-123"], match: "any_strict" } },
+    ]);
+  });
 });
