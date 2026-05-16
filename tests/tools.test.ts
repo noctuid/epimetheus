@@ -9,7 +9,7 @@ import type { RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-cl
 import type { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
 import { deleteAutoQueue, deleteToolQueue, readToolQueue } from "../src/queue";
-import { registerTools } from "../src/tools";
+import { isToolEnabled, registerTools, updateRetainToolVisibility } from "../src/tools";
 import { testConfig as sharedTestConfig } from "./fixtures";
 
 const TEST_SESSION_ID = "test-tools-session";
@@ -37,14 +37,40 @@ interface ToolDef {
 }
 
 // Track registered tools
-function createMockPi(): ExtensionAPI & { tools: ToolDef[] } {
+function createMockPi(): ExtensionAPI & {
+  tools: ToolDef[];
+  activeToolNames: string[] | null;
+  setActiveToolsCalls: string[][];
+} {
   const tools: ToolDef[] = [];
+  // Use a mutable object so the closure-based getActiveTools/setActiveTools share state
+  const state = { activeToolNames: null as string[] | null, setActiveToolsCalls: [] as string[][] };
   return {
     tools,
+    get activeToolNames() {
+      return state.activeToolNames;
+    },
+    get setActiveToolsCalls() {
+      return state.setActiveToolsCalls;
+    },
     registerTool: mock((tool: ToolDef) => {
       tools.push(tool);
     }),
-  } as unknown as ExtensionAPI & { tools: ToolDef[] };
+    getActiveTools: mock(() => {
+      if (state.activeToolNames === null) {
+        return tools.map((t) => t.name);
+      }
+      return tools.filter((t) => state.activeToolNames!.includes(t.name)).map((t) => t.name);
+    }),
+    setActiveTools: mock((names: string[]) => {
+      state.activeToolNames = names;
+      state.setActiveToolsCalls.push(names);
+    }),
+  } as unknown as ExtensionAPI & {
+    tools: ToolDef[];
+    activeToolNames: string[] | null;
+    setActiveToolsCalls: string[][];
+  };
 }
 
 // Create a mock session manager context
@@ -692,5 +718,102 @@ describe("hindsight_retain context forwarding", () => {
     const tags = queueEntries[0]?.tags ?? [];
     expect(tags).toContain("topic:ai");
     expect(tags).toContain("project:x");
+  });
+});
+
+// ============================================
+// updateRetainToolVisibility tests
+// ============================================
+
+describe("updateRetainToolVisibility", () => {
+  it("removes hindsight_retain from active tools when not retained", () => {
+    const pi = createMockPi();
+    registerTools(pi, testConfig, createMockClient());
+
+    // Initially all tools are active
+    const activeBefore = pi.getActiveTools();
+    expect(activeBefore).toContain("hindsight_retain");
+
+    updateRetainToolVisibility(pi, false);
+
+    const activeAfter = pi.getActiveTools();
+    expect(activeAfter).not.toContain("hindsight_retain");
+    // Other hindsight tools should remain
+    expect(activeAfter).toContain("hindsight_recall");
+    expect(activeAfter).toContain("hindsight_reflect");
+  });
+
+  it("adds hindsight_retain back when session becomes retained", () => {
+    const pi = createMockPi();
+    registerTools(pi, testConfig, createMockClient());
+
+    // Remove first
+    updateRetainToolVisibility(pi, false);
+    const activeAfterRemove = pi.getActiveTools();
+    expect(activeAfterRemove).not.toContain("hindsight_retain");
+
+    // Add back
+    updateRetainToolVisibility(pi, true);
+    const activeAfterAdd = pi.getActiveTools();
+    expect(activeAfterAdd).toContain("hindsight_retain");
+  });
+
+  it("is a no-op when retained=true and tool is already active", () => {
+    const pi = createMockPi();
+    registerTools(pi, testConfig, createMockClient());
+
+    // Tool is active by default
+    const callCountBefore = pi.setActiveToolsCalls.length;
+    updateRetainToolVisibility(pi, true);
+
+    // setActiveTools should not have been called
+    expect(pi.setActiveToolsCalls.length).toBe(callCountBefore);
+  });
+
+  it("is a no-op when retained=false and tool is already inactive", () => {
+    const pi = createMockPi();
+    registerTools(pi, testConfig, createMockClient());
+
+    // Remove first
+    updateRetainToolVisibility(pi, false);
+    const callCountAfterRemove = pi.setActiveToolsCalls.length;
+
+    // Calling again should be a no-op
+    updateRetainToolVisibility(pi, false);
+    expect(pi.setActiveToolsCalls.length).toBe(callCountAfterRemove);
+  });
+});
+
+describe("isToolEnabled", () => {
+  it("returns true when toolsEnabled is true", () => {
+    expect(isToolEnabled({ ...testConfig, toolsEnabled: true }, "retain")).toBe(true);
+    expect(isToolEnabled({ ...testConfig, toolsEnabled: true }, "recall")).toBe(true);
+    expect(isToolEnabled({ ...testConfig, toolsEnabled: true }, "reflect")).toBe(true);
+  });
+
+  it("returns false when toolsEnabled is false", () => {
+    expect(isToolEnabled({ ...testConfig, toolsEnabled: false }, "retain")).toBe(false);
+    expect(isToolEnabled({ ...testConfig, toolsEnabled: false }, "recall")).toBe(false);
+    expect(isToolEnabled({ ...testConfig, toolsEnabled: false }, "reflect")).toBe(false);
+  });
+
+  it("returns true only for tools listed in the array", () => {
+    const config = { ...testConfig, toolsEnabled: ["retain", "recall"] as ["retain", "recall"] };
+    expect(isToolEnabled(config, "retain")).toBe(true);
+    expect(isToolEnabled(config, "recall")).toBe(true);
+    expect(isToolEnabled(config, "reflect")).toBe(false);
+  });
+
+  it("returns false for all tools when toolsEnabled is an empty array", () => {
+    const config = { ...testConfig, toolsEnabled: [] as [] };
+    expect(isToolEnabled(config, "retain")).toBe(false);
+    expect(isToolEnabled(config, "recall")).toBe(false);
+    expect(isToolEnabled(config, "reflect")).toBe(false);
+  });
+
+  it("returns false when the tool is not in the array", () => {
+    const config = { ...testConfig, toolsEnabled: ["recall"] as ["recall"] };
+    expect(isToolEnabled(config, "retain")).toBe(false);
+    expect(isToolEnabled(config, "reflect")).toBe(false);
   });
 });

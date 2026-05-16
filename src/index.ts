@@ -21,7 +21,7 @@ import { getHindsightMeta, shouldSessionBeRetained } from "./meta";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
 import { enqueueAutoMessage } from "./queue";
 import { flushQueues, getQueueCount } from "./retention";
-import { registerTools } from "./tools";
+import { isToolEnabled, registerTools, updateRetainToolVisibility } from "./tools";
 import { extractParentSessionId, getProjectName, getSessionDisplayName, truncate } from "./utils";
 
 // Runtime toggle for recall display (overrides config)
@@ -143,6 +143,14 @@ export default function (pi: ExtensionAPI) {
     const existingMeta = getHindsightMeta(entries);
     if (!existingMeta) {
       pi.appendEntry("hindsight-meta", { retained: config.retainSessionsByDefault });
+    }
+
+    // Update hindsight_retain tool visibility based on retention state.
+    // When not retained, the tool is hidden from the LLM entirely (instead
+    // of being available but failing on execution).
+    if (isToolEnabled(config, "retain")) {
+      const isRetained = shouldSessionBeRetained(entries, config);
+      updateRetainToolVisibility(pi, isRetained);
     }
 
     if (!hasUsableConfig) {

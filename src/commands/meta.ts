@@ -7,6 +7,7 @@ import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
 import { getHindsightMeta, type HindsightMeta, shouldSessionBeRetained } from "../meta";
 import { deleteAutoQueue, deleteToolQueue } from "../queue";
+import { isToolEnabled, updateRetainToolVisibility } from "../tools";
 import type { Subcommand } from "./types";
 import { parseAndUpsertSession } from "./utils";
 
@@ -81,6 +82,11 @@ export function createToggleRetainSubcommand(
             "warning"
           );
         }
+
+        // Show hindsight_retain tool now that session is retained
+        if (isToolEnabled(config, "retain")) {
+          updateRetainToolVisibility(pi, true);
+        }
       } else {
         // Toggling OFF: build new meta, preserving existing tags
         const existingMeta = getHindsightMeta(entries);
@@ -97,6 +103,11 @@ export function createToggleRetainSubcommand(
         }
 
         ctx.ui.notify("Session retention: disabled (will be ignored)", "info");
+
+        // Hide hindsight_retain tool now that session is not retained
+        if (isToolEnabled(config, "retain")) {
+          updateRetainToolVisibility(pi, false);
+        }
       }
     },
   };

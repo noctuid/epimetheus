@@ -298,6 +298,10 @@ export interface CapturedExtension {
   commands: Map<string, unknown>;
   renderers: Map<string, unknown>;
   appendedEntries: { customType: string; data?: unknown }[];
+  /** Current active tool names, or null if all tools are active (default). */
+  activeToolNames: string[] | null;
+  /** History of all setActiveTools calls for assertions. */
+  setActiveToolsCalls: string[][];
 }
 
 /** Builder for mock ExtensionAPI instances with fluent configuration. */
@@ -312,13 +316,26 @@ export class MockPiBuilder {
   private renderers = new Map<string, unknown>();
   private appendedEntries: { customType: string; data?: unknown }[] = [];
 
+  private state = {
+    activeToolNames: null as string[] | null,
+    setActiveToolsCalls: [] as string[][],
+  };
+
   build(): ExtensionAPI & CapturedExtension {
+    const state = this.state;
     return {
       handlers: this.handlers,
       tools: this.tools,
       commands: this.commands,
       renderers: this.renderers,
       appendedEntries: this.appendedEntries,
+      get activeToolNames() {
+        return state.activeToolNames;
+      },
+      set activeToolNames(value: string[] | null) {
+        state.activeToolNames = value;
+      },
+      setActiveToolsCalls: state.setActiveToolsCalls,
       on: mock((event: string, handler: (...args: unknown[]) => unknown) => {
         this.handlers.set(event, handler);
       }),
@@ -335,6 +352,16 @@ export class MockPiBuilder {
       }),
       appendEntry: mock((customType: string, data?: unknown) => {
         this.appendedEntries.push({ customType, data });
+      }),
+      getActiveTools: mock(() => {
+        if (state.activeToolNames === null) {
+          return this.tools.map((t) => t.name);
+        }
+        return this.tools.filter((t) => state.activeToolNames!.includes(t.name)).map((t) => t.name);
+      }),
+      setActiveTools: mock((names: string[]) => {
+        state.activeToolNames = names;
+        state.setActiveToolsCalls.push(names);
       }),
     } as unknown as ExtensionAPI & CapturedExtension;
   }

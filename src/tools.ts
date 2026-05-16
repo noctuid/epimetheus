@@ -62,7 +62,7 @@ interface ReflectDetails {
  * - `false`: no tools enabled
  * - array of tool names: only listed tools enabled
  */
-function isToolEnabled(config: HindsightConfig, tool: ToolName): boolean {
+export function isToolEnabled(config: HindsightConfig, tool: ToolName): boolean {
   const { toolsEnabled } = config;
   if (typeof toolsEnabled === "boolean") return toolsEnabled;
   return toolsEnabled.includes(tool);
@@ -301,5 +301,32 @@ export function registerTools(
         };
       },
     });
+  }
+}
+
+/**
+ * Update whether hindsight_retain is visible to the LLM based on retention state.
+ *
+ * When a session is not retained, hindsight_retain is removed from active tools
+ * so the LLM never sees it as an option (instead of seeing it and having calls fail).
+ * When retained, it's added back if it was previously removed.
+ *
+ * Note: The execute-time check in hindsight_retain remains as a defensive
+ * fallback in case the tool is called through edge cases (e.g., mid-turn toggle).
+ */
+export function updateRetainToolVisibility(pi: ExtensionAPI, retained: boolean): void {
+  const toolName = "hindsight_retain";
+  const activeNames = pi.getActiveTools();
+
+  if (retained) {
+    // Add hindsight_retain if not already active
+    if (!activeNames.includes(toolName)) {
+      pi.setActiveTools([...activeNames, toolName]);
+    }
+  } else {
+    // Remove hindsight_retain from active tools
+    if (activeNames.includes(toolName)) {
+      pi.setActiveTools(activeNames.filter((n) => n !== toolName));
+    }
   }
 }

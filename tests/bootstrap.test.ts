@@ -1995,4 +1995,92 @@ describe("real entrypoint bootstrap", () => {
       { not: { tags: ["session:test-session-123"], match: "any_strict" } },
     ]);
   });
+
+  // ============================================
+  // updateRetainToolVisibility integration tests
+  // ============================================
+
+  it("session_start hides hindsight_retain when retainSessionsByDefault=false", async () => {
+    activeConfig = { ...testConfig, retainSessionsByDefault: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    // getEntries returns no hindsight-meta entries (auto-create will use retained=false)
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => []),
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    // setActiveTools should have been called to remove hindsight_retain
+    expect(pi.setActiveToolsCalls.length).toBeGreaterThan(0);
+    const lastCall = pi.setActiveToolsCalls[pi.setActiveToolsCalls.length - 1]!;
+    expect(lastCall).not.toContain("hindsight_retain");
+  });
+
+  it("session_start keeps hindsight_retain visible when retainSessionsByDefault=true", async () => {
+    // Default config has retainSessionsByDefault=true
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => []), // no meta → auto-create with retained=true
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    // setActiveTools should NOT have been called (tool is already active by default)
+    expect(pi.setActiveToolsCalls.length).toBe(0);
+  });
+
+  it("session_start respects existing retained=false metadata", async () => {
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ]),
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    // setActiveTools should have been called to remove hindsight_retain
+    expect(pi.setActiveToolsCalls.length).toBeGreaterThan(0);
+    const lastCall = pi.setActiveToolsCalls[pi.setActiveToolsCalls.length - 1]!;
+    expect(lastCall).not.toContain("hindsight_retain");
+  });
+
+  it("session_start does not call updateRetainToolVisibility when retain tool is not in toolsEnabled array", async () => {
+    activeConfig = { ...testConfig, toolsEnabled: ["recall" as const] };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const ctx = createMockContext({
+      sessionManager: {
+        ...createMockContext().sessionManager,
+        getEntries: mock(() => []),
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    // setActiveTools should NOT have been called — retain tool isn't registered
+    expect(pi.setActiveToolsCalls.length).toBe(0);
+  });
 });

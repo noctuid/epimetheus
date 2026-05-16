@@ -19,7 +19,12 @@ interface RegisteredCmd {
 
 describe("registerCommands", () => {
   let registeredCommands: Map<string, RegisteredCmd>;
-  let mockPi: { registerCommand: ReturnType<typeof mock>; appendEntry: ReturnType<typeof mock> };
+  let mockPi: {
+    registerCommand: ReturnType<typeof mock>;
+    appendEntry: ReturnType<typeof mock>;
+    getActiveTools: ReturnType<typeof mock>;
+    setActiveTools: ReturnType<typeof mock>;
+  };
   let mockClient: HindsightClientWrapper | null;
   let recallDetails: RecallMessageDetails | null;
   let autoRecallDisplayOverride: boolean | null;
@@ -46,6 +51,19 @@ describe("registerCommands", () => {
       appendEntry: mock((customType: string, data?: unknown) => {
         appendedEntries.push({ customType, data });
       }),
+      getActiveTools: mock(() => [
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "grep",
+        "find",
+        "ls",
+        "hindsight_retain",
+        "hindsight_recall",
+        "hindsight_reflect",
+      ]),
+      setActiveTools: mock(() => {}),
     } as unknown as typeof mockPi;
   });
 
