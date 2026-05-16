@@ -45,7 +45,7 @@ jobs:
       - run: bun install --frozen-lockfile
         if: steps.cache-node-modules.outputs.cache-hit != 'true'
       - name: Run tests with coverage
-        run: bun test --coverage | tee coverage-output.txt
+        run: bun test --isolate --coverage | tee coverage-output.txt
       - name: Check coverage threshold
         run: |
           COVERAGE=$(grep 'All files' coverage-output.txt | awk -F'|' '{gsub(/ /, "", $3); print $3}')

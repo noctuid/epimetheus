@@ -21,8 +21,16 @@ import {
   getQueueCount,
   queueToolRetain,
 } from "../src/retention";
+import {
+  HINDSIGHT_ENV_KEYS,
+  saveEnvKeys,
+  setupTempAgentDir,
+  testConfig as sharedTestConfig,
+} from "./fixtures";
 
 const TEST_SESSION_ID = "test-session-retention";
+
+setupTempAgentDir("retention");
 
 // Type for mock client wrapper
 interface MockClientWrapper {
@@ -85,8 +93,6 @@ function createMockWrapper(
     },
   };
 }
-
-import { HINDSIGHT_ENV_KEYS, saveEnvKeys, testConfig as sharedTestConfig } from "./fixtures";
 
 // Extend shared config with retention-test-specific overrides
 const defaultConfig: HindsightConfig = {

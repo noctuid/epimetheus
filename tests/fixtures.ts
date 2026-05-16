@@ -5,7 +5,7 @@
  * to avoid duplication across test files.
  */
 
-import { mock } from "bun:test";
+import { afterAll, mock } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,6 +166,38 @@ export function createMockContext(overrides: Record<string, unknown> = {}): Exte
     hasPendingMessages: mock(() => false),
     ...overrides,
   } as unknown as ExtensionContext;
+}
+
+// ============================================
+// Agent directory isolation for tests
+// ============================================
+
+/**
+ * Set up a temp directory as PI_CODING_AGENT_DIR so tests don't write to the
+ * real user's ~/.pi/agent/ directory. Registers an afterAll hook to clean up.
+ *
+ * Must be called at module top level (before any test code runs) so that
+ * getAgentDir() resolves to the temp directory from the start.
+ *
+ * Saves and restores any previous PI_CODING_AGENT_DIR value in afterAll,
+ * so a developer-set value is not silently clobbered.
+ *
+ * @param label - Short label to identify the test file in the temp dir name
+ * @returns The temp directory path
+ */
+export function setupTempAgentDir(label: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `pi-hindsight-${label}-`));
+  const prevValue = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (prevValue !== undefined) {
+      process.env.PI_CODING_AGENT_DIR = prevValue;
+    } else {
+      delete process.env.PI_CODING_AGENT_DIR;
+    }
+  });
+  return dir;
 }
 
 // ============================================

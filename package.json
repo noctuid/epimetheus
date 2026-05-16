@@ -12,7 +12,7 @@
     "check:fix": "biome check . --write && sed -i'' -e 's/[[:space:]]*$//' src/*.ts *.md",
     "typecheck": "bun run --bun tsc --noEmit",
     "commitlint": "commitlint",
-    "ci": "bun run check && bun run typecheck && bun test"
+    "ci": "bun run check && bun run typecheck && bun test --isolate"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",

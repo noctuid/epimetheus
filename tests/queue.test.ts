@@ -2,8 +2,9 @@
  * Unit tests for queue file management.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, statSync, writeFileSync } from "node:fs";
 import {
   autoQueueExists,
   deleteAutoQueue,
@@ -18,14 +19,15 @@ import {
   readToolQueue,
   toolQueueExists,
 } from "../src/queue";
+import { setupTempAgentDir } from "./fixtures";
 
-// Use a unique session ID per test run to avoid collisions with real queues
+// Use a unique session ID per test run to avoid collisions
 const TEST_SESSION_ID = `test-session-${Date.now()}`;
 
-beforeEach(() => {
-  // Ensure the queue dir exists
-  ensureQueueDir();
-});
+// Redirect agent-dir filesystem operations to a temp directory instead of
+// the real user's ~/.pi/agent/ directory. PI_CODING_AGENT_DIR is read by
+// getAgentDir() in @mariozechner/pi-coding-agent.
+setupTempAgentDir("queue");
 
 afterEach(() => {
   // Clean up any queue files created during tests
@@ -49,6 +51,7 @@ describe("getToolQueuePath", () => {
 
 describe("ensureQueueDir", () => {
   it("creates queue directory if it does not exist", () => {
+    ensureQueueDir();
     const queueDir = getQueueDir();
     expect(existsSync(queueDir)).toBe(true);
   });
@@ -300,18 +303,58 @@ describe("separate queues", () => {
 // Filesystem failure tests
 // ============================================
 
+/**
+ * Attempt to make a path unwritable.
+ * - As root: uses chattr +i (immutable flag) — root bypasses unix permissions
+ * - As non-root: uses chmod 0o444
+ *
+ * Returns a restore function on success, or null if the path cannot be
+ * made unwritable (caller should skip the test).
+ */
+function tryMakeUnwritable(path: string): (() => void) | null {
+  if (process.getuid?.() === 0) {
+    // Root bypasses unix permissions — try chattr +i
+    try {
+      execFileSync("chattr", ["+i", path], { stdio: "pipe" });
+      return () => {
+        try {
+          execFileSync("chattr", ["-i", path], { stdio: "pipe" });
+        } catch {
+          // Best-effort: don't let cleanup failure mask test failures
+        }
+      };
+    } catch {
+      // Filesystem doesn't support chattr (overlayfs, FUSE, etc.)
+      return null;
+    }
+  }
+  // Non-root: chmod is sufficient. Save original mode for restore.
+  // Directories get 0o555 (traversable but not writable) so that
+  // existsSync still works and unlink actually fails with EACCES.
+  // Files get 0o444 (read-only).
+  const stats = statSync(path);
+  const originalMode = stats.mode & 0o777;
+  chmodSync(path, stats.isDirectory() ? 0o555 : 0o444);
+  return () => {
+    try {
+      chmodSync(path, originalMode);
+    } catch {
+      // Best-effort: don't let cleanup failure mask test failures
+    }
+  };
+}
+
 describe("filesystem failures", () => {
   it("enqueueAutoMessage returns false when queue dir is unwritable", () => {
-    // Make the queue directory read-only to trigger write failure
     const queueDir = getQueueDir();
-
-    // Ensure dir exists first
     ensureQueueDir();
 
-    // Make dir read-only (no write permission)
-    try {
-      chmodSync(queueDir, 0o444);
+    const restore = tryMakeUnwritable(queueDir);
+    expect(restore).not.toBeNull();
+    // Type narrowing: restore is () => void after expect guard
+    const restoreFn = restore!;
 
+    try {
       const result = enqueueAutoMessage("fs-fail-auto", {
         entry: { message: { role: "user", content: "fail" } },
         store_method: "auto",
@@ -319,19 +362,21 @@ describe("filesystem failures", () => {
 
       expect(result).toBe(false);
     } finally {
-      // Restore permissions
-      chmodSync(queueDir, 0o755);
-      // Clean up
+      restoreFn();
       deleteAutoQueue("fs-fail-auto");
     }
   });
 
   it("enqueueToolMessage returns false when queue dir is unwritable", () => {
     const queueDir = getQueueDir();
+    ensureQueueDir();
+
+    const restore = tryMakeUnwritable(queueDir);
+    expect(restore).not.toBeNull();
+    // Type narrowing: restore is () => void after expect guard
+    const restoreFn = restore!;
 
     try {
-      chmodSync(queueDir, 0o444);
-
       const result = enqueueToolMessage("fs-fail-tool", {
         content: "fail",
         timestamp: "2026-01-01T00:00:00Z",
@@ -340,7 +385,7 @@ describe("filesystem failures", () => {
 
       expect(result).toBe(false);
     } finally {
-      chmodSync(queueDir, 0o755);
+      restoreFn();
       deleteToolQueue("fs-fail-tool");
     }
   });
@@ -352,17 +397,22 @@ describe("filesystem failures", () => {
     const queuePath = getQueuePath("fs-fail-delete");
     writeFileSync(queuePath, '{"store_method":"auto","entry":{}}\n', "utf8");
 
-    // Make the file read-only so unlink fails
-    try {
-      chmodSync(queuePath, 0o444);
-      // Also make parent dir read-only to prevent deletion
-      chmodSync(queueDir, 0o555);
+    const restoreFile = tryMakeUnwritable(queuePath);
+    const restoreDir = tryMakeUnwritable(queueDir);
+    expect(restoreFile).not.toBeNull();
+    expect(restoreDir).not.toBeNull();
+    // Type narrowing: non-null after expect guards
+    const restoreFileFn = restoreFile!;
+    const restoreDirFn = restoreDir!;
 
+    try {
       // Should not throw
       expect(() => deleteAutoQueue("fs-fail-delete")).not.toThrow();
     } finally {
-      chmodSync(queueDir, 0o755);
-      chmodSync(queuePath, 0o644);
+      // Restore directory first, then file — directory must be writable
+      // before we can chmod the file back (if using chmod path).
+      restoreDirFn();
+      restoreFileFn();
       deleteAutoQueue("fs-fail-delete");
     }
   });

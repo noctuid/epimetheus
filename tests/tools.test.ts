@@ -10,7 +10,9 @@ import type { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
 import { deleteAutoQueue, deleteToolQueue, readToolQueue } from "../src/queue";
 import { isToolEnabled, registerTools, updateRetainToolVisibility } from "../src/tools";
-import { testConfig as sharedTestConfig } from "./fixtures";
+import { setupTempAgentDir, testConfig as sharedTestConfig } from "./fixtures";
+
+setupTempAgentDir("tools");
 
 const TEST_SESSION_ID = "test-tools-session";
 

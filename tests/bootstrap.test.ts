@@ -12,7 +12,6 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-
 // Import the real config module BEFORE mocking to preserve exports
 import * as realConfig from "../src/config";
 
@@ -21,9 +20,15 @@ import {
   createMockPi,
   HINDSIGHT_ENV_KEYS,
   saveEnvKeys,
+  setupTempAgentDir,
   testConfig,
 } from "./fixtures";
 
+// ============================================
+// Setup: redirect agent-dir filesystem operations to temp directory
+// ============================================
+
+setupTempAgentDir("bootstrap");
 // ============================================
 // Mutable state for mock.module() — tests set these before exercising handlers
 // ============================================

@@ -3,11 +3,23 @@
  */
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { HindsightClientWrapper } from "../src/client";
 import { registerCommands } from "../src/commands";
 import type { RecallMessageDetails } from "../src/index";
-import { createMockClient, statusTestConfig, withTempDir, writeSessionFile } from "./fixtures";
+import {
+  createMockClient,
+  setupTempAgentDir,
+  statusTestConfig,
+  withTempDir,
+  writeSessionFile,
+} from "./fixtures";
+
+// Redirect agent-dir filesystem operations to a temp directory instead of
+// the real user's ~/.pi/agent/ directory.
+setupTempAgentDir("commands");
 
 interface RegisteredCmd {
   description: string;
@@ -835,14 +847,12 @@ describe("registerCommands", () => {
     });
 
     it("asks for confirmation before upserting", async () => {
-      const { mkdirSync, writeFileSync: writeFile, rmSync } = await import("node:fs");
-      const { join } = await import("node:path");
       const { getAgentDir } = await import("@mariozechner/pi-coding-agent");
       const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
       const testFile = join(parsedDir, "test-upsert-confirm.json");
 
       mkdirSync(parsedDir, { recursive: true });
-      writeFile(
+      writeFileSync(
         testFile,
         JSON.stringify({
           messages: [{ role: "user", content: "hello" }],
@@ -890,14 +900,12 @@ describe("registerCommands", () => {
     });
 
     it("cancels upsert when user declines confirmation", async () => {
-      const { mkdirSync, writeFileSync: writeFile, rmSync } = await import("node:fs");
-      const { join } = await import("node:path");
       const { getAgentDir } = await import("@mariozechner/pi-coding-agent");
       const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
       const testFile = join(parsedDir, "test-upsert-cancel.json");
 
       mkdirSync(parsedDir, { recursive: true });
-      writeFile(
+      writeFileSync(
         testFile,
         JSON.stringify({
           messages: [{ role: "user", content: "hello" }],
@@ -936,14 +944,12 @@ describe("registerCommands", () => {
     });
 
     it("proceeds with upsert when user accepts confirmation", async () => {
-      const { mkdirSync, writeFileSync: writeFile, rmSync } = await import("node:fs");
-      const { join } = await import("node:path");
       const { getAgentDir } = await import("@mariozechner/pi-coding-agent");
       const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
       const testFile = join(parsedDir, "test-upsert-proceed.json");
 
       mkdirSync(parsedDir, { recursive: true });
-      writeFile(
+      writeFileSync(
         testFile,
         JSON.stringify({
           messages: [{ role: "user", content: "hello" }],
