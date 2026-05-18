@@ -734,10 +734,10 @@ function setConfigValue(
             return;
           }
           config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
-          return `observationScopes: invalid value. Expected "per_tag", "combined", "all_combinations", or an array of tag arrays.`;
+          return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
         } catch {
           config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
-          return `observationScopes contains invalid JSON. Using default.`;
+          return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
         }
       }
       // Non-string value (from config file)
@@ -748,7 +748,7 @@ function setConfigValue(
           return;
         }
         config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
-        return `observationScopes: invalid value. Expected "per_tag", "combined", "all_combinations", or an array of tag arrays.`;
+        return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
       }
     }
     case "apiUrl":
@@ -806,7 +806,7 @@ function checkScopePlaceholderWarnings(scopes: string[][]): string[] {
       for (const placeholder of placeholderPatterns) {
         if (tag !== placeholder && tag.includes(placeholder)) {
           warnings.push(
-            `observationScopes: tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. ["${placeholder}"] not "${tag}")`
+            `observationScopes tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. ["${placeholder}"] not "${tag}")`
           );
         }
       }
@@ -920,7 +920,7 @@ function validateTagGroupItemPlaceholders(
       for (const placeholder of placeholderPatterns) {
         if (tag !== placeholder && tag.includes(placeholder)) {
           warnings.push(
-            `autoRecallTagGroups: tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. "${placeholder}" not "${tag}")`
+            `autoRecallTagGroups tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. "${placeholder}" not "${tag}")`
           );
         }
       }
@@ -982,8 +982,15 @@ export function loadConfig(extensionsDir?: string): {
   // Note: retainContent and strip are replaced entirely (not merged) in setConfigValue
   const config: HindsightConfig = {
     ...DEFAULT_CONFIG,
-    retainContent: { ...DEFAULT_CONFIG.retainContent },
-    strip: { ...DEFAULT_CONFIG.strip },
+    retainContent: {
+      assistant: [...DEFAULT_CONFIG.retainContent.assistant],
+      user: [...DEFAULT_CONFIG.retainContent.user],
+      toolResult: [...DEFAULT_CONFIG.retainContent.toolResult],
+    },
+    strip: {
+      topLevel: [...DEFAULT_CONFIG.strip.topLevel],
+      message: [...DEFAULT_CONFIG.strip.message],
+    },
     toolFilter: {
       ...DEFAULT_CONFIG.toolFilter,
       toolCall: DEFAULT_CONFIG.toolFilter.toolCall
@@ -1034,7 +1041,7 @@ export function loadConfig(extensionsDir?: string): {
         for (const [key, value] of fileEntries) {
           if (!VALID_CONFIG_KEYS.has(key as keyof HindsightConfig)) {
             if (key !== "recallShowDateTime" && key !== "recallTypes") {
-              warnings.push(`Unknown config key in file: ${key}`);
+              warnings.push(`Unknown config key in file: ${key} (value: ${JSON.stringify(value)})`);
             }
             continue;
           }
@@ -1112,11 +1119,19 @@ export function loadConfig(extensionsDir?: string): {
   return {
     config,
     configPath: configPath ?? undefined,
-    warning: warnings.length > 0 ? warnings.join("; ") : undefined,
+    warning: warnings.length > 0 ? warnings.map((w) => `pi-hindsight: ${w}`).join("; ") : undefined,
     envVars,
   };
 }
 
+/**
+ * Validate and fix a loaded config. Mutates the config object to reset invalid
+ * values to their defaults and returns the validation result.
+ *
+ * Only `apiUrl`, `apiKey`, `bankId`, and `observationScopes` missing/invalid
+ * produce errors (which disable the plugin). All other issues produce warnings
+ * and the config value is reset to its default.
+ */
 export function validateConfig(config: HindsightConfig): {
   valid: boolean;
   errors: string[];
@@ -1137,159 +1152,286 @@ export function validateConfig(config: HindsightConfig): {
     errors.push("bankId is required (set in config.json or PI_HINDSIGHT_BANK_ID env var)");
   }
 
-  // Validate toolsEnabled
+  // Validate toolsEnabled - reset to default on invalid values, deduplicate on duplicates
   if (Array.isArray(config.toolsEnabled)) {
     const validTools = VALID_TOOL_NAMES;
     const invalid = config.toolsEnabled.filter((t) => !validTools.includes(t));
     if (invalid.length > 0) {
+      config.toolsEnabled = DEFAULT_CONFIG.toolsEnabled as ToolName[] | boolean;
       warnings.push(
-        `toolsEnabled contains invalid values: ${invalid.join(", ")}. Valid: ${validTools.join(", ")}`
+        `toolsEnabled contains invalid values: ${invalid.join(", ")}. Valid: ${validTools.join(", ")}. Using default: ${JSON.stringify(DEFAULT_CONFIG.toolsEnabled)}.`
       );
-    }
-    // Check for duplicates
-    const unique = new Set(config.toolsEnabled);
-    if (unique.size !== config.toolsEnabled.length) {
-      warnings.push("toolsEnabled contains duplicate values");
+    } else {
+      // Only check duplicates if we didn't reset (array is still valid)
+      const unique = new Set(config.toolsEnabled);
+      if (unique.size !== config.toolsEnabled.length) {
+        config.toolsEnabled = [...unique] as ToolName[];
+        warnings.push("toolsEnabled contains duplicate values. Using deduplicated value.");
+      }
     }
   }
 
+  // Validate hindsightContextMaxLength - reset to default if out of range
   if (config.hindsightContextMaxLength < 0) {
-    errors.push("hindsightContextMaxLength must be >= 0");
+    warnings.push(
+      `hindsightContextMaxLength must be >= 0. Using default: ${DEFAULT_CONFIG.hindsightContextMaxLength}.`
+    );
+    config.hindsightContextMaxLength = DEFAULT_CONFIG.hindsightContextMaxLength;
   }
 
+  // Validate recallMaxQueryChars - reset to default if out of range
   if (config.recallMaxQueryChars < 1) {
-    errors.push("recallMaxQueryChars must be >= 1");
+    warnings.push(
+      `recallMaxQueryChars must be >= 1. Using default: ${DEFAULT_CONFIG.recallMaxQueryChars}.`
+    );
+    config.recallMaxQueryChars = DEFAULT_CONFIG.recallMaxQueryChars;
   }
 
-  // Validate retainContent - user and assistant must have at least one content type
-  if (config.retainContent.user.length === 0) {
-    errors.push("retainContent.user cannot be empty (at least one content type required)");
-  }
+  // Valid content types per retainContent role
+  const VALID_RETAIN_CONTENT: Record<string, string[]> = {
+    user: ["text", "image"],
+    assistant: ["text", "thinking", "toolCall"],
+    toolResult: ["text"],
+  };
 
-  if (config.retainContent.assistant.length === 0) {
-    errors.push("retainContent.assistant cannot be empty (at least one content type required)");
-  }
-
-  // Check for duplicates in retainContent
+  // Validate retainContent - ensure all sub-properties exist and are valid arrays of allowed types
   for (const role of ["user", "assistant", "toolResult"] as const) {
-    const items = config.retainContent[role];
-    const unique = new Set(items);
-    if (unique.size !== items.length) {
-      errors.push(`retainContent.${role} contains duplicate values`);
+    const items = config.retainContent?.[role];
+    if (!items || !Array.isArray(items)) {
+      warnings.push(
+        `retainContent.${role} is missing or not an array. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
+      );
+      // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
+      config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
+    } else if (items.length === 0 && (role === "user" || role === "assistant")) {
+      warnings.push(
+        `retainContent.${role} cannot be empty. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
+      );
+      // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
+      config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
+    } else {
+      const allowed = VALID_RETAIN_CONTENT[role] as string[];
+      const invalid = items.filter((item) => typeof item !== "string" || !allowed.includes(item));
+      if (invalid.length > 0) {
+        warnings.push(
+          `retainContent.${role} contains invalid values: ${invalid.map((v) => JSON.stringify(v)).join(", ")}. Valid: ${allowed.join(", ")}. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
+        );
+        // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
+        config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
+      } else {
+        // Check for duplicates
+        const unique = new Set(items);
+        if (unique.size !== items.length) {
+          // biome-ignore lint/suspicious/noExplicitAny: Set dedup requires any cast due to union tuple types
+          config.retainContent[role] = [...unique] as any;
+          warnings.push(
+            `retainContent.${role} contains duplicate values. Using deduplicated value.`
+          );
+        }
+      }
     }
   }
 
-  // Check for duplicates in strip
+  // Validate strip - ensure all sub-properties exist and are valid string arrays
   for (const field of ["topLevel", "message"] as const) {
-    const items = config.strip[field];
-    const unique = new Set(items);
-    if (unique.size !== items.length) {
-      errors.push(`strip.${field} contains duplicate values`);
+    const items = config.strip?.[field];
+    if (!items || !Array.isArray(items)) {
+      warnings.push(
+        `strip.${field} is missing or not an array. Using default: ${JSON.stringify(DEFAULT_CONFIG.strip[field])}.`
+      );
+      config.strip[field] = [...DEFAULT_CONFIG.strip[field]];
+    } else {
+      const invalid = items.filter((item) => typeof item !== "string");
+      if (invalid.length > 0) {
+        warnings.push(
+          `strip.${field} contains non-string values. Using default: ${JSON.stringify(DEFAULT_CONFIG.strip[field])}.`
+        );
+        config.strip[field] = [...DEFAULT_CONFIG.strip[field]];
+      } else {
+        const unique = new Set(items);
+        if (unique.size !== items.length) {
+          config.strip[field] = [...unique] as typeof items;
+          warnings.push(`strip.${field} contains duplicate values. Using deduplicated value.`);
+        }
+      }
     }
   }
 
-  // Validate toolFilter - include and exclude are mutually exclusive
+  // Validate toolFilter - reset sub-filter to default on any structural issue
   for (const subKey of ["toolCall", "toolResult"] as const) {
     const filter = config.toolFilter[subKey];
-    if (!filter) continue;
+    // null or non-object sub-filters are invalid — reset to default
+    if (!filter || typeof filter !== "object" || Array.isArray(filter)) {
+      if (filter !== undefined) {
+        const defaultFilter = DEFAULT_CONFIG.toolFilter[subKey];
+        if (defaultFilter) {
+          config.toolFilter[subKey] = structuredClone(defaultFilter);
+        } else {
+          delete config.toolFilter[subKey];
+        }
+        warnings.push(
+          `toolFilter.${subKey} must be an object. Using default: ${JSON.stringify(defaultFilter)}.`
+        );
+      }
+      continue;
+    }
 
+    const reasons: string[] = [];
     const hasInclude = "include" in filter;
     const hasExclude = "exclude" in filter;
 
     // Must have at least one of include/exclude
     if (!hasInclude && !hasExclude) {
-      errors.push(`toolFilter.${subKey} must have either 'include' or 'exclude'`);
+      reasons.push(`toolFilter.${subKey} must have either 'include' or 'exclude'`);
     }
 
     if (hasInclude && hasExclude) {
-      errors.push(`toolFilter.${subKey} cannot have both 'include' and 'exclude'`);
+      reasons.push(`toolFilter.${subKey} cannot have both 'include' and 'exclude'`);
     }
 
-    // Check for empty lists
-    if (hasInclude && filter.include.length === 0) {
-      errors.push(
-        `toolFilter.${subKey}.include cannot be empty (use exclude instead, or remove the filter)`
-      );
+    // Check for empty or non-array include/exclude, or non-string elements
+    if (hasInclude) {
+      if (!Array.isArray(filter.include)) {
+        reasons.push(`toolFilter.${subKey}.include must be a string array`);
+      } else if (filter.include.length === 0) {
+        reasons.push(`toolFilter.${subKey}.include cannot be empty`);
+      } else if (!filter.include.every((v) => typeof v === "string")) {
+        reasons.push(`toolFilter.${subKey}.include must contain only strings`);
+      }
     }
-    if (hasExclude && filter.exclude.length === 0) {
-      errors.push(
-        `toolFilter.${subKey}.exclude cannot be empty (use include instead, or remove the filter)`
-      );
+    if (hasExclude) {
+      if (!Array.isArray(filter.exclude)) {
+        reasons.push(`toolFilter.${subKey}.exclude must be a string array`);
+      } else if (filter.exclude.length === 0) {
+        reasons.push(`toolFilter.${subKey}.exclude cannot be empty`);
+      } else if (!filter.exclude.every((v) => typeof v === "string")) {
+        reasons.push(`toolFilter.${subKey}.exclude must contain only strings`);
+      }
     }
 
     // Check for unknown keys
     const allowedKeys = new Set(["include", "exclude"]);
     for (const key of Object.keys(filter)) {
       if (!allowedKeys.has(key)) {
-        errors.push(
-          `toolFilter.${subKey} has unknown key '${key}' (only 'include' and 'exclude' are allowed)`
-        );
+        reasons.push(`toolFilter.${subKey} has unknown key '${key}'`);
+      }
+    }
+
+    if (reasons.length > 0) {
+      const defaultFilter = DEFAULT_CONFIG.toolFilter[subKey];
+      if (defaultFilter) {
+        config.toolFilter[subKey] = structuredClone(defaultFilter);
+      } else {
+        delete config.toolFilter[subKey];
+      }
+      for (const reason of reasons) {
+        warnings.push(`${reason}. Using default: ${JSON.stringify(defaultFilter)}.`);
       }
     }
   }
 
   // Check for duplicates in autoRecallTypes (null means all types, no validation needed)
   if (config.autoRecallTypes !== null) {
-    const unique = new Set(config.autoRecallTypes);
-    if (unique.size !== config.autoRecallTypes.length) {
-      errors.push("autoRecallTypes contains duplicate values");
+    // Also validate type values
+    const invalid = config.autoRecallTypes.filter((t) => !VALID_MEMORY_TYPES.includes(t));
+    if (invalid.length > 0) {
+      warnings.push(
+        `autoRecallTypes contains invalid values: ${invalid.join(", ")}. Valid types: ${VALID_MEMORY_TYPES.join(", ")}. Using default: ${JSON.stringify(DEFAULT_CONFIG.autoRecallTypes)}.`
+      );
+      config.autoRecallTypes = DEFAULT_CONFIG.autoRecallTypes
+        ? [...DEFAULT_CONFIG.autoRecallTypes]
+        : null;
+    } else {
+      const unique = new Set(config.autoRecallTypes);
+      if (unique.size !== config.autoRecallTypes.length) {
+        config.autoRecallTypes = [...unique] as MemoryType[];
+        warnings.push("autoRecallTypes contains duplicate values. Using deduplicated value.");
+      }
     }
   }
 
-  // Validate observationScopes (required — must not be null)
-  if (config.observationScopes === null) {
-    errors.push(
-      "observationScopes: is required (must be a preset string or an array of tag arrays)"
-    );
-  } else if (typeof config.observationScopes === "string") {
+  // Validate observationScopes - invalid values reset to null, then null triggers error
+  let observationScopesInvalid = false;
+  let observationScopesReason = "";
+
+  if (typeof config.observationScopes === "string") {
     const validPresets = ["per_tag", "combined", "all_combinations"];
     if (!validPresets.includes(config.observationScopes)) {
-      errors.push(
-        `observationScopes: invalid preset "${config.observationScopes}". Expected "per_tag", "combined", or "all_combinations"`
-      );
+      observationScopesInvalid = true;
+      observationScopesReason = `observationScopes: invalid preset "${config.observationScopes}". Expected "per_tag", "combined", or "all_combinations"`;
     }
   } else if (Array.isArray(config.observationScopes)) {
     if (config.observationScopes.length === 0) {
-      errors.push("observationScopes: array must not be empty");
-    }
-    for (let i = 0; i < config.observationScopes.length; i++) {
-      const group = config.observationScopes[i];
-      if (!Array.isArray(group)) {
-        errors.push(`observationScopes[${i}]: must be an array of strings`);
-      } else if (group.length === 0) {
-        errors.push(`observationScopes[${i}]: must not be empty`);
-      } else {
+      observationScopesInvalid = true;
+      observationScopesReason = "observationScopes: array must not be empty";
+    } else {
+      for (let i = 0; i < config.observationScopes.length; i++) {
+        const group = config.observationScopes[i];
+        if (!Array.isArray(group)) {
+          observationScopesInvalid = true;
+          observationScopesReason = `observationScopes[${i}]: must be an array of strings`;
+          break;
+        }
+        if (group.length === 0) {
+          observationScopesInvalid = true;
+          observationScopesReason = `observationScopes[${i}]: must not be empty`;
+          break;
+        }
         for (let j = 0; j < group.length; j++) {
           if (typeof group[j] !== "string") {
-            errors.push(`observationScopes[${i}][${j}]: must be a string`);
+            observationScopesInvalid = true;
+            observationScopesReason = `observationScopes[${i}][${j}]: must be a string`;
+            break;
           }
         }
+        if (observationScopesInvalid) break;
       }
     }
-    // Warn on non-exact placeholder usage
-    const placeholderWarnings = checkScopePlaceholderWarnings(config.observationScopes);
-    for (const w of placeholderWarnings) {
-      warnings.push(w);
+    // Warn on non-exact placeholder usage (informational only, not invalid)
+    if (!observationScopesInvalid) {
+      const placeholderWarnings = checkScopePlaceholderWarnings(config.observationScopes);
+      for (const w of placeholderWarnings) {
+        warnings.push(w);
+      }
     }
-  } else {
-    errors.push("observationScopes: must be a preset string or an array of tag arrays");
+  } else if (config.observationScopes !== null) {
+    observationScopesInvalid = true;
+    observationScopesReason =
+      "observationScopes: must be a preset string or an array of tag arrays";
+  }
+
+  if (observationScopesInvalid) {
+    warnings.push(`${observationScopesReason}. Using default (null).`);
+    config.observationScopes = DEFAULT_CONFIG.observationScopes;
+  }
+
+  // observationScopes null is required - produces error
+  if (config.observationScopes === null) {
+    errors.push(
+      "observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
+  }
+
+  // Validate autoRecallTagsMatch (always, not conditional on autoRecallTags)
+  {
+    const validMatches: TagsMatch[] = ["any", "all", "any_strict", "all_strict"];
+    if (!validMatches.includes(config.autoRecallTagsMatch)) {
+      warnings.push(
+        `autoRecallTagsMatch: invalid value "${config.autoRecallTagsMatch}". Expected one of: ${validMatches.join(", ")}. Using default: ${DEFAULT_CONFIG.autoRecallTagsMatch}.`
+      );
+      config.autoRecallTagsMatch = DEFAULT_CONFIG.autoRecallTagsMatch;
+    }
   }
 
   // Validate autoRecallTags
   if (config.autoRecallTags !== null) {
-    const validMatches: TagsMatch[] = ["any", "all", "any_strict", "all_strict"];
-    if (!validMatches.includes(config.autoRecallTagsMatch)) {
-      errors.push(
-        `autoRecallTagsMatch: invalid value "${config.autoRecallTagsMatch}". Expected one of: ${validMatches.join(", ")}`
-      );
-    }
-    // Check for non-exact placeholder usage in recall tags
+    // Check for non-exact placeholder usage in recall tags (informational, not invalid)
     const placeholderPatterns = Object.keys(SCOPE_PLACEHOLDERS);
     for (const tag of config.autoRecallTags) {
       for (const placeholder of placeholderPatterns) {
         if (tag !== placeholder && tag.includes(placeholder)) {
           warnings.push(
-            `autoRecallTags: tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. "${placeholder}" not "${tag}")`
+            `autoRecallTags tag "${tag}" contains placeholder ${placeholder} but is not an exact match; placeholders must be used as standalone tags (e.g. "${placeholder}" not "${tag}")`
           );
         }
       }
@@ -1315,5 +1457,6 @@ export function validateConfig(config: HindsightConfig): {
     );
   }
 
-  return { valid: errors.length === 0, errors, warnings };
+  const prefix = (s: string) => `pi-hindsight: ${s}`;
+  return { valid: errors.length === 0, errors: errors.map(prefix), warnings: warnings.map(prefix) };
 }
