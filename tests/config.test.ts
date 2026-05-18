@@ -30,11 +30,11 @@ const validConfig: HindsightConfig = {
   hindsightContextMaxLength: 100,
   maxRecallTokens: null,
   recallPromptPreamble: "Test",
-  recallShowDateTime: true,
+  autoRecallShowDateTime: true,
   autoRecallDisplay: false,
   autoRecallPersist: false,
   recallMaxQueryChars: 800,
-  recallTypes: ["observation"] as ("world" | "experience" | "observation")[] | null,
+  autoRecallTypes: ["observation"] as ("world" | "experience" | "observation")[] | null,
   autoRecallTags: null,
   autoRecallTagsMatch: "any",
   autoRecallTagGroups: null,
@@ -249,22 +249,22 @@ describe("validateConfig", () => {
     expect(result.warnings).toHaveLength(0);
   });
 
-  it("errors when recallTypes has duplicates", () => {
+  it("errors when autoRecallTypes has duplicates", () => {
     const config = {
       ...validConfig,
-      recallTypes: ["observation", "observation"] as
+      autoRecallTypes: ["observation", "observation"] as
         | ("world" | "experience" | "observation")[]
         | null,
     };
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.errors).toContain("recallTypes contains duplicate values");
+    expect(result.errors).toContain("autoRecallTypes contains duplicate values");
   });
 
-  it("allows null recallTypes (means all types)", () => {
+  it("allows null autoRecallTypes (means all types)", () => {
     const config = {
       ...validConfig,
-      recallTypes: null,
+      autoRecallTypes: null,
     };
     const result = validateConfig(config);
     expect(result.valid).toBe(true);
@@ -523,40 +523,192 @@ describe("loadConfig", () => {
     expect(config.toolsEnabled).toBe(true); // falls back to default
   });
 
-  it('recallTypes defaults to ["observation"]', () => {
+  it('autoRecallTypes defaults to ["observation"]', () => {
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toEqual(["observation"]);
+    expect(config.autoRecallTypes).toEqual(["observation"]);
   });
 
-  it("recallTypes can be set to null via config file (means all types)", () => {
+  it("autoRecallTypes can be set to null via config file (means all types)", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
         apiUrl: "https://test.test",
         apiKey: "test-key",
-        recallTypes: null,
+        autoRecallTypes: null,
       })
     );
 
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toBeNull();
+    expect(config.autoRecallTypes).toBeNull();
   });
 
-  it("recallTypes empty array via config file (means all types)", () => {
+  it("autoRecallTypes empty array via config file (means all types)", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
         apiUrl: "https://test.test",
         apiKey: "test-key",
-        recallTypes: [],
+        autoRecallTypes: [],
       })
     );
 
     const { config } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toBeNull();
+    expect(config.autoRecallTypes).toBeNull();
   });
 
-  it("warns on invalid recallTypes in config file", () => {
+  it("warns on invalid autoRecallTypes in config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTypes: ["invalid", "observation"],
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["observation"]); // Falls back to default
+    expect(warning).toContain("autoRecallTypes contains invalid values");
+  });
+
+  it("autoRecallTypes can be set to null via env var (means all types)", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = "null";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toBeNull();
+  });
+
+  it("autoRecallTypes empty array means all types (via env var)", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = "[]";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toBeNull();
+  });
+
+  it("autoRecallTypes can be set to an array via env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = '["world","experience"]';
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["world", "experience"]);
+  });
+
+  it("warns on invalid autoRecallTypes values", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = '["invalid", "observation"]';
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["observation"]); // Falls back to default
+    expect(warning).toBeDefined();
+    expect(warning).toContain("autoRecallTypes contains invalid values");
+  });
+
+  // Backward compatibility: old config file key names should still work
+  it("falls back to old config file key recallTypes", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallTypes: ["world"],
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["world"]);
+    expect(warning).toBeUndefined();
+  });
+
+  it("falls back to old config file key recallShowDateTime", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallShowDateTime: false,
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallShowDateTime).toBe(false);
+    expect(warning).toBeUndefined();
+  });
+
+  it("prioritizes new config key over old config key when both are present", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallTypes: ["world"],
+        autoRecallTypes: ["experience"],
+      })
+    );
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["experience"]);
+  });
+
+  // Backward compatibility: old env var names should still work
+  it("falls back to old env var PI_HINDSIGHT_RECALL_TYPES", () => {
+    process.env.PI_HINDSIGHT_RECALL_TYPES = '["world", "experience"]';
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["world", "experience"]);
+  });
+
+  it("falls back to old env var PI_HINDSIGHT_RECALL_SHOW_DATETIME", () => {
+    process.env.PI_HINDSIGHT_RECALL_SHOW_DATETIME = "false";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallShowDateTime).toBe(false);
+  });
+
+  it("prioritizes new env var PI_HINDSIGHT_AUTO_RECALL_TYPES over old PI_HINDSIGHT_RECALL_TYPES", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = '["world"]';
+    process.env.PI_HINDSIGHT_RECALL_TYPES = '["experience"]';
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["world"]);
+  });
+
+  it("prioritizes new env var PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME over old PI_HINDSIGHT_RECALL_SHOW_DATETIME", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME = "true";
+    process.env.PI_HINDSIGHT_RECALL_SHOW_DATETIME = "false";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallShowDateTime).toBe(true);
+  });
+
+  it("prioritizes new config key autoRecallShowDateTime over old recallShowDateTime", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallShowDateTime: false,
+        autoRecallShowDateTime: true,
+      })
+    );
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallShowDateTime).toBe(true);
+  });
+
+  it("includes old env var name in envVars when old env var is used", () => {
+    process.env.PI_HINDSIGHT_RECALL_TYPES = '["world"]';
+
+    const { envVars } = loadConfig(TEST_DIR);
+    expect(envVars).toContain("PI_HINDSIGHT_RECALL_TYPES");
+  });
+
+  it("includes old env var name but not new when only old is set", () => {
+    process.env.PI_HINDSIGHT_RECALL_SHOW_DATETIME = "false";
+
+    const { envVars } = loadConfig(TEST_DIR);
+    expect(envVars).toContain("PI_HINDSIGHT_RECALL_SHOW_DATETIME");
+    expect(envVars).not.toContain("PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME");
+  });
+
+  it("warns on invalid recallTypes value through backward compat config file key", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
@@ -567,38 +719,85 @@ describe("loadConfig", () => {
     );
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toEqual(["observation"]); // Falls back to default
-    expect(warning).toContain("recallTypes contains invalid values");
+    expect(config.autoRecallTypes).toEqual(["observation"]); // Falls back to default
+    expect(warning).toContain("autoRecallTypes contains invalid values");
   });
 
-  it("recallTypes can be set to null via env var (means all types)", () => {
-    process.env.PI_HINDSIGHT_RECALL_TYPES = "null";
-
-    const { config } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toBeNull();
-  });
-
-  it("recallTypes empty array means all types (via env var)", () => {
-    process.env.PI_HINDSIGHT_RECALL_TYPES = "[]";
-
-    const { config } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toBeNull();
-  });
-
-  it("recallTypes can be set to an array via env var", () => {
-    process.env.PI_HINDSIGHT_RECALL_TYPES = '["world","experience"]';
-
-    const { config } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toEqual(["world", "experience"]);
-  });
-
-  it("warns on invalid recallTypes values", () => {
-    process.env.PI_HINDSIGHT_RECALL_TYPES = '["invalid", "observation"]';
+  it("warns on invalid recallShowDateTime value through backward compat config file key", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallShowDateTime: "yes",
+      })
+    );
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toEqual(["observation"]); // Falls back to default
+    expect(config.autoRecallShowDateTime).toBe(true); // Falls back to default
     expect(warning).toBeDefined();
-    expect(warning).toContain("recallTypes contains invalid values");
+    expect(warning).toContain("Invalid boolean value");
+  });
+
+  it("warns on invalid PI_HINDSIGHT_RECALL_TYPES value through backward compat", () => {
+    process.env.PI_HINDSIGHT_RECALL_TYPES = "not-json";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["observation"]); // Falls back to default
+    expect(warning).toContain("autoRecallTypes contains invalid JSON");
+  });
+
+  it("warns on invalid PI_HINDSIGHT_RECALL_SHOW_DATETIME value through backward compat", () => {
+    process.env.PI_HINDSIGHT_RECALL_SHOW_DATETIME = "yes";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallShowDateTime).toBe(true); // Falls back to default
+    expect(warning).toContain("Invalid boolean value");
+  });
+
+  it("old env var overrides old config file key (env vars always override files)", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallTypes: ["world"],
+      })
+    );
+    process.env.PI_HINDSIGHT_RECALL_TYPES = '["experience"]';
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["experience"]);
+  });
+
+  it("old env var overrides new config file key (env vars always override files)", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallTypes: ["world"],
+      })
+    );
+    process.env.PI_HINDSIGHT_RECALL_TYPES = '["experience"]';
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["experience"]);
+  });
+
+  it("new env var overrides old config file key (env vars always override files)", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallTypes: ["world"],
+      })
+    );
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = '["experience"]';
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallTypes).toEqual(["experience"]);
   });
 
   // Boolean fallback warning tests
@@ -792,23 +991,23 @@ describe("loadConfig", () => {
     expect(warning).toBeUndefined();
   });
 
-  // recallTypes JSON parsing warning tests
-  it("warns on invalid JSON in recallTypes via env var", () => {
-    process.env.PI_HINDSIGHT_RECALL_TYPES = "not-json";
+  // autoRecallTypes JSON parsing warning tests
+  it("warns on invalid JSON in autoRecallTypes via env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = "not-json";
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toEqual(["observation"]); // Falls back to default
+    expect(config.autoRecallTypes).toEqual(["observation"]); // Falls back to default
     expect(warning).toBeDefined();
-    expect(warning).toContain("recallTypes contains invalid JSON");
+    expect(warning).toContain("autoRecallTypes contains invalid JSON");
   });
 
-  it("warns on non-array JSON in recallTypes via env var", () => {
-    process.env.PI_HINDSIGHT_RECALL_TYPES = '"not-an-array"';
+  it("warns on non-array JSON in autoRecallTypes via env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_TYPES = '"not-an-array"';
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.recallTypes).toEqual(["observation"]); // Falls back to default
+    expect(config.autoRecallTypes).toEqual(["observation"]); // Falls back to default
     expect(warning).toBeDefined();
-    expect(warning).toContain("recallTypes must be a JSON array");
+    expect(warning).toContain("autoRecallTypes must be a JSON array");
   });
 
   // entities env var warning tests

@@ -841,9 +841,9 @@ describe("doAutoRecallImpl", () => {
   // Default config for testing
   const defaultConfig: AutoRecallConfig = {
     recallMaxQueryChars: 800,
-    recallTypes: null,
+    autoRecallTypes: null,
     recallPromptPreamble: DEFAULT_PREAMBLE,
-    recallShowDateTime: true,
+    autoRecallShowDateTime: true,
     autoRecallTags: null,
     autoRecallTagsMatch: "any",
     autoRecallTagGroups: null,
@@ -1035,7 +1035,7 @@ describe("doAutoRecallImpl", () => {
         "test query",
         mockSignal,
         false,
-        { ...defaultConfig, recallShowDateTime: true },
+        { ...defaultConfig, autoRecallShowDateTime: true },
         (_details) => {}
       );
 
@@ -1050,7 +1050,7 @@ describe("doAutoRecallImpl", () => {
         "test query",
         mockSignal,
         false,
-        { ...defaultConfig, recallShowDateTime: false },
+        { ...defaultConfig, autoRecallShowDateTime: false },
         (_details) => {}
       );
 
@@ -1247,7 +1247,7 @@ describe("doAutoRecallImpl", () => {
         "test query",
         mockSignal,
         false,
-        { ...defaultConfig, recallTypes: ["world", "experience"] },
+        { ...defaultConfig, autoRecallTypes: ["world", "experience"] },
         () => {}
       );
 
@@ -1275,7 +1275,7 @@ describe("doAutoRecallImpl", () => {
         "test query",
         mockSignal,
         false,
-        { ...defaultConfig, recallTypes: null },
+        { ...defaultConfig, autoRecallTypes: null },
         () => {}
       );
 
@@ -1303,7 +1303,7 @@ describe("doAutoRecallImpl", () => {
         "test query",
         mockSignal,
         false,
-        { ...defaultConfig, recallTypes: [] as ("world" | "experience" | "observation")[] },
+        { ...defaultConfig, autoRecallTypes: [] as ("world" | "experience" | "observation")[] },
         () => {}
       );
 

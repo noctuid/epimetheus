@@ -80,7 +80,7 @@ export function createStatusSubcommand(
       lines.push("\n== Auto Recall Settings ==");
       lines.push(`  Persist: ${config.autoRecallPersist}`);
       lines.push(`  Display: ${config.autoRecallDisplay}`);
-      lines.push(`  Types: ${config.recallTypes ? config.recallTypes.join(", ") : "all"}`);
+      lines.push(`  Types: ${config.autoRecallTypes ? config.autoRecallTypes.join(", ") : "all"}`);
       lines.push(`  Budget: ${config.autoRecallBudget}`);
 
       ctx.ui.notify(lines.join("\n"), "info");

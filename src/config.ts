@@ -86,11 +86,11 @@ export interface HindsightConfig {
   hindsightContextMaxLength: number;
   maxRecallTokens: number | null;
   recallPromptPreamble: string;
-  recallShowDateTime: boolean;
+  autoRecallShowDateTime: boolean;
   autoRecallDisplay: boolean;
   autoRecallPersist: boolean;
   recallMaxQueryChars: number;
-  recallTypes: MemoryType[] | null;
+  autoRecallTypes: MemoryType[] | null;
   autoRecallTags: string[] | null;
   autoRecallTagsMatch: TagsMatch;
   autoRecallTagGroups: TagGroupInput[] | null;
@@ -122,11 +122,11 @@ const DEFAULT_CONFIG: HindsightConfig = {
   maxRecallTokens: null,
   recallPromptPreamble:
     "[System note: The following is recalled memory context, NOT new user input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]",
-  recallShowDateTime: true,
+  autoRecallShowDateTime: true,
   autoRecallDisplay: false,
   autoRecallPersist: false,
   recallMaxQueryChars: 800,
-  recallTypes: ["observation"],
+  autoRecallTypes: ["observation"],
   autoRecallTags: null,
   autoRecallTagsMatch: "any",
   autoRecallTagGroups: null,
@@ -177,11 +177,11 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "hindsightContextMaxLength",
   "maxRecallTokens",
   "recallPromptPreamble",
-  "recallShowDateTime",
+  "autoRecallShowDateTime",
   "autoRecallDisplay",
   "autoRecallPersist",
   "recallMaxQueryChars",
-  "recallTypes",
+  "autoRecallTypes",
   "autoRecallTags",
   "autoRecallTagsMatch",
   "autoRecallTagGroups",
@@ -407,7 +407,7 @@ function parseMemoryTypes(
     if (!Array.isArray(parsed)) {
       return {
         value: defaultValue,
-        warning: `recallTypes must be a JSON array, got ${typeof parsed}. Using default.`,
+        warning: `autoRecallTypes must be a JSON array, got ${typeof parsed}. Using default.`,
       };
     }
     if (parsed.length === 0) return { value: null }; // Empty array means all types
@@ -416,14 +416,14 @@ function parseMemoryTypes(
     if (!valid) {
       return {
         value: defaultValue,
-        warning: `recallTypes contains invalid values. Valid types: ${VALID_MEMORY_TYPES.join(", ")}`,
+        warning: `autoRecallTypes contains invalid values. Valid types: ${VALID_MEMORY_TYPES.join(", ")}`,
       };
     }
     return { value: parsed as MemoryType[] };
   } catch {
     return {
       value: defaultValue,
-      warning: `recallTypes contains invalid JSON. Using default.`,
+      warning: `autoRecallTypes contains invalid JSON. Using default.`,
     };
   }
 }
@@ -492,7 +492,7 @@ function setConfigValue(
     case "enabled":
     case "autoRecallEnabled":
     case "autoRetainEnabled":
-    case "recallShowDateTime":
+    case "autoRecallShowDateTime":
     case "autoRecallDisplay":
     case "autoRecallPersist":
     case "retainSessionsByDefault":
@@ -536,7 +536,7 @@ function setConfigValue(
       config[key] = result.value;
       return result.warning;
     }
-    case "recallTypes":
+    case "autoRecallTypes":
       if (value === null || (Array.isArray(value) && value.length === 0)) {
         config[key] = null;
         return;
@@ -546,7 +546,7 @@ function setConfigValue(
         const valid = value.every((t) => VALID_MEMORY_TYPES.includes(t));
         if (!valid) {
           config[key] = DEFAULT_CONFIG[key];
-          return `recallTypes contains invalid values. Valid types: ${VALID_MEMORY_TYPES.join(", ")}`;
+          return `autoRecallTypes contains invalid values. Valid types: ${VALID_MEMORY_TYPES.join(", ")}`;
         }
         config[key] = value;
         return;
@@ -1014,9 +1014,28 @@ export function loadConfig(extensionsDir?: string): {
           `Failed to parse config file ${configPath}: ${errors.length} parse error(s). Using defaults.`
         );
       } else {
-        for (const [key, value] of Object.entries(fileConfig as object)) {
+        // Backward compatibility: map old config key names to new names
+        const fileEntries = Object.entries(fileConfig as object) as [string, unknown][];
+        const fileKeys = new Set(fileEntries.map(([k]) => k));
+        // Old "recallShowDateTime" -> new "autoRecallShowDateTime"
+        if (fileKeys.has("recallShowDateTime") && !fileKeys.has("autoRecallShowDateTime")) {
+          // biome-ignore lint/complexity/useLiteralKeys: we need dynamic key access for the old name
+          const oldValue = (fileConfig as Record<string, unknown>)["recallShowDateTime"];
+          const warning = setConfigValue(config, "autoRecallShowDateTime", oldValue);
+          if (warning) warnings.push(warning);
+        }
+        // Old "recallTypes" -> new "autoRecallTypes"
+        if (fileKeys.has("recallTypes") && !fileKeys.has("autoRecallTypes")) {
+          // biome-ignore lint/complexity/useLiteralKeys: we need dynamic key access for the old name
+          const oldValue = (fileConfig as Record<string, unknown>)["recallTypes"];
+          const warning = setConfigValue(config, "autoRecallTypes", oldValue);
+          if (warning) warnings.push(warning);
+        }
+        for (const [key, value] of fileEntries) {
           if (!VALID_CONFIG_KEYS.has(key as keyof HindsightConfig)) {
-            warnings.push(`Unknown config key in file: ${key}`);
+            if (key !== "recallShowDateTime" && key !== "recallTypes") {
+              warnings.push(`Unknown config key in file: ${key}`);
+            }
             continue;
           }
           const warning = setConfigValue(config, key as keyof HindsightConfig, value);
@@ -1043,11 +1062,11 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_CONTEXT_MAX_LENGTH: "hindsightContextMaxLength",
     PI_HINDSIGHT_MAX_RECALL_TOKENS: "maxRecallTokens",
     PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE: "recallPromptPreamble",
-    PI_HINDSIGHT_RECALL_SHOW_DATETIME: "recallShowDateTime",
+    PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME: "autoRecallShowDateTime",
     PI_HINDSIGHT_AUTO_RECALL_DISPLAY: "autoRecallDisplay",
     PI_HINDSIGHT_AUTO_RECALL_PERSIST: "autoRecallPersist",
     PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS: "recallMaxQueryChars",
-    PI_HINDSIGHT_RECALL_TYPES: "recallTypes",
+    PI_HINDSIGHT_AUTO_RECALL_TYPES: "autoRecallTypes",
     PI_HINDSIGHT_AUTO_RECALL_TAGS: "autoRecallTags",
     PI_HINDSIGHT_AUTO_RECALL_TAGS_MATCH: "autoRecallTagsMatch",
     PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS: "autoRecallTagGroups",
@@ -1071,6 +1090,23 @@ export function loadConfig(extensionsDir?: string): {
       const warning = setConfigValue(config, configKey, value);
       if (warning) warnings.push(warning);
     }
+  }
+
+  // Backward compat: fallback to old env var names if the new ones weren't set
+  const oldRecallShowDateTime = process.env.PI_HINDSIGHT_RECALL_SHOW_DATETIME;
+  if (
+    oldRecallShowDateTime !== undefined &&
+    !envVars.includes("PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME")
+  ) {
+    envVars.push("PI_HINDSIGHT_RECALL_SHOW_DATETIME");
+    const warning = setConfigValue(config, "autoRecallShowDateTime", oldRecallShowDateTime);
+    if (warning) warnings.push(warning);
+  }
+  const oldRecallTypes = process.env.PI_HINDSIGHT_RECALL_TYPES;
+  if (oldRecallTypes !== undefined && !envVars.includes("PI_HINDSIGHT_AUTO_RECALL_TYPES")) {
+    envVars.push("PI_HINDSIGHT_RECALL_TYPES");
+    const warning = setConfigValue(config, "autoRecallTypes", oldRecallTypes);
+    if (warning) warnings.push(warning);
   }
 
   return {
@@ -1192,11 +1228,11 @@ export function validateConfig(config: HindsightConfig): {
     }
   }
 
-  // Check for duplicates in recallTypes (null means all types, no validation needed)
-  if (config.recallTypes !== null) {
-    const unique = new Set(config.recallTypes);
-    if (unique.size !== config.recallTypes.length) {
-      errors.push("recallTypes contains duplicate values");
+  // Check for duplicates in autoRecallTypes (null means all types, no validation needed)
+  if (config.autoRecallTypes !== null) {
+    const unique = new Set(config.autoRecallTypes);
+    if (unique.size !== config.autoRecallTypes.length) {
+      errors.push("autoRecallTypes contains duplicate values");
     }
   }
 

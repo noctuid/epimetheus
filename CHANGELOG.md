@@ -1,5 +1,28 @@
 # Changelog
 
+## Pending
+
+### Features
+
+- **`autoRecallTagGroups` config** — Compound boolean tag expressions (and/or/not) for auto-recall filtering. Supports recursive nesting and the same placeholders as `autoRecallTags`. When both `autoRecallTags` and `autoRecallTagGroups` are set, both are sent to the recall API and combined. Env var: `PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS`.
+- **Selective tool registration via `toolsEnabled`** — `toolsEnabled` now accepts an array of tool names (e.g. `["retain", "recall"]`) to register only listed tools. Boolean `true`/`false` behavior is preserved.
+- **`hindsight_retain` tool visibility** — The `hindsight_retain` tool is now proactively hidden via `pi.setActiveTools()` when the session is not retained, instead of showing an error on execution. Visibility is updated on `session_start` and `toggle-retain`.
+- **Retention toggle confirmation** — Toggling retention off now warns that queued messages will be deleted and asks for confirmation.
+- **Retained content in tool UI** — `hindsight_retain` now shows the actual retained content (dimmed, truncated to 200 chars) in the TUI alongside the success indicator.
+
+### Deprecations
+
+- **`recallShowDateTime`** — Use `autoRecallShowDateTime` instead. The old config file key and `PI_HINDSIGHT_RECALL_SHOW_DATETIME` env var still work as silent fallbacks.
+- **`recallTypes`** — Use `autoRecallTypes` instead. The old config file key and `PI_HINDSIGHT_RECALL_TYPES` env var still work as silent fallbacks.
+
+### Internal
+
+- Switched to `@earendil-works` npm namespace for pi-coding-agent and pi-tui imports.
+- Isolated tests from the user's `~/.pi/agent/` directory via temp `PI_CODING_AGENT_DIR`.
+- Added `--isolate` to `bun test` in CI to prevent `mock.module()` pollution across test files.
+- Added commitlint with conventional config.
+- Compressed tool descriptions and parameter docs for token savings.
+
 ## 0.2.0
 
 ### Features

@@ -201,10 +201,10 @@ This ensures that disabling the extension does not leave stale data in your sess
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `recallShowDateTime` | `true` | Include current date/time above recalled memories |
+| `autoRecallShowDateTime` | `true` | Include current date/time above recalled memories |
 | `autoRecallDisplay` | `false` | Show recalled messages in the UI. With `autoRecallPersist: true`, controls whether new recall messages are visible in chat. Also affects rendering of previously persisted recall messages (e.g. when `enabled: false`, see [Disabled Mode](#disabled-mode)). |
 | `autoRecallPersist` | `false` | Save recall messages to session file (visible in TUI after restart). When `true`, uses `before_agent_start` event for visible, persisted messages. When `false`, uses `context` event for ephemeral messages not shown in TUI. |
-| `recallTypes` | `["observation"]` | Memory types to recall. Set to `null` or `[]` to recall all types. |
+| `autoRecallTypes` | `["observation"]` | Memory types to recall. Set to `null` or `[]` to recall all types. |
 | `autoRecallTags` | `null` | Tags to filter by during auto-recall. Supports same placeholders as observation scopes (`{session}`, `{parent}`, `{cwd}`, `{basedir}`, `{project}`). `null` means no tag filtering (recall from entire bank). See [autoRecallTags](#autorecalltags). |
 | `autoRecallTagsMatch` | `"any"` | How to match `autoRecallTags`: `"any"` (OR, includes untagged), `"all"` (AND, includes untagged), `"any_strict"` (OR, excludes untagged), `"all_strict"` (AND, excludes untagged). |
 | `autoRecallTagGroups` | `null` | Compound boolean tag expressions for auto-recall. Combined with `autoRecallTags` when both are set. Supports same placeholders. See [autoRecallTags](#autorecalltags). |
@@ -553,10 +553,10 @@ Supports the same placeholder expansion as `observationScopes`, expanded at reca
 
 **Recall types and tag matching:**
 
-Your `autoRecallTags` configuration depends on which `recallTypes` you use:
+Your `autoRecallTags` configuration depends on which `autoRecallTypes` you use:
 
-- **`recallTypes: ["observation"]`** (default): Observations are tagged exactly according to your observation scopes. If you use `observationScopes: [["{project}"]]`, observations get a `project:<project>` tag and not any others (even constant tags like harness). Using `autoRecallTags: ["harness:pi", "{project}"]` would fail to match any observations.
-- **`recallTypes: ["world", "experience"]`**: World/experience memories are tagged based on all tags from the document they were extracted from, so your observation scopes do not matter.
+- **`autoRecallTypes: ["observation"]`** (default): Observations are tagged exactly according to your observation scopes. If you use `observationScopes: [["{project}"]]`, observations get a `project:<project>` tag and not any others (even constant tags like harness). Using `autoRecallTags: ["harness:pi", "{project}"]` would fail to match any observations.
+- **`autoRecallTypes: ["world", "experience"]`**: World/experience memories are tagged based on all tags from the document they were extracted from, so your observation scopes do not matter.
 
 ### Project-specific Recall and Storage
 By combining `autoRecallTags` and `observationScopes`, you can create project-specific memory that's both stored and recalled per-project:
@@ -605,11 +605,11 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_CONTEXT_MAX_LENGTH` | `hindsightContextMaxLength` | number | `100` |
 | `PI_HINDSIGHT_MAX_RECALL_TOKENS` | `maxRecallTokens` | number \| null | `null` |
 | `PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE` | `recallPromptPreamble` | string | *(see defaults)* |
-| `PI_HINDSIGHT_RECALL_SHOW_DATETIME` | `recallShowDateTime` | boolean | `true` |
+| `PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME` | `autoRecallShowDateTime` | boolean | `true` |
 | `PI_HINDSIGHT_AUTO_RECALL_DISPLAY` | `autoRecallDisplay` | boolean | `false` |
 | `PI_HINDSIGHT_AUTO_RECALL_PERSIST` | `autoRecallPersist` | boolean | `false` |
 | `PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS` | `recallMaxQueryChars` | number | `800` |
-| `PI_HINDSIGHT_RECALL_TYPES` | `recallTypes` | string[] (JSON) | `["observation"]` |
+| `PI_HINDSIGHT_AUTO_RECALL_TYPES` | `autoRecallTypes` | string[] (JSON) | `["observation"]` |
 | `PI_HINDSIGHT_AUTO_RECALL_TAGS` | `autoRecallTags` | string[] (JSON) | `null` |
 | `PI_HINDSIGHT_AUTO_RECALL_TAGS_MATCH` | `autoRecallTagsMatch` | string | `"any"` |
 | `PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS` | `autoRecallTagGroups` | TagGroupInput[] (JSON) | `null` |
@@ -632,7 +632,7 @@ Configuration options can also be set via environment variables (override config
 
 The official Hindsight integrations make some different default choices:
 
-- **Recall types**: The OpenClaw integration defaults to recalling `world` and `experience` types (excluding verbose observation entries by default, per the OpenClaw integration README). This plugin defaults to `observation` only, since observations are deduplicated consolidated information. You can try either approach — set `recallTypes` to `["world", "experience"]`, `["observation"]`, or `null` (all types) depending on what works best for your use case.
+- **Recall types**: The OpenClaw integration defaults to recalling `world` and `experience` types (excluding verbose observation entries by default, per the OpenClaw integration README). This plugin defaults to `observation` only, since observations are deduplicated consolidated information. You can try either approach — set `autoRecallTypes` to `["world", "experience"]`, `["observation"]`, or `null` (all types) depending on what works best for your use case.
 
 - **hindsight-embed setup**: This plugin does not automatically set up or manage [hindsight-embed](https://github.com/vectorize-io/hindsight-embed). You need to create profiles, banks, and configure hindsight-embed yourself before using this plugin. See [Local Quickstart](#local-quickstart) for setup instructions.
 

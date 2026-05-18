@@ -379,7 +379,7 @@ describe("hindsight_recall", () => {
 
     await recallTool!.execute("tc1", { query: "test" }, undefined, undefined, ctx);
 
-    // Should have been called with config defaults (recallTypes: ["observation"])
+    // Should have been called with config defaults (autoRecallTypes: ["observation"])
     expect(recallMock).toHaveBeenCalled();
     const callArgs = recallMock.mock.calls[0]![0]!;
     expect(callArgs.types).toEqual(["observation"]);
@@ -555,7 +555,7 @@ describe("hindsight_recall parameter forwarding", () => {
     await recallTool!.execute("tc1", { query: "test" }, undefined, undefined, ctx);
 
     const callArgs = recallMock.mock.calls[0]![0]!;
-    // testConfig.recallTypes = ["observation"]
+    // testConfig.autoRecallTypes = ["observation"]
     expect(callArgs.types).toEqual(["observation"]);
   });
 

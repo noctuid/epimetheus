@@ -213,7 +213,7 @@ export function registerTools(
         _ctx
       ): Promise<AgentToolResult<RecallDetails>> {
         // Use config default if not specified, otherwise use params
-        const types = params.types ?? config.recallTypes ?? undefined;
+        const types = params.types ?? config.autoRecallTypes ?? undefined;
         const result = await client.recall(
           {
             query: params.query,

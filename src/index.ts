@@ -370,9 +370,9 @@ export default function (pi: ExtensionAPI) {
     );
     const recallConfig: AutoRecallConfig = {
       recallMaxQueryChars: config.recallMaxQueryChars,
-      recallTypes: config.recallTypes,
+      autoRecallTypes: config.autoRecallTypes,
       recallPromptPreamble: config.recallPromptPreamble,
-      recallShowDateTime: config.recallShowDateTime,
+      autoRecallShowDateTime: config.autoRecallShowDateTime,
       autoRecallTags: expandedTags,
       autoRecallTagsMatch: config.autoRecallTagsMatch,
       autoRecallTagGroups: expandedTagGroups,
@@ -658,9 +658,9 @@ export interface RecallClient {
  */
 export interface AutoRecallConfig {
   recallMaxQueryChars: number;
-  recallTypes: ("world" | "experience" | "observation")[] | null;
+  autoRecallTypes: ("world" | "experience" | "observation")[] | null;
   recallPromptPreamble: string;
-  recallShowDateTime: boolean;
+  autoRecallShowDateTime: boolean;
   autoRecallTags: string[] | null;
   autoRecallTagsMatch: "any" | "all" | "any_strict" | "all_strict";
   autoRecallTagGroups: TagGroupInput[] | null;
@@ -699,7 +699,7 @@ export async function doAutoRecallImpl(
     const result = await client.recall(
       {
         query: truncatedQuery,
-        types: config.recallTypes ?? undefined,
+        types: config.autoRecallTypes ?? undefined,
         tags: config.autoRecallTags ?? undefined,
         tagsMatch: config.autoRecallTags ? config.autoRecallTagsMatch : undefined,
         tagGroups: config.autoRecallTagGroups ?? undefined,
@@ -720,7 +720,7 @@ export async function doAutoRecallImpl(
       const recallMessage = formatRecallMessage(
         results,
         config.recallPromptPreamble,
-        config.recallShowDateTime,
+        config.autoRecallShowDateTime,
         display
       );
       // Cache recall details for show-recall command

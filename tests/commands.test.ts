@@ -203,8 +203,8 @@ describe("registerCommands", () => {
       expect(lastNotification?.message).toContain("Session ID: none");
     });
 
-    it("shows 'Types: all' when recallTypes is null", async () => {
-      register({ ...statusTestConfig, recallTypes: null });
+    it("shows 'Types: all' when autoRecallTypes is null", async () => {
+      register({ ...statusTestConfig, autoRecallTypes: null });
       await getHandler()("status", makeCtx());
       expect(lastNotification?.message).toContain("Types: all");
     });
