@@ -91,7 +91,7 @@ describe("validateConfig", () => {
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
     expect(result.errors).toContain(
-      "apiUrl is required (set in config.json or HINDSIGHT_API_URL env var)"
+      "pi-hindsight: apiUrl is required (set in config.json or HINDSIGHT_API_URL env var)"
     );
   });
 
@@ -100,7 +100,7 @@ describe("validateConfig", () => {
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
     expect(result.errors).toContain(
-      "apiKey is required (set in config.json or HINDSIGHT_API_KEY env var)"
+      "pi-hindsight: apiKey is required (set in config.json or HINDSIGHT_API_KEY env var)"
     );
   });
 
@@ -109,7 +109,7 @@ describe("validateConfig", () => {
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
     expect(result.errors).toContain(
-      "bankId is required (set in config.json or PI_HINDSIGHT_BANK_ID env var)"
+      "pi-hindsight: bankId is required (set in config.json or PI_HINDSIGHT_BANK_ID env var)"
     );
   });
 
@@ -151,28 +151,35 @@ describe("validateConfig", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("errors when retainContent.user is empty", () => {
+  it("warns when retainContent.user is empty", () => {
     const config = {
       ...validConfig,
-      retainContent: { ...validConfig.retainContent, user: [] },
+      retainContent: { ...validConfig.retainContent, user: [] as ("text" | "image")[] },
     };
     const result = validateConfig(config);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain(
-      "retainContent.user cannot be empty (at least one content type required)"
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      'pi-hindsight: retainContent.user cannot be empty. Using default: ["text"].'
     );
+    expect(config.retainContent.user).toEqual(["text"]);
   });
 
-  it("errors when retainContent.assistant is empty", () => {
+  it("warns when retainContent.assistant is empty", () => {
     const config = {
       ...validConfig,
-      retainContent: { ...validConfig.retainContent, assistant: [] },
+      retainContent: {
+        ...validConfig.retainContent,
+        assistant: [] as ("text" | "thinking" | "toolCall")[],
+      },
     };
     const result = validateConfig(config);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain(
-      "retainContent.assistant cannot be empty (at least one content type required)"
-    );
+    expect(result.valid).toBe(true);
+    expect(
+      result.warnings.some((w) =>
+        w.includes("retainContent.assistant cannot be empty. Using default:")
+      )
+    ).toBe(true);
+    expect(config.retainContent.assistant).toEqual(["text", "thinking", "toolCall"]);
   });
 
   it("allows empty retainContent.toolResult", () => {
@@ -189,7 +196,7 @@ describe("validateConfig", () => {
     const result = validateConfig(config);
     expect(result.valid).toBe(true);
     expect(result.warnings).toContain(
-      "autoRecallDisplay: true will not show new recall messages when autoRecallPersist: false (new recalls are ephemeral and not added to chat; only the most recent is available via /hindsight popup). However, autoRecallDisplay still affects rendering of previously persisted recall messages in session files (e.g. when enabled: false)."
+      "pi-hindsight: autoRecallDisplay: true will not show new recall messages when autoRecallPersist: false (new recalls are ephemeral and not added to chat; only the most recent is available via /hindsight popup). However, autoRecallDisplay still affects rendering of previously persisted recall messages in session files (e.g. when enabled: false)."
     );
   });
 
@@ -200,11 +207,14 @@ describe("validateConfig", () => {
     expect(result.warnings).toHaveLength(0);
   });
 
-  it("errors when hindsightContextMaxLength is negative", () => {
+  it("warns when hindsightContextMaxLength is negative", () => {
     const config = { ...validConfig, hindsightContextMaxLength: -1 };
     const result = validateConfig(config);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain("hindsightContextMaxLength must be >= 0");
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      "pi-hindsight: hindsightContextMaxLength must be >= 0. Using default: 100."
+    );
+    expect(config.hindsightContextMaxLength).toBe(100);
   });
 
   it("allows empty string for hindsightContextPrefix", () => {
@@ -221,7 +231,17 @@ describe("validateConfig", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("errors when retainContent has duplicates", () => {
+  it("warns when recallMaxQueryChars is less than 1", () => {
+    const config = { ...validConfig, recallMaxQueryChars: 0 };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      "pi-hindsight: recallMaxQueryChars must be >= 1. Using default: 800."
+    );
+    expect(config.recallMaxQueryChars).toBe(800);
+  });
+
+  it("warns when retainContent has duplicates", () => {
     const config = {
       ...validConfig,
       retainContent: {
@@ -231,11 +251,14 @@ describe("validateConfig", () => {
       },
     };
     const result = validateConfig(config);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain("retainContent.assistant contains duplicate values");
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      "pi-hindsight: retainContent.assistant contains duplicate values. Using deduplicated value."
+    );
+    expect(config.retainContent.assistant).toEqual(["text"]);
   });
 
-  it("errors when strip has duplicates", () => {
+  it("warns when strip has duplicates", () => {
     const config = {
       ...validConfig,
       strip: {
@@ -244,12 +267,15 @@ describe("validateConfig", () => {
       },
     };
     const result = validateConfig(config);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain("strip.topLevel contains duplicate values");
-    expect(result.warnings).toHaveLength(0);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      "pi-hindsight: strip.topLevel contains duplicate values. Using deduplicated value."
+    );
+    expect(config.strip.topLevel).toEqual(["type"]);
+    expect(result.errors).toHaveLength(0);
   });
 
-  it("errors when autoRecallTypes has duplicates", () => {
+  it("warns when autoRecallTypes has duplicates", () => {
     const config = {
       ...validConfig,
       autoRecallTypes: ["observation", "observation"] as
@@ -257,8 +283,11 @@ describe("validateConfig", () => {
         | null,
     };
     const result = validateConfig(config);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain("autoRecallTypes contains duplicate values");
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      "pi-hindsight: autoRecallTypes contains duplicate values. Using deduplicated value."
+    );
+    expect(config.autoRecallTypes).toEqual(["observation"]);
   });
 
   it("allows null autoRecallTypes (means all types)", () => {
@@ -268,6 +297,322 @@ describe("validateConfig", () => {
     };
     const result = validateConfig(config);
     expect(result.valid).toBe(true);
+  });
+});
+
+describe("validateConfig resets invalid values to defaults", () => {
+  it("hindsightContextMaxLength -5 → reset to 100", () => {
+    const config = { ...validConfig, hindsightContextMaxLength: -5 };
+    const { warnings } = validateConfig(config);
+    expect(config.hindsightContextMaxLength).toBe(100);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it("recallMaxQueryChars 0 → reset to 800", () => {
+    const config = { ...validConfig, recallMaxQueryChars: 0 };
+    const { warnings } = validateConfig(config);
+    expect(config.recallMaxQueryChars).toBe(800);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it('retainContent.user [] → reset to ["text"]', () => {
+    const config = {
+      ...validConfig,
+      retainContent: { ...validConfig.retainContent, user: [] as ("text" | "image")[] },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.retainContent.user).toEqual(["text"]);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it("retainContent.assistant [] → reset to default", () => {
+    const config = {
+      ...validConfig,
+      retainContent: {
+        ...validConfig.retainContent,
+        assistant: [] as ("text" | "thinking" | "toolCall")[],
+      },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.retainContent.assistant).toEqual(["text", "thinking", "toolCall"]);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it('retainContent.assistant ["text", "text"] → deduplicated to ["text"]', () => {
+    const config = {
+      ...validConfig,
+      retainContent: {
+        ...validConfig.retainContent,
+        assistant: ["text", "text"] as ("text" | "thinking" | "toolCall")[],
+      },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.retainContent.assistant).toEqual(["text"]);
+    expect(warnings.some((w) => w.includes("Using deduplicated value"))).toBe(true);
+  });
+
+  it('strip.topLevel ["type", "type"] → deduplicated to ["type"]', () => {
+    const config = {
+      ...validConfig,
+      strip: { ...validConfig.strip, topLevel: ["type", "type"] },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.strip.topLevel).toEqual(["type"]);
+    expect(warnings.some((w) => w.includes("Using deduplicated value"))).toBe(true);
+  });
+
+  it("toolFilter.toolCall { include: [] } → reset to default", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      toolFilter: { toolCall: { include: [] } },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it("toolFilter.toolCall both include+exclude → reset to default", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      toolFilter: {
+        toolCall: { include: ["bash"], exclude: ["read"] } as unknown as ToolFilterMode,
+      },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it('autoRecallTypes ["observation", "observation"] → deduplicated', () => {
+    const config = {
+      ...validConfig,
+      autoRecallTypes: ["observation", "observation"] as ("world" | "experience" | "observation")[],
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.autoRecallTypes).toEqual(["observation"]);
+    expect(warnings.some((w) => w.includes("Using deduplicated value"))).toBe(true);
+  });
+
+  it('autoRecallTagsMatch "invalid" → reset to "any"', () => {
+    const config = {
+      ...validConfig,
+      autoRecallTags: ["project:myapp"],
+      autoRecallTagsMatch: "invalid" as unknown as import("../src/config").TagsMatch,
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.autoRecallTagsMatch).toBe("any");
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it('observationScopes "invalid_preset" → reset to null → error', () => {
+    const config = {
+      ...validConfig,
+      observationScopes: "invalid_preset" as unknown as HindsightConfig["observationScopes"],
+    };
+    const { warnings, errors } = validateConfig(config);
+    expect(config.observationScopes).toBeNull();
+    expect(warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(errors).toContain(
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
+  });
+
+  it("observationScopes [] → reset to null → error", () => {
+    const config = {
+      ...validConfig,
+      observationScopes: [] as HindsightConfig["observationScopes"],
+    };
+    const { warnings, errors } = validateConfig(config);
+    expect(config.observationScopes).toBeNull();
+    expect(warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(errors).toContain(
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
+  });
+
+  it('observationScopes [["valid"], []] → reset to null → error', () => {
+    const config = {
+      ...validConfig,
+      observationScopes: [["valid"], []] as HindsightConfig["observationScopes"],
+    };
+    const { warnings, errors } = validateConfig(config);
+    expect(config.observationScopes).toBeNull();
+    expect(warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(errors).toContain(
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
+  });
+
+  it("retainContent with missing user property → reset to default", () => {
+    const config = {
+      ...validConfig,
+      retainContent: { assistant: ["text"] as ("text" | "thinking" | "toolCall")[] },
+    } as unknown as HindsightConfig;
+    const { warnings } = validateConfig(config);
+    expect(config.retainContent.user).toEqual(["text"]);
+    expect(
+      warnings.some((w) => w.includes("retainContent.user") && w.includes("Using default"))
+    ).toBe(true);
+  });
+
+  it("retainContent with missing assistant property → reset to default", () => {
+    const config = {
+      ...validConfig,
+      retainContent: { user: ["text"] as ("text" | "image")[] },
+    } as unknown as HindsightConfig;
+    const { warnings } = validateConfig(config);
+    expect(config.retainContent.assistant).toEqual(["text", "thinking", "toolCall"]);
+    expect(
+      warnings.some((w) => w.includes("retainContent.assistant") && w.includes("Using default"))
+    ).toBe(true);
+  });
+
+  it("strip with missing topLevel property → does not crash", () => {
+    const config = {
+      ...validConfig,
+      strip: { message: ["api"] },
+    } as unknown as HindsightConfig;
+    const { valid } = validateConfig(config);
+    expect(valid).toBe(true);
+  });
+
+  it("autoRecallTypes with invalid type values → reset to default", () => {
+    const config = {
+      ...validConfig,
+      autoRecallTypes: ["observation", "invalid_type"] as (
+        | "world"
+        | "experience"
+        | "observation"
+      )[],
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.autoRecallTypes).toEqual(["observation"]);
+    expect(warnings.some((w) => w.includes("autoRecallTypes") && w.includes("Using default"))).toBe(
+      true
+    );
+  });
+
+  it("retainContent.user as object (not array) → reset to default", () => {
+    const config = {
+      ...validConfig,
+      retainContent: {
+        user: {} as unknown as ("text" | "image")[],
+        assistant: ["text"] as ("text" | "thinking" | "toolCall")[],
+        toolResult: [] as "text"[],
+      },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.retainContent.user).toEqual(["text"]);
+    expect(
+      warnings.some((w) => w.includes("retainContent.user") && w.includes("not an array"))
+    ).toBe(true);
+  });
+
+  it("strip.topLevel as string (not array) → reset to default", () => {
+    const config = {
+      ...validConfig,
+      strip: {
+        topLevel: "type" as unknown as string[],
+        message: ["api"],
+      },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.strip.topLevel).toEqual(["type", "id", "parentId"]);
+    expect(warnings.some((w) => w.includes("strip.topLevel") && w.includes("not an array"))).toBe(
+      true
+    );
+  });
+
+  it("toolFilter.toolCall as number (not object) → reset to default", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      toolFilter: { toolCall: 42 as unknown as import("../src/config").ToolFilterMode },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
+    expect(
+      warnings.some((w) => w.includes("toolFilter.toolCall") && w.includes("must be an object"))
+    ).toBe(true);
+  });
+
+  it("toolFilter.toolCall include as number (not array) → reset to default", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      toolFilter: { toolCall: { include: 42 as unknown as string[] } },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
+    expect(
+      warnings.some(
+        (w) => w.includes("toolFilter.toolCall.include") && w.includes("must be a string array")
+      )
+    ).toBe(true);
+  });
+
+  it('retainContent.user ["bogus"] → reset to default', () => {
+    const config = {
+      ...validConfig,
+      retainContent: {
+        user: ["bogus"] as unknown as ("text" | "image")[],
+        assistant: ["text"] as ("text" | "thinking" | "toolCall")[],
+        toolResult: [] as "text"[],
+      },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.retainContent.user).toEqual(["text"]);
+    expect(
+      warnings.some((w) => w.includes("retainContent.user") && w.includes("invalid values"))
+    ).toBe(true);
+  });
+
+  it("toolFilter.toolCall include: [42] → reset to default", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      toolFilter: { toolCall: { include: [42] as unknown as string[] } },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
+    expect(
+      warnings.some(
+        (w) => w.includes("toolFilter.toolCall.include") && w.includes("must contain only strings")
+      )
+    ).toBe(true);
+  });
+
+  it("strip.topLevel: [42] → reset to default", () => {
+    const config = {
+      ...validConfig,
+      strip: { topLevel: [42] as unknown as string[], message: ["api"] },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.strip.topLevel).toEqual(["type", "id", "parentId"]);
+    expect(warnings.some((w) => w.includes("strip.topLevel") && w.includes("non-string"))).toBe(
+      true
+    );
+  });
+
+  it("toolFilter: { toolCall: null } → reset to default", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      toolFilter: { toolCall: null as unknown as import("../src/config").ToolFilterMode },
+    };
+    const { warnings } = validateConfig(config);
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
+    expect(
+      warnings.some((w) => w.includes("toolFilter.toolCall") && w.includes("must be an object"))
+    ).toBe(true);
   });
 });
 
@@ -328,7 +673,7 @@ describe("loadConfig", () => {
 
     const { warning } = loadConfig(TEST_DIR);
     expect(warning).toBeDefined();
-    expect(warning).toContain("Failed to parse config file");
+    expect(warning).toContain("pi-hindsight: Failed to parse config file");
   });
 
   it("returns warning for unknown config keys", () => {
@@ -342,7 +687,8 @@ describe("loadConfig", () => {
     );
 
     const { warning } = loadConfig(TEST_DIR);
-    expect(warning).toContain("Unknown config key in file: unknownKey");
+    expect(warning).toContain("pi-hindsight: Unknown config key in file: unknownKey");
+    expect(warning).toContain('(value: "value")');
   });
 
   it("rejects projectName in config file (PI_HINDSIGHT_PROJECT_NAME is env-only)", () => {
@@ -356,7 +702,8 @@ describe("loadConfig", () => {
     );
 
     const { warning } = loadConfig(TEST_DIR);
-    expect(warning).toContain("Unknown config key in file: projectName");
+    expect(warning).toContain("pi-hindsight: Unknown config key in file: projectName");
+    expect(warning).toContain('(value: "my-project")');
   });
 
   it("uses defaults when no config file exists", () => {
@@ -1521,13 +1868,13 @@ describe("loadConfig", () => {
     process.env.PI_HINDSIGHT_TOOL_FILTER = "not-json";
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(warning).toContain("toolFilter contains invalid JSON");
+    expect(warning).toContain("pi-hindsight: toolFilter contains invalid JSON");
     // Falls back to default (not empty {}) on parse errors
     expect((config.toolFilter.toolCall as { exclude: string[] }).exclude).toContain("grep");
     expect((config.toolFilter.toolResult as { exclude: string[] }).exclude).toContain("grep");
   });
 
-  it("toolFilter with both include and exclude is a validation error", () => {
+  it("toolFilter with both include and exclude is a validation warning", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -1535,11 +1882,16 @@ describe("loadConfig", () => {
       },
     };
 
-    const { errors } = validateConfig(config);
-    expect(errors).toContain("toolFilter.toolCall cannot have both 'include' and 'exclude'");
+    const { warnings } = validateConfig(config);
+    expect(warnings).toContain(
+      'pi-hindsight: toolFilter.toolCall cannot have both \'include\' and \'exclude\'. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
+    );
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
   });
 
-  it("toolFilter with empty include list is a validation error", () => {
+  it("toolFilter with empty include list is a validation warning", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -1547,13 +1899,16 @@ describe("loadConfig", () => {
       },
     };
 
-    const { errors } = validateConfig(config);
-    expect(errors).toContain(
-      "toolFilter.toolCall.include cannot be empty (use exclude instead, or remove the filter)"
+    const { warnings } = validateConfig(config);
+    expect(warnings).toContain(
+      'pi-hindsight: toolFilter.toolCall.include cannot be empty. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
     );
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
   });
 
-  it("toolFilter with empty exclude list is a validation error", () => {
+  it("toolFilter with empty exclude list is a validation warning", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -1561,13 +1916,25 @@ describe("loadConfig", () => {
       },
     };
 
-    const { errors } = validateConfig(config);
-    expect(errors).toContain(
-      "toolFilter.toolResult.exclude cannot be empty (use include instead, or remove the filter)"
+    const { warnings } = validateConfig(config);
+    expect(warnings).toContain(
+      'pi-hindsight: toolFilter.toolResult.exclude cannot be empty. Using default: {"exclude":["grep","find","ls","write","edit","hindsight_retain","hindsight_recall","hindsight_reflect"]}.'
     );
+    expect(config.toolFilter.toolResult).toEqual({
+      exclude: [
+        "grep",
+        "find",
+        "ls",
+        "write",
+        "edit",
+        "hindsight_retain",
+        "hindsight_recall",
+        "hindsight_reflect",
+      ],
+    });
   });
 
-  it("toolFilter with unknown keys is a validation error", () => {
+  it("toolFilter with unknown keys is a validation warning", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -1575,13 +1942,16 @@ describe("loadConfig", () => {
       },
     };
 
-    const { errors } = validateConfig(config);
-    expect(errors).toContain(
-      "toolFilter.toolCall has unknown key 'blocklist' (only 'include' and 'exclude' are allowed)"
+    const { warnings } = validateConfig(config);
+    expect(warnings).toContain(
+      'pi-hindsight: toolFilter.toolCall has unknown key \'blocklist\'. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
     );
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
   });
 
-  it("toolFilter sub-object without include or exclude is a validation error", () => {
+  it("toolFilter sub-object without include or exclude is a validation warning", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -1589,8 +1959,13 @@ describe("loadConfig", () => {
       },
     };
 
-    const { errors } = validateConfig(config);
-    expect(errors).toContain("toolFilter.toolCall must have either 'include' or 'exclude'");
+    const { warnings } = validateConfig(config);
+    expect(warnings).toContain(
+      'pi-hindsight: toolFilter.toolCall must have either \'include\' or \'exclude\'. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
+    );
+    expect(config.toolFilter.toolCall).toEqual({
+      exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
+    });
   });
 
   it("warns on invalid toolFilter type in config file", () => {
@@ -1606,7 +1981,7 @@ describe("loadConfig", () => {
     const { config, warning } = loadConfig(TEST_DIR);
     // Falls back to default
     expect((config.toolFilter.toolCall as { exclude: string[] }).exclude).toContain("grep");
-    expect(warning).toContain("toolFilter must be an object, got number");
+    expect(warning).toContain("pi-hindsight: toolFilter must be an object, got number");
   });
 
   it("does not warn on null toolFilter (might be intentional)", () => {
@@ -1651,13 +2026,12 @@ describe("loadConfig", () => {
 });
 
 describe("observationScopes", () => {
-  it("defaults to null (invalid — must be set)", () => {
+  it("defaults to null (error — required for plugin to function)", () => {
     const { config } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    const { valid, errors } = validateConfig(config);
-    expect(valid).toBe(false);
+    const { errors } = validateConfig(config);
     expect(errors).toContain(
-      "observationScopes: is required (must be a preset string or an array of tag arrays)"
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
     );
   });
 
@@ -1693,16 +2067,16 @@ describe("observationScopes", () => {
       JSON.stringify({
         apiUrl: "https://test.test",
         apiKey: "test-key",
+        bankId: "test-bank",
         observationScopes: null,
       })
     );
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("observationScopes is required");
-    const { valid, errors } = validateConfig(config);
-    expect(valid).toBe(false);
+    expect(warning).toContain("pi-hindsight: observationScopes is required");
+    const { errors } = validateConfig(config);
     expect(errors).toContain(
-      "observationScopes: is required (must be a preset string or an array of tag arrays)"
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
     );
   });
 
@@ -1720,13 +2094,15 @@ describe("observationScopes", () => {
 
   it("rejects null from env var (loadConfig warns, validateConfig errors)", () => {
     process.env.PI_HINDSIGHT_OBSERVATION_SCOPES = "null";
+    process.env.HINDSIGHT_API_URL = "https://test.test";
+    process.env.HINDSIGHT_API_KEY = "test-key";
+    process.env.PI_HINDSIGHT_BANK_ID = "test-bank";
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("observationScopes is required");
-    const { valid, errors } = validateConfig(config);
-    expect(valid).toBe(false);
+    expect(warning).toContain("pi-hindsight: observationScopes is required");
+    const { errors } = validateConfig(config);
     expect(errors).toContain(
-      "observationScopes: is required (must be a preset string or an array of tag arrays)"
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
     );
   });
 
@@ -1734,7 +2110,7 @@ describe("observationScopes", () => {
     process.env.PI_HINDSIGHT_OBSERVATION_SCOPES = "invalid_value";
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("observationScopes");
+    expect(warning).toContain("pi-hindsight: observationScopes is required");
   });
 
   it("supports placeholder syntax in arrays", () => {
@@ -1776,7 +2152,7 @@ describe("observationScopes", () => {
     );
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("observationScopes");
+    expect(warning).toContain("pi-hindsight: observationScopes is required");
   });
 
   it("rejects empty inner array", () => {
@@ -1790,7 +2166,7 @@ describe("observationScopes", () => {
     );
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("observationScopes");
+    expect(warning).toContain("pi-hindsight: observationScopes is required");
   });
 
   it("rejects non-array inner values", () => {
@@ -1804,7 +2180,7 @@ describe("observationScopes", () => {
     );
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("observationScopes");
+    expect(warning).toContain("pi-hindsight: observationScopes is required");
   });
 
   it("warns on non-exact placeholder in tag string", () => {
@@ -1847,48 +2223,73 @@ describe("validateConfig for observationScopes", () => {
     expect(result.errors).toHaveLength(0);
   });
 
-  it("rejects null observationScopes", () => {
+  it("errors on null observationScopes", () => {
     const result = validateConfig({
       ...validConfig,
       observationScopes: null,
     });
     expect(result.valid).toBe(false);
     expect(result.errors).toContain(
-      "observationScopes: is required (must be a preset string or an array of tag arrays)"
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
     );
   });
 
-  it("rejects empty top-level array", () => {
-    const result = validateConfig({
+  it("warns on empty top-level array", () => {
+    const config = {
       ...validConfig,
       observationScopes: [] as HindsightConfig["observationScopes"],
-    });
+    };
+    const result = validateConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.errors).toContain("observationScopes: array must not be empty");
+    expect(result.warnings).toContain(
+      "pi-hindsight: observationScopes: array must not be empty. Using default (null)."
+    );
+    expect(config.observationScopes).toBeNull();
+    expect(result.errors).toContain(
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
   });
 
-  it("rejects empty inner array", () => {
-    const result = validateConfig({
+  it("warns on empty inner array", () => {
+    const config = {
       ...validConfig,
       observationScopes: [["session:abc"], []] as HindsightConfig["observationScopes"],
-    });
+    };
+    const result = validateConfig(config);
     expect(result.valid).toBe(false);
+    expect(result.warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(config.observationScopes).toBeNull();
+    expect(result.errors).toContain(
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
   });
 
-  it("rejects invalid preset string", () => {
-    const result = validateConfig({
+  it("warns on invalid preset string", () => {
+    const config = {
       ...validConfig,
       observationScopes: "invalid" as unknown as HindsightConfig["observationScopes"],
-    });
+    };
+    const result = validateConfig(config);
     expect(result.valid).toBe(false);
+    expect(result.warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(config.observationScopes).toBeNull();
+    expect(result.errors).toContain(
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
   });
 
-  it("rejects non-string/array value", () => {
-    const result = validateConfig({
+  it("warns on non-string/array value", () => {
+    const config = {
       ...validConfig,
       observationScopes: 42 as unknown as HindsightConfig["observationScopes"],
-    });
+    };
+    const result = validateConfig(config);
     expect(result.valid).toBe(false);
+    expect(result.warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(config.observationScopes).toBeNull();
+    expect(result.errors).toContain(
+      "pi-hindsight: observationScopes is required (must be a preset string or an array of tag arrays)"
+    );
   });
 
   it("warns on non-exact placeholder in tag string", () => {
@@ -2217,9 +2618,10 @@ describe("autoRecallTags", () => {
     const { config } = loadConfig(TEST_DIR);
     expect(config.autoRecallTags).toEqual(["{project}:extra", "user:alice"]);
     const { warnings } = validateConfig(config);
-    expect(warnings.length).toBeGreaterThan(0);
-    expect(warnings[0]).toContain("{project}");
-    expect(warnings[0]).toContain("standalone");
+    const tagWarning = warnings.find((w) => w.includes("autoRecallTags"));
+    expect(tagWarning).toBeDefined();
+    expect(tagWarning!).toContain("{project}");
+    expect(tagWarning!).toContain("standalone");
   });
 
   it("warns on non-string items in autoRecallTags config file", () => {
@@ -2233,19 +2635,20 @@ describe("autoRecallTags", () => {
     );
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.autoRecallTags).toBe(null);
-    expect(warning).toContain("autoRecallTags must be a JSON array of strings");
+    expect(warning).toContain("pi-hindsight: autoRecallTags must be a JSON array of strings");
   });
 
-  it("validateConfig errors on invalid autoRecallTagsMatch", () => {
+  it("validateConfig warns on invalid autoRecallTagsMatch", () => {
     const config = {
       ...validConfig,
       autoRecallTags: ["project:myapp"],
       autoRecallTagsMatch: "invalid" as unknown as import("../src/config").TagsMatch,
     };
-    const { errors } = validateConfig(config);
-    expect(errors).toContain(
-      'autoRecallTagsMatch: invalid value "invalid". Expected one of: any, all, any_strict, all_strict'
+    const { warnings } = validateConfig(config);
+    expect(warnings).toContain(
+      'pi-hindsight: autoRecallTagsMatch: invalid value "invalid". Expected one of: any, all, any_strict, all_strict. Using default: any.'
     );
+    expect(config.autoRecallTagsMatch).toBe("any");
   });
 });
 
@@ -2600,9 +3003,10 @@ describe("autoRecallTagGroups", () => {
     const { config } = loadConfig(TEST_DIR);
     expect(config.autoRecallTagGroups).toEqual([{ tags: ["{project}:extra"] }]);
     const { warnings } = validateConfig(config);
-    expect(warnings.length).toBeGreaterThan(0);
-    expect(warnings[0]).toContain("{project}");
-    expect(warnings[0]).toContain("standalone");
+    const tagWarning = warnings.find((w) => w.includes("autoRecallTagGroups"));
+    expect(tagWarning).toBeDefined();
+    expect(tagWarning!).toContain("{project}");
+    expect(tagWarning!).toContain("standalone");
   });
 
   it("validates non-exact placeholder in nested not group", () => {
@@ -2616,8 +3020,9 @@ describe("autoRecallTagGroups", () => {
     );
     const { config } = loadConfig(TEST_DIR);
     const { warnings } = validateConfig(config);
-    expect(warnings.length).toBeGreaterThan(0);
-    expect(warnings[0]).toContain("{session}");
+    const tagWarning = warnings.find((w) => w.includes("autoRecallTagGroups"));
+    expect(tagWarning).toBeDefined();
+    expect(tagWarning!).toContain("{session}");
   });
 
   it("warns when both autoRecallTags and autoRecallTagGroups are set", () => {

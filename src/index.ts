@@ -112,20 +112,20 @@ export default function (pi: ExtensionAPI) {
 
   let client: HindsightClientWrapper | null = null;
 
-  if (!validation.valid) {
-    console.error(`pi-hindsight disabled: ${validation.errors.join(", ")}`);
-  } else {
-    if (warning) {
-      console.warn(warning);
-    }
-    if (validation.warnings && validation.warnings.length > 0) {
-      for (const w of validation.warnings) {
-        console.warn(w);
-      }
+  if (warning) {
+    console.warn(warning);
+  }
+  if (validation.warnings && validation.warnings.length > 0) {
+    for (const w of validation.warnings) {
+      console.warn(w);
     }
   }
 
-  if (validation.valid) {
+  if (!validation.valid) {
+    for (const error of validation.errors) {
+      console.error(error);
+    }
+  } else {
     client = new HindsightClientWrapper(config);
     console.log("pi-hindsight initialized");
   }
