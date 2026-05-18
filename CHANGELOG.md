@@ -8,7 +8,8 @@
 - **Selective tool registration via `toolsEnabled`** — `toolsEnabled` now accepts an array of tool names (e.g. `["retain", "recall"]`) to register only listed tools. Boolean `true`/`false` behavior is preserved.
 - **`hindsight_retain` tool visibility** — The `hindsight_retain` tool is now proactively hidden via `pi.setActiveTools()` when the session is not retained, instead of showing an error on execution. Visibility is updated on `session_start` and `toggle-retain`.
 - **Retention toggle confirmation** — Toggling retention off now warns that queued messages will be deleted and asks for confirmation.
-- **Retained content in tool UI** — `hindsight_retain` now shows the actual retained content (dimmed, truncated to 200 chars) in the TUI alongside the success indicator.
+- **Retained content in tool UI** — `hindsight_retain` now shows the full retained content (dimmed) in the TUI alongside the success indicator.
+- **Config validation is non-fatal for most settings** — Invalid values now produce warnings and reset to defaults instead of disabling the plugin. Only `apiUrl`, `apiKey`, `bankId`, and missing `observationScopes` remain as errors. Warnings now include the fallback value. Also fixes several validation bugs: shallow copy bug sharing references with `DEFAULT_CONFIG`, crash on missing `retainContent`/`strip` sub-properties, suppressed warnings when config is invalid, and more.
 
 ### Deprecations
 

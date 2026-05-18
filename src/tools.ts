@@ -107,9 +107,8 @@ export function registerTools(
         const details = result.details as RetainDetails;
         if (details.success) {
           const retained = context.args.content ?? "";
-          const preview = retained.length > 200 ? `${retained.slice(0, 200)}...` : retained;
           text.setText(
-            `${theme.fg("success", "✓ Memory queued for storage")}\n${theme.fg("dim", preview)}`
+            `${theme.fg("success", "✓ Memory queued for storage")}\n${theme.fg("dim", retained)}`
           );
         } else {
           text.setText(theme.fg("error", `✗ ${details.error ?? "Failed to store memory"}`));
