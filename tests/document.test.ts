@@ -405,7 +405,7 @@ describe("fork detection", () => {
     expect(result.warning).toBe("No new content in fork");
   });
 
-  it("filters hindsight-recall messages from forked sessions", () => {
+  it("filters custom-role messages from forked sessions", () => {
     // Parent session
     const parentPath = createSessionFile(
       "parent-no-recall.jsonl",
@@ -901,9 +901,10 @@ describe("content filtering", () => {
     expect(parsed[0].message.content[1].type).toBe("image");
   });
 
-  it("excludes hindsight-recall messages (injected context)", () => {
-    // hindsight-recall messages are injected by the extension during context events
-    // They should be filtered during parsing to match runtime filtering behavior
+  it("excludes custom-role messages (e.g. hindsight-recall)", () => {
+    // hindsight-recall entries use custom_message type (excluded by type check in
+    // isConversationMessage). This test uses type "message" with role "custom" to
+    // verify that custom-role messages are also excluded (by shouldRetainMessage).
     const recallEntry: SessionEntry = {
       type: "message",
       id: "recall-1",
@@ -1520,8 +1521,10 @@ describe("documentId is raw session ID (no session: prefix)", () => {
 // These tests verify that the same set of messages is excluded by both paths.
 
 describe("runtime/parsing filtering parity", () => {
-  it("both paths exclude hindsight-recall messages", () => {
+  it("both paths filter out hindsight-recall messages", () => {
     // Runtime path: context handler filters customType === "hindsight-recall"
+    // Parsing path: custom_message entries excluded by type check;
+    // custom-role messages excluded by shouldRetainMessage
     const runtimeMessages = [
       { role: "user", content: "Hello" },
       { role: "custom", customType: "hindsight-recall", content: "Old memory" },
@@ -1606,7 +1609,8 @@ describe("runtime/parsing filtering parity", () => {
     expect(parsed).toHaveLength(2); // user + assistant only
   });
 
-  it("both paths produce identical filtered sets for mixed messages", () => {
+  it("both paths filter out hindsight-recall from mixed messages", () => {
+    // Runtime path filters by customType; parsing path excludes by entry type and role
     // Runtime path
     const runtimeMessages = [
       { role: "user", content: "Hello" },

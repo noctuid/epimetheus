@@ -80,7 +80,8 @@ export function parseSessionFile(sessionPath: string): {
 
 /**
  * Check if an entry is a conversation message.
- * Excludes hindsight-recall messages (injected recall context, not user/assistant content).
+ * Only entries with type "message" are conversation messages;
+ * custom_message entries are excluded by the type check.
  */
 function isConversationMessage(
   entry: SessionEntry,
@@ -90,12 +91,7 @@ function isConversationMessage(
   if (entry.type !== "message" || entry.message === undefined) {
     return false;
   }
-  // Filter out hindsight-recall messages (injected context, not real conversation)
-  const message = entry.message as Record<string, unknown>;
-  if (message.customType === "hindsight-recall") {
-    return false;
-  }
-  return shouldRetainMessage(message, retainContent, toolFilter);
+  return shouldRetainMessage(entry.message, retainContent, toolFilter);
 }
 
 /**

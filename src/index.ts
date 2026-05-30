@@ -46,8 +46,18 @@ export function _resetState(): void {
 
 /**
  * Register a context handler that filters hindsight-recall messages from
- * being sent to the LLM. Used in both enabled and disabled modes to prevent
- * stale recall messages from polluting the model's context.
+ * being sent to the LLM. Only used in disabled mode.
+ *
+ * In enabled mode, the main context handler performs filtering as part of
+ * recall re-injection.
+ *
+ * This only matters when autoRecallPersist is true (the default is false) and
+ * old sessions with persisted entries are resumed. It is not a huge deal for
+ * sessions that are not resumed, but autoRecallPersist is off by default for
+ * this reason.
+ *
+ * If pi provided a way to render custom entries or to exclude custom_message
+ * entries from convertToLlm, this filter would not be needed.
  */
 function registerRecallFilter(pi: ExtensionAPI): void {
   pi.on("context", async (event) => {
@@ -249,8 +259,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Context event handler:
-  // 1. Always filter out hindsight-recall messages (prevent stale recalls from being sent to LLM)
-  // 2. Re-inject cached recall from before_agent_start (so the LLM sees fresh recall)
+  // 1. Always filter out hindsight-recall custom messages from being sent to the LLM
+  //    (only matters when autoRecallPersist is true and old sessions are resumed)
+  // 2. Re-inject cached recall from before_agent_start as the configured role
+  //    (user or assistant, per autoRecallRole config)
   pi.on("context", async (event, _ctx: ExtensionContext) => {
     const messages = event.messages as Array<{
       role: string;
@@ -258,20 +270,36 @@ export default function (pi: ExtensionAPI) {
       customType?: string;
     }>;
 
-    // Always filter out existing hindsight-recall messages from the messages array
+    // Always filter out existing hindsight-recall messages from the messages array.
     // This is critical to prevent old recall messages from being sent to the LLM
     const filteredMessages = messages.filter((msg) => msg.customType !== "hindsight-recall");
     const hadRecallMessages = filteredMessages.length !== messages.length;
 
     // Re-inject the cached recall from before_agent_start.
     // before_agent_start always does the recall and caches the message here.
-    // When autoRecallPersist: true, the message was also persisted to the session file;
-    // when autoRecallPersist: false, it's ephemeral (re-injected here only for this turn).
+    // When autoRecallPersist: true, the message was also persisted to the session file
+    // (as a custom_message for TUI display); when autoRecallPersist: false, it's
+    // ephemeral (re-injected here only for this turn).
+    // The recall is injected as the configured role (user or assistant) so the LLM
+    // receives it as a proper conversation message, not a custom message.
     const cachedRecall = lastRecallMessage;
     lastRecallMessage = null; // Clear after reading (consume once per turn)
     if (cachedRecall) {
       lastRecallDetails = cachedRecall.details;
-      return { messages: [...filteredMessages, cachedRecall] } as Record<string, unknown>;
+      // Content must be in the format expected by the provider:
+      // - user role: string or content array (pi's convertToLlm handles both)
+      // - assistant role: content array [{ type: "text", text: "..." }] (plain string
+      //   would fail because provider SDKs expect .flatMap on assistant content)
+      const recallContent =
+        config.autoRecallRole === "assistant"
+          ? [{ type: "text", text: cachedRecall.content }]
+          : cachedRecall.content;
+      const recallMessage: Record<string, unknown> = {
+        role: config.autoRecallRole,
+        content: recallContent,
+        timestamp: cachedRecall.timestamp,
+      };
+      return { messages: [...filteredMessages, recallMessage] } as Record<string, unknown>;
     }
 
     // If we filtered out recall messages but didn't re-inject, return filtered array

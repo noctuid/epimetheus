@@ -69,6 +69,9 @@ export type {
 /** Union of all tag group input types. */
 export type TagGroupInput = TagGroupLeaf | TagGroupAndInput | TagGroupOrInput | TagGroupNotInput;
 
+/** Role used when injecting auto-recall messages into the LLM context. */
+export type AutoRecallRole = "user" | "assistant";
+
 export type ToolName = "retain" | "recall" | "reflect";
 
 const VALID_TOOL_NAMES: ToolName[] = ["retain", "recall", "reflect"];
@@ -89,6 +92,7 @@ export interface HindsightConfig {
   autoRecallShowDateTime: boolean;
   autoRecallDisplay: boolean;
   autoRecallPersist: boolean;
+  autoRecallRole: AutoRecallRole;
   recallMaxQueryChars: number;
   autoRecallTypes: MemoryType[] | null;
   autoRecallTags: string[] | null;
@@ -121,10 +125,11 @@ const DEFAULT_CONFIG: HindsightConfig = {
   hindsightContextMaxLength: 100,
   maxRecallTokens: null,
   recallPromptPreamble:
-    "[System note: The following is recalled memory context, NOT new user input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]",
+    "[System note: The following is recalled memory context, NOT new user or assistant input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]",
   autoRecallShowDateTime: true,
   autoRecallDisplay: false,
   autoRecallPersist: false,
+  autoRecallRole: "user",
   recallMaxQueryChars: 800,
   autoRecallTypes: ["observation"],
   autoRecallTags: null,
@@ -180,6 +185,7 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "autoRecallShowDateTime",
   "autoRecallDisplay",
   "autoRecallPersist",
+  "autoRecallRole",
   "recallMaxQueryChars",
   "autoRecallTypes",
   "autoRecallTags",
@@ -535,6 +541,18 @@ function setConfigValue(
       const result = parseNumber(String(value), DEFAULT_CONFIG[key] as number | null, key);
       config[key] = result.value;
       return result.warning;
+    }
+    case "autoRecallRole": {
+      const validRoles: AutoRecallRole[] = ["user", "assistant"];
+      if (typeof value === "string") {
+        const lower = value.toLowerCase();
+        if (validRoles.includes(lower as AutoRecallRole)) {
+          config[key] = lower as AutoRecallRole;
+          return;
+        }
+      }
+      config[key] = DEFAULT_CONFIG[key] as AutoRecallRole;
+      return `Invalid autoRecallRole "${value}", expected "user" or "assistant". Using default: ${DEFAULT_CONFIG[key]}.`;
     }
     case "autoRecallTypes":
       if (value === null || (Array.isArray(value) && value.length === 0)) {
@@ -1072,6 +1090,7 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME: "autoRecallShowDateTime",
     PI_HINDSIGHT_AUTO_RECALL_DISPLAY: "autoRecallDisplay",
     PI_HINDSIGHT_AUTO_RECALL_PERSIST: "autoRecallPersist",
+    PI_HINDSIGHT_AUTO_RECALL_ROLE: "autoRecallRole",
     PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS: "recallMaxQueryChars",
     PI_HINDSIGHT_AUTO_RECALL_TYPES: "autoRecallTypes",
     PI_HINDSIGHT_AUTO_RECALL_TAGS: "autoRecallTags",
@@ -1410,6 +1429,27 @@ export function validateConfig(config: HindsightConfig): {
     errors.push(
       "observationScopes is required (must be a preset string or an array of tag arrays)"
     );
+  }
+
+  // Validate autoRecallRole
+  {
+    const validRoles: AutoRecallRole[] = ["user", "assistant"];
+    if (typeof config.autoRecallRole === "string") {
+      const lower = config.autoRecallRole.toLowerCase();
+      if (validRoles.includes(lower as AutoRecallRole)) {
+        config.autoRecallRole = lower as AutoRecallRole;
+      } else {
+        warnings.push(
+          `autoRecallRole: invalid value "${config.autoRecallRole}". Expected "user" or "assistant". Using default: ${DEFAULT_CONFIG.autoRecallRole}.`
+        );
+        config.autoRecallRole = DEFAULT_CONFIG.autoRecallRole;
+      }
+    } else {
+      warnings.push(
+        `autoRecallRole: expected a string, got ${typeof config.autoRecallRole}. Using default: ${DEFAULT_CONFIG.autoRecallRole}.`
+      );
+      config.autoRecallRole = DEFAULT_CONFIG.autoRecallRole;
+    }
   }
 
   // Validate autoRecallTagsMatch (always, not conditional on autoRecallTags)
