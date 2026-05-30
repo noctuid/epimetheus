@@ -7,6 +7,7 @@ How pi-hindsight compares to other Hindsight integrations and the design decisio
 - [Comparison with Other Implementations](#comparison-with-other-implementations)
   - [Feature Comparison](#feature-comparison)
   - [Design Decisions](#design-decisions)
+- [Features inspired by anh-chu/pi-hindsight](#features-inspired-by-anh-chupi-hindsight)
 
 # Deviations from Official Integrations
 

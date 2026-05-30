@@ -50,7 +50,7 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
 ### Disabled Mode
 When `enabled: false`, pi-hindsight runs in a lightweight disabled mode. No tools, commands, API client, auto-recall, auto-retain, or status indicator are registered. However, two things are still handled:
 
-1. **Context filtering**: `hindsight-recall` custom messages are filtered from the LLM context, preventing stale recall messages from being sent to the model. This is important if you previously used `autoRecallPersist: true` — without this filter, old recall messages in the session file would be sent to the LLM as regular conversation.
+1. **Context filtering**: `hindsight-recall` custom messages are filtered from the LLM context, preventing stale recall messages from being sent to the model. This only matters for sessions where `autoRecallPersist` was enabled (the default is false) and those sessions are resumed.
 
 2. **Custom message renderer**: The `hindsight-recall` renderer is still registered based on `autoRecallDisplay`:
    - **`autoRecallDisplay: true`** — Persisted recall messages render with their formatted content (collapsed/expanded), so they display nicely in the TUI even though the extension is disabled.
@@ -60,9 +60,11 @@ When `enabled: false`, pi-hindsight runs in a lightweight disabled mode. No tool
 
 This ensures that disabling the extension does not leave stale data in your sessions — recall messages are both filtered from the LLM context and properly rendered (or hidden) in the UI.
 
-**If you stop using Hindsight entirely**, you have two options:
+**If you stop using Hindsight entirely** and have sessions with persisted recall entries, you have two options:
 1. Keep pi-hindsight installed with `enabled: false` (this disabled mode) — recall messages will continue to be filtered from context and rendered/hidden in the UI
-2. Uninstall pi-hindsight and manually remove all `hindsight-recall` entries from your session files — without the extension, these custom messages would otherwise be sent to the LLM as regular conversation messages (`hindsight-meta` entries are safe to leave since they are custom entries, not messages, and won't appear in the LLM context)
+2. Uninstall pi-hindsight and manually remove all `hindsight-recall` entries from your session files — without the extension, `custom_message` entries would otherwise be sent to the LLM as regular user messages (`hindsight-meta` entries are safe to leave since they are `custom` entries, not messages, and won't appear in the LLM context)
+
+> **Pi limitation:** The core issue is that pi has no way to render `custom_message` entries as UI-only (without sending them to the LLM), nor does it support rendering `custom` entries at all. If either were supported, the `autoRecallPersist` tradeoff would disappear — recall could be stored as display-only data that never enters the LLM context. Pi sessions are supposed to be append-only, so while you could technically delete or update these old entries, I won't support that as part of this extension directly.
 
 ## Auto-Recall Settings
 
@@ -70,7 +72,8 @@ This ensures that disabling the extension does not leave stale data in your sess
 |---------|---------|-------------|
 | `autoRecallShowDateTime` | `true` | Include current date/time above recalled memories |
 | `autoRecallDisplay` | `false` | Show recalled messages in the UI. With `autoRecallPersist: true`, controls whether new recall messages are visible in chat. Also affects rendering of previously persisted recall messages (e.g. when `enabled: false`, see [Disabled Mode](#disabled-mode)). |
-| `autoRecallPersist` | `false` | Save recall messages to session file (visible in TUI after restart). When `true`, uses `before_agent_start` event for visible, persisted messages. When `false`, uses `context` event for ephemeral messages not shown in TUI. |
+| `autoRecallPersist` | `false` | Save recall messages to session file (visible in TUI after restart). Both persist modes use `before_agent_start` for recall and the `context` handler for re-injection as the configured role; the difference is whether the recall is also persisted to the session file. See [autoRecallPersist Tradeoffs](#autorecallpersist-tradeoffs). |
+| `autoRecallRole` | `"user"` | Role to use when injecting recall memories. The default is `"user"` because some providers require the last message to be user-role. `"assistant"` may also cause issues with other extensions that inject messages via the `context` event, since injection order cannot be controlled and mixed roles may confuse the LLM. |
 | `autoRecallTypes` | `["observation"]` | Memory types to recall. Set to `null` or `[]` to recall all types. |
 | `autoRecallTags` | `null` | Tags to filter by during auto-recall. Supports same placeholders as observation scopes (`{session}`, `{parent}`, `{cwd}`, `{basedir}`, `{project}`). `null` means no tag filtering (recall from entire bank). See [autoRecallTags](#autorecalltags). |
 | `autoRecallTagsMatch` | `"any"` | How to match `autoRecallTags`: `"any"` (OR, includes untagged), `"all"` (AND, includes untagged), `"any_strict"` (OR, excludes untagged), `"all_strict"` (AND, excludes untagged). |
@@ -80,20 +83,19 @@ This ensures that disabling the extension does not leave stale data in your sess
 
 ### autoRecallPersist Tradeoffs
 
-See also: [Disabled Mode](#disabled-mode) — recommended if you stop using Hindsight but have persisted recall messages in session files.
+Both modes use the same flow: `before_agent_start` always performs recall and caches the result; the `context` handler then re-injects the cached recall as the configured role (`user` or `assistant`, per `autoRecallRole`).
 
 When `autoRecallPersist: true`:
-- Recall messages are visible in the TUI and saved to the session file
-- Uses `before_agent_start` event to inject messages
-- Context filtering in the `context` event prevents old recall messages from being re-sent to the LLM
-- **Important**: If pi-hindsight is not loaded at all (e.g. uninstalled), old recall messages in the session file will be sent to the LLM. When `enabled: false`, the extension still filters recall messages from context and registers the renderer, so this is only a concern if the extension is completely absent.
-- `autoRecallDisplay: true` can be used to show recall messages to the user
+- Recall messages are also persisted to the session file as `custom_message` entries (visible in the TUI after restart)
+- The `context` handler filters out these persisted `hindsight-recall` entries from the LLM context, preventing old recall messages from being re-sent to the model
+- `autoRecallDisplay: true` can be used to show recall messages to the user in the TUI
 
 When `autoRecallPersist: false` (default):
-- Recall messages are ephemeral - sent to LLM but not displayed or persisted except for the most recent message with `/hindsight popup`
-- Uses `context` event for injection
-- No risk of old recall messages polluting context
-- `autoRecallDisplay: true` has no effect (memories are not stored and cannot be shown in chat; only the most recent is available via `/hindsight popup`)
+- Recall messages are ephemeral — sent to the LLM via the `context` handler but not persisted or displayed in the TUI
+- The most recent recall is available via `/hindsight popup`
+- `autoRecallDisplay: true` has no effect on new messages (memories are not stored and cannot be shown in chat) but still affects rendering of any previously persisted recall messages
+
+If you stop using Hindsight and have sessions with persisted recall entries, you can keep pi-hindsight installed with `enabled: false` to continue filtering them from context, or manually remove them from session files. See [Disabled Mode](#disabled-mode) for details and the underlying pi limitation.
 
 ## Status Bar Indicator
 The extension shows a health indicator in pi's status bar:
@@ -480,6 +482,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_AUTO_RECALL_SHOW_DATETIME` | `autoRecallShowDateTime` | boolean | `true` |
 | `PI_HINDSIGHT_AUTO_RECALL_DISPLAY` | `autoRecallDisplay` | boolean | `false` |
 | `PI_HINDSIGHT_AUTO_RECALL_PERSIST` | `autoRecallPersist` | boolean | `false` |
+| `PI_HINDSIGHT_AUTO_RECALL_ROLE` | `autoRecallRole` | `"user"` \| `"assistant"` | `"user"` |
 | `PI_HINDSIGHT_RECALL_MAX_QUERY_CHARS` | `recallMaxQueryChars` | number | `800` |
 | `PI_HINDSIGHT_AUTO_RECALL_TYPES` | `autoRecallTypes` | string[] (JSON) | `["observation"]` |
 | `PI_HINDSIGHT_AUTO_RECALL_TAGS` | `autoRecallTags` | string[] (JSON) | `null` |
@@ -502,13 +505,15 @@ Configuration options can also be set via environment variables (override config
 
 # Additional Details
 ## Memory Fencing
-Recalled memories are wrapped in a `<hindsight_memories>` fence to help the LLM distinguish between new user input and recalled background information. This format is inspired by [Hermes](https://github.com/nousresearch/hermes-agent).
+Recalled memories are injected as a proper `user` or `assistant` role message (configurable via `autoRecallRole`), with the content wrapped in `<hindsight_memories>` fences. The fence and preamble provide additional instructions inside the content. This format is inspired by [Hermes](https://github.com/nousresearch/hermes-agent).
 
-Example of injected content:
+Example of injected content (with `autoRecallRole: "user"` - default):
 
 ```
+role: user
+content:
 <hindsight_memories>
-[System note: The following are recalled memories from hindsight, NOT new user input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]
+[System note: The following are recalled memories from hindsight, NOT new user or assistant input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]
 
 Current date and time: Monday, 2024-01-15 14:30 EST
 
@@ -559,7 +564,9 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 
 # Known Package Interactions
 ## subagents
-You should check how your subagent plugin interacts with sessions. If it writes to a separate session, and you do not want memories stored for subagents, you should disable pi-hindsight for subagents. A good subagent plugin should allow disabling or configuring extensions per-agent. I will add any extensions I can recommend here later.
+You should check how your subagent plugin interacts with sessions. If it writes to a separate session, and you do not want memories stored for subagents, you should disable pi-hindsight for subagents. A good subagent plugin should allow disabling or configuring extensions per-agent.
+
+Edxeth's pi-subagents plugin injects `custom_message` entries via `before_agent_start` (subagent roster) and `sendMessage` (subagent results). These are converted to user-role messages by pi's `convertToLlm`. Since pi-subagents does not use the `context` event, its messages appear before pi-hindsight's recall injection, so the ordering (user prompt → roster/result as user → recall as assistant) is typically fine. However, if other extensions inject messages via the `context` event, injection order cannot be controlled and mixed roles after the user prompt may confuse the LLM. Consider setting `autoRecallRole: "user"` if this becomes an issue.
 
 ## rewind/rollback
 Rollback with checkpoint extensions is untested. It may require code changes to include rollback information/messages. I think it makes sense to include the rollback information in memories (what happened? why was it necessary?), so I won't support actually removing messages from before the rollback in the final ingested document.

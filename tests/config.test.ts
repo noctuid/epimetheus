@@ -33,6 +33,7 @@ const validConfig: HindsightConfig = {
   autoRecallShowDateTime: true,
   autoRecallDisplay: false,
   autoRecallPersist: false,
+  autoRecallRole: "user",
   recallMaxQueryChars: 800,
   autoRecallTypes: ["observation"] as ("world" | "experience" | "observation")[] | null,
   autoRecallTags: null,
@@ -764,6 +765,66 @@ describe("loadConfig", () => {
 
     const { config } = loadConfig(TEST_DIR);
     expect(config.autoRecallPersist).toBe(true);
+  });
+
+  // ============================================
+  // autoRecallRole tests
+  // ============================================
+
+  it("autoRecallRole defaults to user", () => {
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallRole).toBe("user");
+  });
+
+  it("autoRecallRole can be set to assistant via config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallRole: "assistant",
+      })
+    );
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallRole).toBe("assistant");
+  });
+
+  it("autoRecallRole can be set via PI_HINDSIGHT_AUTO_RECALL_ROLE env var", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_ROLE = "assistant";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallRole).toBe("assistant");
+  });
+
+  it("autoRecallRole warns and resets to default on invalid value", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        autoRecallRole: "invalid",
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.autoRecallRole).toBe("user");
+    expect(warning).toContain("autoRecallRole");
+  });
+
+  it("autoRecallRole validation warns and resets on invalid value", () => {
+    const config = { ...validConfig, autoRecallRole: "invalid" as "user" | "assistant" };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true); // not a blocking error
+    expect(result.warnings.some((w) => w.includes("autoRecallRole"))).toBe(true);
+    expect(config.autoRecallRole).toBe("user");
+  });
+
+  it("autoRecallRole is case-insensitive", () => {
+    process.env.PI_HINDSIGHT_AUTO_RECALL_ROLE = "ASSISTANT";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.autoRecallRole).toBe("assistant");
   });
 
   // ============================================

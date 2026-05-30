@@ -24,17 +24,13 @@ Both ambient retain/recall and manual retain/recall tools are enabled by default
 - Also supports ingesting past sessions - any session that has ever existed can be synced to Hindsight, not just sessions that had the extension loaded
 
 ## Auto-Recall Memories
-When enabled, relevant memories are automatically recalled before each LLM call:
-
-1. Extracts the last user message as a query
-2. Searches Hindsight for relevant memories
-3. Injects memories as a custom message at the end of the context (only the latest recall is sent)
+When enabled, relevant memories are automatically recalled before each LLM call. Recall is injected as the configured role (`user` or `assistant`) with content wrapped in `<hindsight_memories>` fences.
 
 There are two modes:
-1. Ephemerally inject memories - not stored in session file, can only see most recent recall
-2. Store memories in session file - allows displaying collapsible blocks with all past recall
+1. Ephemerally inject memories (default) — not stored in session file, can only see most recent recall via `/hindsight popup`
+2. Store memories in session file — allows displaying collapsible blocks with all past recall
 
-The second mode is recommended if you want to be able to view all past recalls, but the first is enabled by default. Note that the second mode puts messages with the customType `hindsight-recall` into the session file. If you stop using this plugin or hindsight, you should continue to filter out these messages using this plugin, your own `pi.on("context")` handler, or remove these entries from your old session files.
+For mode tradeoffs, cleanup options, and all auto-recall settings, see [Auto-Recall Settings](docs/reference.md#auto-recall-settings) and [autoRecallPersist Tradeoffs](docs/reference.md#autorecallpersist-tradeoffs).
 
 ## Reflect
 Unlike recall which returns raw matching memories, reflect uses the bank's reflect mission, disposition, and multi-step reasoning to produce a synthesized answer. Best for questions requiring synthesis of multiple memories or deeper analysis. Available as the `hindsight_reflect` tool (see [Tools](docs/reference.md#tools)).
@@ -130,6 +126,7 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
   // store recalls in session file and show collapsible blocks; see autoRecallPersist Tradeoffs in docs/reference.md!
   "autoRecallPersist": true,
   "autoRecallDisplay": true,
+  // "autoRecallRole": "assistant",  // use if your provider allows non-user last message and you want memories injected as assistant
   // if you want to reduce injected memory tokens (hindsight default: 4096, high: 8192)
   // see https://hindsight.vectorize.io/developer/retrieval#max-tokens-context-window-size
   "maxRecallTokens": 2048,

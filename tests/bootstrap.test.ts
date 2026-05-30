@@ -1181,8 +1181,12 @@ describe("real entrypoint bootstrap", () => {
     )) as Record<string, unknown> | undefined;
 
     expect(contextResult).toBeDefined();
-    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
-    const recallMsg = messages.find((m) => m.customType === "hindsight-recall");
+    const messages = contextResult?.messages as Array<{ role?: string; content?: unknown }>;
+    // Recall is re-injected as the configured role (user by default)
+    const recallMsg = messages.find(
+      (m) =>
+        m.role === "user" && typeof m.content === "string" && m.content.includes("Cached memory")
+    );
     expect(recallMsg).toBeDefined();
     expect(recallMsg?.content).toContain("Cached memory");
   });
@@ -1237,8 +1241,14 @@ describe("real entrypoint bootstrap", () => {
     )) as Record<string, unknown> | undefined;
 
     expect(contextResult).toBeDefined();
-    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
-    const recallMsg = messages.find((m) => m.customType === "hindsight-recall");
+    const messages = contextResult?.messages as Array<{ role?: string; content?: unknown }>;
+    // Recall is re-injected as the configured role (user by default)
+    const recallMsg = messages.find(
+      (m) =>
+        m.role === "user" &&
+        typeof m.content === "string" &&
+        m.content.includes("First message memory")
+    );
     expect(recallMsg).toBeDefined();
     expect(recallMsg?.content).toContain("First message memory");
   });
@@ -1318,12 +1328,22 @@ describe("real entrypoint bootstrap", () => {
     )) as Record<string, unknown> | undefined;
 
     expect(contextResult).toBeDefined();
-    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
+    const messages = contextResult?.messages as Array<{
+      role?: string;
+      customType?: string;
+      content?: unknown;
+    }>;
     // Exactly 2 messages: user + one re-injected recall (stale persisted recall was filtered)
     expect(messages).toHaveLength(2);
-    const recallMsgs = messages.filter((m) => m.customType === "hindsight-recall");
-    expect(recallMsgs).toHaveLength(1); // no duplication
-    expect(recallMsgs[0]?.content).toContain("Important memory");
+    // The re-injected recall is a proper role message (not a custom message)
+    const recallMsg = messages.find(
+      (m) =>
+        m.role === "user" && typeof m.content === "string" && m.content.includes("Important memory")
+    );
+    expect(recallMsg).toBeDefined();
+    // No customType recall messages remain (they were filtered)
+    const customRecallMsgs = messages.filter((m) => m.customType === "hindsight-recall");
+    expect(customRecallMsgs).toHaveLength(0); // no duplication from persisted custom messages
   });
 
   it("autoRecallPersist: true - stale recalls filtered when no recall this turn", async () => {
@@ -1429,8 +1449,12 @@ describe("real entrypoint bootstrap", () => {
     )) as Record<string, unknown> | undefined;
 
     expect(contextResult).toBeDefined();
-    const messages = contextResult?.messages as Array<{ customType?: string; content?: string }>;
-    const recallMsg = messages.find((m) => m.customType === "hindsight-recall");
+    const messages = contextResult?.messages as Array<{ role?: string; content?: unknown }>;
+    // Recall is re-injected as the configured role (user by default)
+    const recallMsg = messages.find(
+      (m) =>
+        m.role === "user" && typeof m.content === "string" && m.content.includes("Ephemeral memory")
+    );
     expect(recallMsg).toBeDefined();
     expect(recallMsg?.content).toContain("Ephemeral memory");
   });
