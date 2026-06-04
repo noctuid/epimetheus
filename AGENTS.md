@@ -1,5 +1,6 @@
 # Agent Instructions for pi-hindsight
 - Use conventional commit messages
+- Update CHANGELOG.md under the Pending section for any user-facing or internal changes
 
 ## Runtime vs Parsing Parity
 Keep runtime logic (`src/index.ts` event handlers) and parsing logic (`src/document.ts` `isConversationMessage()`, `src/prepare.ts`) consistent:
