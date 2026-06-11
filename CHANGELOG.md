@@ -2,6 +2,8 @@
 
 ## Pending
 
+## 0.3.0
+
 ### Features
 
 - **Extra context field and flush guard** — New `requireExtraContextBeforeFlush` config option that blocks automatic flushing until extra context is set via `/hindsight set-extra-context` or the `hindsight_set_extra_context` tool. Helps prevent incorrect extraction for sessions involving fiction, satire, or external content. Extra context is appended to the Hindsight `context` field after the session name.
