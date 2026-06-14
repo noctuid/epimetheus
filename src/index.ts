@@ -2,7 +2,7 @@
  * pi-hindsight extension entry point.
  *
  * Integrates Hindsight AI memory with pi coding agent using
- * turn-based queue with Hindsight's append mode.
+ * turn-based flush with Hindsight's replace mode.
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -17,18 +17,12 @@ import {
   type TagGroupInput,
   validateConfig,
 } from "./config";
-import { getHindsightMeta, hasExtraContext, shouldSessionBeRetained } from "./meta";
-import { prepareEntry, shouldRetainMessage } from "./prepare";
-import { enqueueAutoMessage } from "./queue";
-import { FLUSH_BLOCKED_NO_EXTRA_CONTEXT, flushQueues, getQueueCount } from "./retention";
+import { getHindsightMeta, shouldSessionBeRetained, updateSessionMetadata } from "./meta";
+import { shouldRetainMessage } from "./prepare";
+import { touchPendingFlag } from "./queue";
+import { flushCurrentSession } from "./retention";
 import { isToolEnabled, registerTools, updateRetainToolVisibility } from "./tools";
-import {
-  deriveSessionName,
-  extractParentSessionId,
-  getContextNameMaxLength,
-  getProjectName,
-  truncate,
-} from "./utils";
+import { extractParentSessionId, getProjectName, truncate } from "./utils";
 
 // Runtime toggle for recall display (overrides config)
 let autoRecallDisplayOverride: boolean | null = null;
@@ -158,7 +152,14 @@ export default function (pi: ExtensionAPI) {
     const entries = ctx.sessionManager.getEntries();
     const existingMeta = getHindsightMeta(entries);
     if (!existingMeta) {
-      pi.appendEntry("hindsight-meta", { retained: config.retainSessionsByDefault });
+      const sessionId = ctx.sessionManager.getSessionId();
+      await updateSessionMetadata(
+        pi,
+        sessionId,
+        entries,
+        { retained: config.retainSessionsByDefault },
+        config
+      );
     }
 
     // Update hindsight_retain tool visibility based on retention state.
@@ -241,7 +242,7 @@ export default function (pi: ExtensionAPI) {
     // sessionId is always available by before_agent_start (set during session_start),
     // so this guard is purely defensive and not practically reachable
     if (!sessionId) {
-      console.warn("pi-hindsight: auto-recall skipped: no active session");
+      ctx.ui.notify("pi-hindsight: auto-recall skipped: no active session", "warning");
       return;
     }
     const sessionCwd = header?.cwd ?? ctx.cwd;
@@ -314,12 +315,15 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Queue messages on message_end event
+  // Mark sessions as dirty on message_end event
   pi.on("message_end", async (event, ctx: ExtensionContext) => {
     if (!config.autoRetainEnabled) return;
 
     const sessionId = ctx.sessionManager.getSessionId();
-    if (!sessionId) return;
+    if (!sessionId) {
+      ctx.ui.notify("pi-hindsight: auto-retain skipped: no active session", "warning");
+      return;
+    }
 
     // Check if session is retained
     const entries = ctx.sessionManager.getEntries();
@@ -332,39 +336,46 @@ export default function (pi: ExtensionAPI) {
     // Check if this message type should be retained
     if (!shouldRetainMessage(message, config.retainContent, config.toolFilter)) return;
 
-    // Build entry from message
-    const entry: Record<string, unknown> = {
-      type: "message",
-      timestamp: new Date().toISOString(),
-      message: message,
-    };
-
-    // Queue the message
-    const prepared = prepareEntry(entry, config);
-    const success = enqueueAutoMessage(sessionId, { entry: prepared, store_method: "auto" });
-    if (!success) {
-      ctx.ui.notify("Failed to queue message for Hindsight retention", "warning");
+    // Touch the pending marker — session needs re-upsert on next flush
+    const result = touchPendingFlag(sessionId);
+    if (!result.success) {
+      ctx.ui.notify(`Failed to queue session for retention: ${result.error}`, "warning");
     }
   });
+
+  /** Flush current session using the shared implementation */
+  const doFlush = async (ctx: ExtensionContext): Promise<void> => {
+    if (!client) {
+      ctx.ui.notify("Hindsight not configured", "warning");
+      return;
+    }
+    const sessionId = ctx.sessionManager.getSessionId();
+    const sessionPath = ctx.sessionManager.getSessionFile();
+    if (!sessionId || !sessionPath) {
+      ctx.ui.notify("No active session to flush", "warning");
+      return;
+    }
+    await flushCurrentSession(sessionId, sessionPath, config, client, ctx, ctx.signal);
+  };
 
   // Flush queues and reset recall cache on session switch
   pi.on("session_before_switch", async (_event, ctx: ExtensionContext) => {
     lastRecallMessage = null;
     lastRecallDetails = null;
-    await flushCurrentSession(ctx, "before session switch");
+    await doFlush(ctx);
   });
 
   // Flush queues and reset recall cache before forking
   pi.on("session_before_fork", async (_event, ctx: ExtensionContext) => {
     lastRecallMessage = null;
     lastRecallDetails = null;
-    await flushCurrentSession(ctx, "before session fork");
+    await doFlush(ctx);
   });
 
   // Flush queues before compaction (if enabled)
   pi.on("session_before_compact", async (_event, ctx: ExtensionContext) => {
     if (config.flushOnCompact) {
-      await flushCurrentSession(ctx, "before compaction");
+      await doFlush(ctx);
     }
   });
 
@@ -372,7 +383,7 @@ export default function (pi: ExtensionAPI) {
   // For new/resume/fork, session_before_switch or session_before_fork already flushed
   pi.on("session_shutdown", async (event, ctx: ExtensionContext) => {
     if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") return;
-    await flushCurrentSession(ctx, "on shutdown", true);
+    await doFlush(ctx);
   });
 
   /**
@@ -418,70 +429,6 @@ export default function (pi: ExtensionAPI) {
       lastRecallMessage = null;
       lastRecallDetails = details;
     });
-  }
-
-  /**
-   * Flush current session's queue to Hindsight.
-   * @param ctx - Extension context
-   * @param reason - Reason for flush (used in log messages)
-   * @param notifyOnError - If true, show UI notification on error
-   */
-  async function flushCurrentSession(
-    ctx: ExtensionContext,
-    reason: string,
-    notifyOnError = false
-  ): Promise<void> {
-    if (!client) return;
-
-    const sessionId = ctx.sessionManager.getSessionId();
-    if (!sessionId) return;
-
-    const count = getQueueCount(sessionId);
-    if (count === 0) return;
-
-    // Check flush guard: requireExtraContextBeforeFlush
-    if (config.requireExtraContextBeforeFlush) {
-      const entries = ctx.sessionManager.getEntries();
-      const meta = getHindsightMeta(entries);
-      if (!hasExtraContext(meta)) {
-        console.warn(`pi-hindsight: ${FLUSH_BLOCKED_NO_EXTRA_CONTEXT}`);
-        ctx.ui.notify(FLUSH_BLOCKED_NO_EXTRA_CONTEXT, "warning");
-        return;
-      }
-    }
-
-    console.log(`pi-hindsight: Flushing ${count} messages ${reason}`);
-
-    const header = ctx.sessionManager.getHeader();
-    const entries = ctx.sessionManager.getEntries();
-    const sessionName = deriveSessionName(
-      ctx.sessionManager.getSessionName(),
-      entries,
-      getContextNameMaxLength(config)
-    );
-    const parentSessionId = extractParentSessionId(header?.parentSession);
-    const result = await flushQueues(
-      sessionId,
-      sessionName,
-      header?.timestamp ?? new Date().toISOString(),
-      header?.cwd ?? ctx.cwd,
-      parentSessionId,
-      config,
-      client,
-      ctx.signal,
-      entries
-    );
-
-    if (!result.success) {
-      console.error("pi-hindsight: Flush failed:", result.error);
-      if (notifyOnError) {
-        ctx.ui.notify(`Hindsight flush failed: ${result.error}`, "error");
-      }
-    } else if (result.autoCount > 0 || result.toolCount > 0) {
-      console.log(
-        `pi-hindsight: Flushed ${result.autoCount} auto + ${result.toolCount} tool entries`
-      );
-    }
   }
 }
 
@@ -658,26 +605,6 @@ ${innerParts.join("\n\n")}
     timestamp: Date.now(),
     details: { count, snippet, memories },
   };
-}
-
-/**
- * Render recall message details for display.
- * Returns plain text suitable for testing (no ANSI codes).
- * Exported for testing.
- */
-export function renderRecallMessage(
-  details: RecallMessageDetails,
-  expanded: boolean,
-  width?: number
-): string {
-  if (expanded) {
-    // When expanded: show the full memory content
-    const sepWidth = width ?? 80;
-    return `Hindsight recalled ${details.count} ${details.count === 1 ? "memory" : "memories"}\n${"\u2500".repeat(sepWidth)}\n${details.memories}\n${"\u2500".repeat(sepWidth)}`;
-  } else {
-    // When collapsed: show summary with snippet
-    return `Hindsight recalled ${details.count} ${details.count === 1 ? "memory" : "memories"} [${details.snippet}]`;
-  }
 }
 
 /**

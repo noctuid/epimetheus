@@ -23,7 +23,7 @@ See [Comparison](docs/comparison.md) for how this plugin compares to others and 
 Both ambient retain/recall and manual retain/recall tools are enabled by default. Either can be disabled. See [Comparison with Other Implementations](docs/comparison.md) and [Design Decisions](docs/comparison.md#design-decisions) for more information on what differentiates this plugin.
 
 ## Retain Memories
-- Queues messages to disk and automatically retains on session switch, shutdown, etc.
+- Automatically retains session content on session switch, shutdown, etc.
 - Also supports ingesting past sessions - any session that has ever existed can be synced to Hindsight, not just sessions that had the extension loaded
 
 ## Auto-Recall Memories
@@ -54,9 +54,9 @@ Follow [hindsight best practices](https://hindsight.vectorize.io/best-practices)
 
 Additionally:
 - Recalls memories for the current user prompt, unlike [hermes which is currently one turn behind](https://github.com/NousResearch/hermes-agent/issues/5820)
-- Supports ingesting past sessions — any session that has ever existed can be synced to Hindsight, not just sessions that had the extension loaded. Note that for old resumed sessions (sessions created before the plugin was installed), only new messages will be auto-queued on `message_end`. To retain the full session history, use `/hindsight parse-and-upsert-session` to ingest the entire conversation.
+- Supports ingesting past sessions — any session that has ever existed can be synced to Hindsight, not just sessions that had the extension loaded.
 - Avoids breaking prompt caching - recall messages are appended at the end of the context for a single turn only; the canonical conversation history (which determines cache validity) grows normally with each turn, so caching should work as expected
-- Queues content to retain to disk to avoid loss if hindsight is down; also allows deferring processing or reprocessing to potentially lower costs
+- Marks sessions as dirty on `message_end` so content is retained even if Hindsight is temporarily down; pending markers persist until the next successful flush
 - Properly handles forking when ingesting full sessions: forks will not duplicate parent content and will only contain new content
 - Provides automatic tags: session id, parent session id, cwd, basedir (cwd basename), project (configurable name, falls back to basedir), store method (tool or auto), and any configured tags like `harness:pi` (default)
 - Allows choosing what content to retain and stripping unnecessary fields to reduce tokens/cost
@@ -97,6 +97,8 @@ HINDSIGHT_API_LLM_MAX_CONCURRENT=5
 
 # can pick faster/cheaper model for lower latency
 HINDSIGHT_API_REFLECT_LLM_MODEL=<model>
+# increase if you want to prevent splitting larger messages between chunks (see user recommendations below for more info)
+HINDSIGHT_API_RETAIN_STRUCTURED_CHUNK_SIZE=<size>
 # hindsight has many other configuration variables, see the documentation for all of them
 ```
 
@@ -157,6 +159,7 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
 - Configure your [observation scopes](docs/reference.md#observationscopes) to control how observations are consolidated across sessions.
 - Consider whether you want to ingest tool calls and results. Including tool calls might be useful for remembering details about writes/edits (especially if you use pi for writing prose). Including tool results might be useful, for example, if you want to store memories about reads. You can always keep both and put more details about what should be ignored in your retain mission.
 - Consider whether you want to ingest assistant thinking or just the final output
+- Consider increasing `HINDSIGHT_API_RETAIN_STRUCTURED_CHUNK_SIZE` depending on your model. This is not the normal chunk size — it controls splitting single JSON entry (which is normally kept together even if larger than the normal chunk size). Increasing this will ensure larger messages have memories extracted together so timestamps, user vs. assistant role, filenames from read/write tool calls, etc. are in context. Avoid setting it too high. You can look at context benchmarks for your specific model if you are unsure, e.g. [contextarena](contextarena.ai).
 - If you are getting incorrect memories extracted (e.g. other people conflated with the user), consider [setting extra context](docs/reference.md#extra-context--flush-guard) for sessions; this is especially useful for non-programming sessions
 
 Example - For the retain mission, you may want to experiment with including something like this to avoid retaining duplicate information that may end up in the LLM thinking or final output after recall/reflect:

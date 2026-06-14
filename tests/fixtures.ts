@@ -6,12 +6,53 @@
  */
 
 import { afterAll, mock } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
+import { getMessagesPath, getMetaPath } from "../src/parsed-store";
+import { clearSessionQueueState, removePendingFlag, type ToolQueueEntry } from "../src/queue";
+import { getToolDir, getToolEntryPath, listJsonFiles } from "../src/queue-paths";
+import { getSessionStatePath } from "../src/session-state";
+
+// ============================================
+// Session cleanup helpers
+// ============================================
+
+/**
+ * Temp dirs created by {@link createMockContext} (via `mkdtempSync`) that need
+ * cleanup. Registered globally and removed in an `afterAll` hook so individual
+ * tests / fixtures do not each need to remember to clean up.
+ */
+const createdMockContextDirs = new Set<string>();
+
+afterAll(() => {
+  for (const dir of createdMockContextDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  createdMockContextDirs.clear();
+});
+
+/** Clean up queue and pending marker for a session. Safe even if nothing exists. */
+export function cleanupSession(sessionId: string): void {
+  clearSessionQueueState(sessionId);
+  removePendingFlag(sessionId);
+}
+
+/** Clean up parsed session cache files and live state for a session. Safe even if no cache exists. */
+export function cleanupSessionCache(sessionId: string): void {
+  for (const p of [
+    getMessagesPath(sessionId),
+    getMetaPath(sessionId),
+    getSessionStatePath(sessionId),
+  ]) {
+    try {
+      rmSync(p, { force: true });
+    } catch {}
+  }
+}
 
 // ============================================
 // Shared config objects
@@ -101,6 +142,26 @@ export function createMockClient(
   } as unknown as HindsightClientWrapper;
 }
 
+/** Minimal ExtensionContext with a recording ui.notify. Use when tests need a ctx for functions that require it. */
+export function makeNotifyCtx(): ExtensionContext {
+  return {
+    sessionManager: {
+      getSessionId: () => null,
+      getEntries: () => [],
+      getSessionFile: () => null,
+      getHeader: () => null,
+      getSessionName: () => undefined,
+    },
+    ui: {
+      notify: mock(() => {}),
+      confirm: mock(async () => true),
+      select: mock(async () => undefined),
+    },
+    signal: undefined,
+    cwd: "/test",
+  } as unknown as ExtensionContext;
+}
+
 /** Create a mock ExtensionAPI that captures registered handlers, tools, commands, and renderers. */
 export function createMockPi(): ExtensionAPI & CapturedExtension {
   return new MockPiBuilder().build();
@@ -109,6 +170,34 @@ export function createMockPi(): ExtensionAPI & CapturedExtension {
 /** Create a mock ExtensionContext for command/tool handler tests. */
 export function createMockContext(overrides: Record<string, unknown> = {}): ExtensionContext {
   const sessionId = (overrides._sessionId as string) ?? "test-session-123";
+  const extraContext = (overrides._extraContext as string) ?? undefined;
+  const retained = (overrides._retained as boolean) ?? true;
+  const sessionDir = mkdtempSync(join(tmpdir(), "pi-hindsight-ctx-"));
+  // Track for afterAll cleanup; createMockContext may be called many times across
+  // a test file, and each creates a temp dir that would otherwise leak.
+  createdMockContextDirs.add(sessionDir);
+  const sessionPath = join(sessionDir, "session.jsonl");
+  const metaData: Record<string, unknown> = { retained };
+  if (extraContext !== undefined) metaData.extraContext = extraContext;
+  writeFileSync(
+    sessionPath,
+    JSON.stringify({
+      type: "session",
+      id: sessionId,
+      timestamp: "2026-01-01T00:00:00Z",
+      cwd: "/test/project",
+    }) +
+      "\n" +
+      JSON.stringify({ type: "custom", customType: "hindsight-meta", data: metaData }) +
+      "\n" +
+      JSON.stringify({
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: "Hello" }] },
+      }) +
+      "\n",
+    "utf8"
+  );
+
   return {
     ui: {
       setStatus: mock(),
@@ -140,9 +229,11 @@ export function createMockContext(overrides: Record<string, unknown> = {}): Exte
     cwd: "/test/project",
     sessionManager: {
       getSessionId: mock(() => sessionId),
-      getEntries: mock(() => [
-        { type: "custom", customType: "hindsight-meta", data: { retained: true } },
-      ]),
+      getEntries: mock(() => {
+        const data: Record<string, unknown> = { retained };
+        if (extraContext !== undefined) data.extraContext = extraContext;
+        return [{ type: "custom", customType: "hindsight-meta", data }];
+      }),
       getHeader: mock(() => ({
         id: sessionId,
         timestamp: "2026-01-01T00:00:00Z",
@@ -151,8 +242,8 @@ export function createMockContext(overrides: Record<string, unknown> = {}): Exte
       })),
       getSessionName: mock(() => undefined),
       getCwd: mock(() => "/test/project"),
-      getSessionDir: mock(() => "/tmp/session"),
-      getSessionFile: mock(() => "/tmp/session/session.jsonl"),
+      getSessionDir: mock(() => sessionDir),
+      getSessionFile: mock(() => sessionPath),
       getLeafId: mock(() => sessionId),
       getLeafEntry: mock(() => null),
       getEntry: mock(() => null),
@@ -168,6 +259,35 @@ export function createMockContext(overrides: Record<string, unknown> = {}): Exte
     hasPendingMessages: mock(() => false),
     ...overrides,
   } as unknown as ExtensionContext;
+}
+
+/** Read tool queue entries directly from disk for test inspection.
+ *
+ * Production code should only read entries after claiming (via readClaimedToolEntries).
+ * This helper is intentionally simple and skips malformed files.
+ */
+export function readToolQueueFromDisk(sessionId: string): ToolQueueEntry[] {
+  const toolDir = getToolDir(sessionId);
+  const entryIds = listJsonFiles(toolDir);
+  const entries: ToolQueueEntry[] = [];
+  for (const entryId of entryIds) {
+    try {
+      const entryPath = getToolEntryPath(sessionId, entryId);
+      const parsed = JSON.parse(readFileSync(entryPath, "utf8"));
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        parsed.store_method === "tool" &&
+        typeof parsed.content === "string" &&
+        typeof parsed.timestamp === "string"
+      ) {
+        entries.push(parsed as ToolQueueEntry);
+      }
+    } catch {
+      // Skip malformed files
+    }
+  }
+  return entries;
 }
 
 // ============================================
@@ -304,6 +424,8 @@ export function writeSessionFile(
   options: {
     parentSession?: string;
     messages?: Array<{ role: string; content: unknown }>;
+    retained?: boolean;
+    extraContext?: string;
   } = {}
 ): string {
   const sessionPath = join(dir, `${sessionId}.jsonl`);
@@ -318,8 +440,33 @@ export function writeSessionFile(
   }
   const messages = options.messages ?? [{ role: "user", content: "Hello world" }];
   const lines = [JSON.stringify(header)];
+  // Add hindsight-meta entry so parseCurrentSession sees the session's retention state
+  // Default to true since most tests need retained sessions
+  const retained = options.retained ?? true;
+  const metaData: Record<string, unknown> = { retained };
+  if (options.extraContext !== undefined) {
+    metaData.extraContext = options.extraContext;
+  }
+  lines.push(
+    JSON.stringify({
+      type: "custom",
+      customType: "hindsight-meta",
+      data: metaData,
+      id: `${sessionId}-meta`,
+      parentId: null,
+      timestamp: new Date().toISOString(),
+    })
+  );
   for (const msg of messages) {
-    lines.push(JSON.stringify({ type: "message", message: msg }));
+    lines.push(
+      JSON.stringify({
+        type: "message",
+        message: msg,
+        id: `${sessionId}-msg-${lines.length}`,
+        parentId: null,
+        timestamp: new Date().toISOString(),
+      })
+    );
   }
   writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
   return sessionPath;

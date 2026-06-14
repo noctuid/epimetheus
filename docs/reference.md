@@ -170,7 +170,9 @@ Call with no text (`/hindsight set-extra-context`) to indicate no extra context 
 
 ### Flush Guard
 
-When `requireExtraContextBeforeFlush: true`, automatic and manual flush operations are blocked until extra context is explicitly set. This prevents accidental retention of content that could be misclassified by Hindsight's extraction.
+When `requireExtraContextBeforeFlush: true`, session upserts are blocked until extra context is explicitly set. This prevents accidental retention of content that could be misclassified by Hindsight's extraction.
+
+The guard applies to all session upsert paths: automatic flush (session switch, shutdown, compact), manual `/hindsight flush`, `/hindsight flush-pending`, `/hindsight parse-and-upsert-session`, and `/hindsight upsert-all-parsed`. It does **not** apply to the tool queue (`hindsight_retain` tool calls) — those are explicit manual memories that already include the necessary context in their content.
 
 The flush guard distinguishes between three states:
 
@@ -182,7 +184,7 @@ The flush guard distinguishes between three states:
 
 This is particularly useful for sessions involving prose to prevent Hindsight from treating fictional characters as real people, fictional events as factual, or even real people as the user.
 
-The guard is checked at every flush point: session switch, shutdown, compact (if `flushOnCompact: true`), and manual `/hindsight flush`.
+The guard is checked at every session flush point: session switch, shutdown, compact (if `flushOnCompact: true`), manual `/hindsight flush`, `/hindsight flush-pending`, `/hindsight parse-and-upsert-session`, and `/hindsight upsert-all-parsed`. Tool queue flushes (from `hindsight_retain` tool calls) are not guarded.
 
 ## Content Retention & Stripping Settings
 ### `retainContent`
@@ -586,7 +588,8 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 
 | Subcommand | Description |
 |------------|-------------|
-| `flush` | Flush queued messages to Hindsight |
+| `flush` | Drain pending messages and retain tool entries for the current session to Hindsight |
+| `flush-pending` | Drain pending messages and retain tool entries for all sessions to Hindsight |
 | `toggle-retain` | Toggle whether the current session should be retained |
 | `tag <tag>` | Add a tag to the session's hindsight metadata |
 | `remove-tag <tag>` | Remove a tag from the session's hindsight metadata |
@@ -595,8 +598,8 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 | `popup` | Pop up last recalled messages in overlay |
 | `status` | Show operational status (connection, session, recall info, queue count) |
 | `config` | Show configuration (file path, env vars, masked config) |
-| `parse-session` | Parse current session to file for manual review |
-| `parse-and-upsert-session` | Parse and upsert the full current session to Hindsight |
+| `parse-session` | Parse current session to local files for review (no upsert) |
+| `parse-and-upsert-session` | Parse and upsert the full current session to Hindsight (forced full re-parse, ignoring cache) |
 | `upsert-all-parsed` | Upsert all parsed sessions to Hindsight |
 
 > **Note:** After `/resume`, a new user message is required before `/hindsight popup` will show content, since recall only happens when there's a user message to query against.

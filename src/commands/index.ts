@@ -20,6 +20,7 @@ import {
 } from "./meta";
 import { createPopupSubcommand, createToggleDisplaySubcommand } from "./recall";
 import {
+  createFlushPendingSubcommand,
   createFlushSubcommand,
   createParseAndUpsertSessionSubcommand,
   createParseSessionSubcommand,
@@ -55,13 +56,14 @@ export function registerCommands(
 ): void {
   const subcommands: Record<string, Subcommand> = {
     flush: createFlushSubcommand(client, config),
+    "flush-pending": createFlushPendingSubcommand(client, config),
     "parse-session": createParseSessionSubcommand(config),
     "parse-and-upsert-session": createParseAndUpsertSessionSubcommand(client, config),
     "upsert-all-parsed": createUpsertAllParsedSubcommand(client, config),
     "toggle-retain": createToggleRetainSubcommand(pi, client, config),
-    tag: createTagSubcommand(pi),
-    "remove-tag": createRemoveTagSubcommand(pi),
-    "set-extra-context": createExtraContextSubcommand(pi),
+    tag: createTagSubcommand(pi, config),
+    "remove-tag": createRemoveTagSubcommand(pi, config),
+    "set-extra-context": createExtraContextSubcommand(pi, config),
     "toggle-display": createToggleDisplaySubcommand(
       config,
       getAutoRecallDisplayOverride,
@@ -78,17 +80,31 @@ export function registerCommands(
     .map((name) => `  ${name} - ${subcommands[name]?.description ?? ""}`)
     .join("\n");
 
+  /**
+   * Return the index of the first whitespace character (space, tab, newline,
+   * etc.) in `s`, or -1 when none is found. Used to split off the subcommand
+   * token without collapsing or normalizing any internal whitespace in the
+   * remaining argument string.
+   */
+  function searchFirstWhitespace(s: string): number {
+    return s.search(/\s/);
+  }
+
   pi.registerCommand("hindsight", {
     description: `Hindsight memory commands. Subcommands:\n${subcommandList}`,
     getArgumentCompletions: async (argumentPrefix: string) => {
-      // If a subcommand is already selected, delegate to its completions
-      const parts = argumentPrefix.split(/\s+/);
-      const subcommandName = parts[0] ?? "";
+      // Identify only the first token (the subcommand name) with whitespace;
+      // do not collapse internal whitespace in the remaining argument prefix.
+      const trimmedPrefix = argumentPrefix.trimStart();
+      const firstSpace = searchFirstWhitespace(trimmedPrefix);
+      const subcommandName = firstSpace === -1 ? trimmedPrefix : trimmedPrefix.slice(0, firstSpace);
 
       if (subcommandName && subcommands[subcommandName]) {
         const subcommand = subcommands[subcommandName];
         if (subcommand.getArgumentCompletions) {
-          const subArgPrefix = argumentPrefix.slice(subcommandName.length).trimStart();
+          // Drop the subcommand name, then trim only leading whitespace before
+          // the remaining argument prefix (internal whitespace preserved).
+          const subArgPrefix = trimmedPrefix.slice(subcommandName.length).trimStart();
           return subcommand.getArgumentCompletions(subArgPrefix);
         }
         return null;
@@ -106,9 +122,13 @@ export function registerCommands(
       return matching.length > 0 ? matching : null;
     },
     handler: async (args: string, ctx: ExtensionContext) => {
-      const parts = args.trim().split(/\s+/);
-      const subcommandName = parts[0] ?? "";
-      const subArgs = parts.slice(1).join(" ");
+      // Identify the subcommand name using only the first run of whitespace;
+      // preserve internal whitespace/newlines in the remaining argument
+      // string exactly. The subcommand handler trims its own boundaries.
+      const trimmedArgs = args.trimStart();
+      const firstSpace = searchFirstWhitespace(trimmedArgs);
+      const subcommandName = firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
+      const subArgs = firstSpace === -1 ? "" : trimmedArgs.slice(firstSpace + 1);
 
       if (!subcommandName) {
         // No subcommand — show status
