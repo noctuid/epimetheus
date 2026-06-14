@@ -2,13 +2,32 @@
  * Unit tests for session metadata management.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildMetaUpdate,
   getHindsightMeta,
-  hasExtraContext,
+  isExtraContextSet,
+  readMetaFile,
+  readMetaFileByPath,
+  resolveExtraContext,
+  resolveRetained,
   shouldSessionBeRetained,
 } from "../src/meta";
+import { ensureParsedSessionDir, getMetaPath } from "../src/parsed-store";
+import { getSessionStatePath } from "../src/session-state";
+import { setupTempAgentDir } from "./fixtures";
+
+const TEST_SESSION = `test-meta-${Date.now()}`;
+
+setupTempAgentDir("meta");
+
+afterEach(() => {
+  rmSync(getMetaPath(TEST_SESSION), { force: true });
+  rmSync(getSessionStatePath(TEST_SESSION), { force: true });
+});
 
 type MetaEntry = Parameters<typeof getHindsightMeta>[0][number];
 
@@ -128,29 +147,68 @@ describe("shouldSessionBeRetained", () => {
   });
 });
 
-describe("hasExtraContext", () => {
-  it("returns false for null meta", () => {
-    expect(hasExtraContext(null)).toBe(false);
+describe("isExtraContextSet", () => {
+  it("returns false for null", () => {
+    expect(isExtraContextSet(null)).toBe(false);
   });
 
-  it("returns false when key is absent", () => {
-    expect(hasExtraContext({ retained: true })).toBe(false);
-  });
-
-  it("returns false when only tags are set", () => {
-    expect(hasExtraContext({ retained: true, tags: ["test"] })).toBe(false);
+  it("returns true for empty string", () => {
+    expect(isExtraContextSet("")).toBe(true);
   });
 
   it("returns true for non-empty string", () => {
-    expect(hasExtraContext({ extraContext: "Fiction session" })).toBe(true);
+    expect(isExtraContextSet("Fiction session")).toBe(true);
+  });
+});
+
+describe("resolveExtraContext", () => {
+  it("returns null when no live state and no hindsight-meta", () => {
+    expect(resolveExtraContext(null, null)).toBeNull();
   });
 
-  it("returns true for empty string (explicitly set to empty — satisfies flush guard)", () => {
-    expect(hasExtraContext({ extraContext: "" })).toBe(true);
+  it("returns null when no live state and hindsight-meta has no extraContext key", () => {
+    expect(resolveExtraContext(null, { retained: true })).toBeNull();
   });
 
-  it("returns true for empty string alongside other fields", () => {
-    expect(hasExtraContext({ retained: true, extraContext: "" })).toBe(true);
+  it("returns extraContext from hindsight-meta when no live state", () => {
+    expect(resolveExtraContext(null, { retained: true, extraContext: "Fiction" })).toBe("Fiction");
+  });
+
+  it("returns empty string from hindsight-meta when no live state", () => {
+    expect(resolveExtraContext(null, { retained: true, extraContext: "" })).toBe("");
+  });
+
+  it("returns extraContext from live state (authoritative)", () => {
+    const state = {
+      retained: true,
+      extraContext: "from state",
+      updatedAt: new Date().toISOString(),
+    };
+    expect(resolveExtraContext(state, { extraContext: "from meta" })).toBe("from state");
+  });
+
+  it("returns null from live state when extraContext is null", () => {
+    const state = { retained: true, extraContext: null, updatedAt: new Date().toISOString() };
+    expect(resolveExtraContext(state, { extraContext: "from meta" })).toBeNull();
+  });
+});
+
+describe("resolveRetained", () => {
+  it("uses live state when available", () => {
+    const state = { retained: false, extraContext: null, updatedAt: new Date().toISOString() };
+    expect(resolveRetained(state, [], { retainSessionsByDefault: true })).toBe(false);
+  });
+
+  it("falls back to session entries when no live state", () => {
+    const entries: MetaEntry[] = [
+      { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+    ];
+    expect(resolveRetained(null, entries, { retainSessionsByDefault: true })).toBe(false);
+  });
+
+  it("falls back to config default when no live state and no entries", () => {
+    expect(resolveRetained(null, [], { retainSessionsByDefault: true })).toBe(true);
+    expect(resolveRetained(null, [], { retainSessionsByDefault: false })).toBe(false);
   });
 });
 
@@ -233,5 +291,244 @@ describe("buildMetaUpdate", () => {
     expect(buildMetaUpdate({ retained: true, tags: ["x"] }, { tags: [], retained: true })).toEqual({
       retained: true,
     });
+  });
+});
+
+describe("readMetaFile", () => {
+  function writeRawMetaFile(content: string) {
+    ensureParsedSessionDir();
+    writeFileSync(getMetaPath(TEST_SESSION), content, "utf-8");
+  }
+
+  const validMeta = JSON.stringify({
+    sessionId: "doc-123",
+    sessionName: "test session",
+    extraContext: null,
+    sessionUserTags: [],
+    sessionCwd: "/home/user/project",
+    sessionTimestamp: "2024-01-01T00:00:00Z",
+    messageCount: 5,
+    retained: true,
+  });
+
+  it("returns valid meta for well-formed file", () => {
+    writeRawMetaFile(validMeta);
+    const result = readMetaFile(TEST_SESSION);
+    expect(result).not.toBeNull();
+    expect(result!.sessionId).toBe("doc-123");
+    expect(result!.retained).toBe(true);
+  });
+
+  it("returns null when file does not exist", () => {
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null for invalid JSON syntax", () => {
+    writeRawMetaFile("{ not valid json");
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null for empty object", () => {
+    writeRawMetaFile("{}");
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when sessionId is missing", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionName: "test",
+        extraContext: null,
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: 1,
+        retained: true,
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when sessionName is missing", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        extraContext: null,
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: 1,
+        retained: true,
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when sessionTimestamp is empty", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        sessionName: "test",
+        extraContext: null,
+        sessionCwd: "/test",
+        sessionTimestamp: "",
+        messageCount: 1,
+        retained: true,
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when retained is a string instead of boolean", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        sessionName: "test",
+        extraContext: null,
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: 0,
+        retained: "nope",
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when messageCount is not a finite number", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        sessionName: "test",
+        extraContext: null,
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: Infinity,
+        retained: true,
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when extraContext is not null or string", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        sessionName: "test",
+        extraContext: 123,
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: 0,
+        retained: true,
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when sessionUserTags is not an array of strings", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        sessionName: "test",
+        extraContext: null,
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: 0,
+        retained: true,
+        sessionUserTags: [123, true],
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("returns null when parentSessionId is not a string", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        sessionName: "test",
+        extraContext: null,
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: 0,
+        retained: true,
+        parentSessionId: 42,
+      })
+    );
+    expect(readMetaFile(TEST_SESSION)).toBeNull();
+  });
+
+  it("accepts valid meta with optional fields", () => {
+    writeRawMetaFile(
+      JSON.stringify({
+        sessionId: "doc",
+        sessionName: "test",
+        extraContext: "fiction",
+        sessionCwd: "/test",
+        sessionTimestamp: "2024-01-01T00:00:00Z",
+        messageCount: 3,
+        retained: false,
+        sessionUserTags: ["tag1", "tag2"],
+        parentSessionId: "parent-123",
+      })
+    );
+    const result = readMetaFile(TEST_SESSION);
+    expect(result).not.toBeNull();
+    expect(result!.sessionUserTags).toEqual(["tag1", "tag2"]);
+    expect(result!.parentSessionId).toBe("parent-123");
+    expect(result!.extraContext).toBe("fiction");
+  });
+
+  it("accepts valid meta without optional fields", () => {
+    writeRawMetaFile(validMeta);
+    const result = readMetaFile(TEST_SESSION);
+    expect(result).not.toBeNull();
+    expect(result!.sessionUserTags).toEqual([]);
+    expect(result!.parentSessionId).toBeUndefined();
+    expect(result!.extraContext).toBeNull();
+  });
+});
+
+describe("readMetaFileByPath", () => {
+  const validMeta = JSON.stringify({
+    sessionId: "doc-123",
+    sessionName: "test session",
+    extraContext: null,
+    sessionUserTags: [],
+    sessionCwd: "/home/user/project",
+    sessionTimestamp: "2024-01-01T00:00:00Z",
+    messageCount: 5,
+    retained: true,
+  });
+
+  it("returns valid meta for well-formed file at arbitrary path", () => {
+    const tmpPath = join(tmpdir(), `test-meta-by-path-${Date.now()}.json`);
+    writeFileSync(tmpPath, validMeta, "utf-8");
+    try {
+      const result = readMetaFileByPath(tmpPath);
+      expect(result).not.toBeNull();
+      expect(result!.sessionId).toBe("doc-123");
+    } finally {
+      rmSync(tmpPath, { force: true });
+    }
+  });
+
+  it("returns null when file does not exist", () => {
+    expect(readMetaFileByPath("/nonexistent/path.json")).toBeNull();
+  });
+
+  it("returns null for malformed JSON", () => {
+    const tmpPath = join(tmpdir(), `test-meta-malformed-${Date.now()}.json`);
+    writeFileSync(tmpPath, "{ invalid json", "utf-8");
+    try {
+      expect(readMetaFileByPath(tmpPath)).toBeNull();
+    } finally {
+      rmSync(tmpPath, { force: true });
+    }
+  });
+
+  it("returns null for structurally invalid meta", () => {
+    const tmpPath = join(tmpdir(), `test-meta-invalid-${Date.now()}.json`);
+    writeFileSync(tmpPath, JSON.stringify({ sessionId: 123 }), "utf-8");
+    try {
+      expect(readMetaFileByPath(tmpPath)).toBeNull();
+    } finally {
+      rmSync(tmpPath, { force: true });
+    }
   });
 });

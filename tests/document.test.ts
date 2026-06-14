@@ -9,14 +9,18 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { HindsightConfig } from "../src/config";
 import {
-  buildDocumentContent,
+  buildContextFromSessionName,
   buildDocumentTags,
-  buildMessageArrayFromSession,
-  getHindsightContext,
+  buildMessageArrayFromParsedSession,
   parseSessionFile,
   type SessionEntry,
   type SessionHeader,
 } from "../src/document";
+import {
+  deriveSessionName,
+  getContextNameMaxLength,
+  getSessionNameFromEntries,
+} from "../src/utils";
 import { HINDSIGHT_ENV_KEYS, saveEnvKeys } from "./fixtures";
 
 // Use a unique temp directory per test run to avoid colliding with real data
@@ -41,6 +45,27 @@ const defaultConfig: HindsightConfig = {
     message: ["api", "provider", "model", "usage", "cost", "stopReason", "timestamp", "responseId"],
   },
 };
+
+// Helper to parse a session file and build messages (replaces the deleted wrappers)
+function parseAndBuild(
+  path: string,
+  config: HindsightConfig
+): { messages: object[]; sessionId: string; warning?: string } {
+  const { header, entries } = parseSessionFile(path);
+  return buildMessageArrayFromParsedSession(header, entries, config);
+}
+
+// Helper to derive context from a session file (replaces the deleted getHindsightContext)
+function getContext(
+  path: string,
+  config: HindsightConfig,
+  sessionName?: string,
+  extraContext?: string
+): string {
+  const { entries } = parseSessionFile(path);
+  const name = deriveSessionName(sessionName, entries, getContextNameMaxLength(config));
+  return buildContextFromSessionName(config.hindsightContextPrefix, name, extraContext);
+}
 
 // Helper to create a session file
 function createSessionFile(
@@ -155,11 +180,11 @@ describe("basic sessions", () => {
   it("handles empty session (no messages)", () => {
     const path = createSessionFile("empty.jsonl", { id: "empty-session" }, []);
 
-    const result = buildDocumentContent(path, defaultConfig);
+    const { messages, sessionId, warning } = parseAndBuild(path, defaultConfig);
 
-    expect(result.content).toBe("[]");
-    expect(result.documentId).toBe("empty-session");
-    expect(result.warning).toBeUndefined();
+    expect(messages).toHaveLength(0);
+    expect(sessionId).toBe("empty-session");
+    expect(warning).toBeUndefined();
   });
 
   it("handles session with only user message", () => {
@@ -168,13 +193,12 @@ describe("basic sessions", () => {
       userEntry("u1", "mc1", "Hello world"),
     ]);
 
-    const result = buildDocumentContent(path, defaultConfig);
+    const { messages, sessionId } = parseAndBuild(path, defaultConfig);
 
     // Should include the user message
-    const parsed = JSON.parse(result.content);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0].message.role).toBe("user");
-    expect(result.documentId).toBe("user-only-session");
+    expect(messages).toHaveLength(1);
+    expect((messages[0] as { message: { role: string } }).message.role).toBe("user");
+    expect(sessionId).toBe("user-only-session");
   });
 
   it("handles session with one user/assistant pair", () => {
@@ -183,14 +207,15 @@ describe("basic sessions", () => {
       assistantEntry("a1", "u1", "2+2 equals 4", "resp-001"),
     ]);
 
-    const result = buildDocumentContent(path, defaultConfig);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
-    const parsed = JSON.parse(result.content);
-    expect(parsed).toHaveLength(2);
-    expect(parsed[0].message.role).toBe("user");
-    expect(parsed[1].message.role).toBe("assistant");
+    expect(messages).toHaveLength(2);
+    expect((messages[0] as { message: { role: string } }).message.role).toBe("user");
+    expect((messages[1] as { message: { role: string } }).message.role).toBe("assistant");
     // responseId is stripped per strip.message config
-    expect(parsed[1].message.responseId).toBeUndefined();
+    expect(
+      (messages[1] as { message: { responseId?: string } }).message.responseId
+    ).toBeUndefined();
   });
 
   it("excludes tool results from content", () => {
@@ -201,14 +226,14 @@ describe("basic sessions", () => {
       assistantEntry("a2", "t1", "Here's the content", "resp-002"),
     ]);
 
-    const result = buildDocumentContent(path, defaultConfig);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
-    const parsed = JSON.parse(result.content);
-    expect(parsed).toHaveLength(3); // u1, a1, a2 (no tool result)
+    expect(messages).toHaveLength(3); // u1, a1, a2 (no tool result)
     expect(
-      parsed.every(
-        (p: { message: { role: string } }) =>
-          p.message.role === "user" || p.message.role === "assistant"
+      messages.every(
+        (p) =>
+          (p as { message: { role: string } }).message.role === "user" ||
+          (p as { message: { role: string } }).message.role === "assistant"
       )
     ).toBe(true);
   });
@@ -241,13 +266,14 @@ describe("fork detection", () => {
       ]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { messages } = parseAndBuild(forkPath, defaultConfig);
 
     // Should include from the first diverging message
-    const parsed = JSON.parse(result.content);
-    expect(parsed).toHaveLength(2);
-    expect(parsed[0].message.role).toBe("user");
-    expect(parsed[0].message.content[0].text).toBe("Actually, I want something else");
+    expect(messages).toHaveLength(2);
+    expect((messages[0] as { message: { role: string } }).message.role).toBe("user");
+    expect(
+      (messages[0]! as { message: { content: Array<{ text: string }> } }).message.content[0]!.text
+    ).toBe("Actually, I want something else");
   });
 
   it("handles fork at end (last message differs)", () => {
@@ -274,14 +300,17 @@ describe("fork detection", () => {
       ]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { messages } = parseAndBuild(forkPath, defaultConfig);
 
     // Should include from user message before divergence (u2)
-    const parsed = JSON.parse(result.content);
-    expect(parsed).toHaveLength(2);
-    expect(parsed[0].message.content[0].text).toBe("Turn 2");
+    expect(messages).toHaveLength(2);
+    expect(
+      (messages[0]! as { message: { content: Array<{ text: string }> } }).message.content[0]!.text
+    ).toBe("Turn 2");
     // responseId is stripped per strip.message config
-    expect(parsed[1].message.responseId).toBeUndefined();
+    expect(
+      (messages[1] as { message: { responseId?: string } }).message.responseId
+    ).toBeUndefined();
   });
 
   it("handles sibling forks (same parent, different children)", () => {
@@ -321,15 +350,18 @@ describe("fork detection", () => {
       ]
     );
 
-    const result1 = buildDocumentContent(fork1Path, defaultConfig);
-    const result2 = buildDocumentContent(fork2Path, defaultConfig);
-
-    const parsed1 = JSON.parse(result1.content);
-    const parsed2 = JSON.parse(result2.content);
+    const result1 = parseAndBuild(fork1Path, defaultConfig);
+    const result2 = parseAndBuild(fork2Path, defaultConfig);
 
     // Each fork should capture its unique content
-    expect(parsed1[0].message.content[0].text).toBe("I'll build a castle!");
-    expect(parsed2[0].message.content[0].text).toBe("I'll build a spaceship!");
+    expect(
+      (result1.messages[0]! as { message: { content: Array<{ text: string }> } }).message
+        .content[0]!.text
+    ).toBe("I'll build a castle!");
+    expect(
+      (result2.messages[0]! as { message: { content: Array<{ text: string }> } }).message
+        .content[0]!.text
+    ).toBe("I'll build a spaceship!");
   });
 
   it("handles grandchild fork (fork of a fork)", () => {
@@ -371,14 +403,17 @@ describe("fork detection", () => {
       ]
     );
 
-    const result = buildDocumentContent(cPath, defaultConfig);
+    const { messages } = parseAndBuild(cPath, defaultConfig);
 
     // Should only include child's unique content (u3 + a3)
-    const parsed = JSON.parse(result.content);
-    expect(parsed).toHaveLength(2);
-    expect(parsed[0].message.content[0].text).toBe("Child turn");
+    expect(messages).toHaveLength(2);
+    expect(
+      (messages[0]! as { message: { content: Array<{ text: string }> } }).message.content[0]!.text
+    ).toBe("Child turn");
     // responseId is stripped per strip.message config
-    expect(parsed[1].message.responseId).toBeUndefined();
+    expect(
+      (messages[1] as { message: { responseId?: string } }).message.responseId
+    ).toBeUndefined();
   });
 
   it("handles fork with no new content (replay only)", () => {
@@ -398,11 +433,11 @@ describe("fork detection", () => {
       [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi!", "resp-replay")]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { messages, warning } = parseAndBuild(forkPath, defaultConfig);
 
     // No new content to retain
-    expect(result.content).toBe("[]");
-    expect(result.warning).toBe("No new content in fork");
+    expect(messages).toHaveLength(0);
+    expect(warning).toBe("No new content in fork");
   });
 
   it("filters custom-role messages from forked sessions", () => {
@@ -441,15 +476,16 @@ describe("fork detection", () => {
       ]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(forkPath, defaultConfig);
 
     // Should have 2 messages (u2, a2) - recall entry filtered, fork content only
-    expect(parsed).toHaveLength(2);
-    expect(parsed[0].message.content[0].text).toBe("New question");
+    expect(messages).toHaveLength(2);
     expect(
-      parsed.every(
-        (p: { message: { customType?: string } }) => p.message.customType !== "hindsight-recall"
+      (messages[0]! as { message: { content: Array<{ text: string }> } }).message.content[0]!.text
+    ).toBe("New question");
+    expect(
+      messages.every(
+        (p) => (p as { message: { customType?: string } }).message.customType !== "hindsight-recall"
       )
     ).toBe(true);
   });
@@ -490,13 +526,14 @@ describe("compaction handling", () => {
       ]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { messages } = parseAndBuild(forkPath, defaultConfig);
 
     // Compaction is excluded (it's not a message type user/assistant)
     // Should include u3 + a3 (the fork content)
-    const parsed = JSON.parse(result.content);
-    expect(parsed).toHaveLength(2);
-    expect(parsed[0].message.content[0].text).toBe("Message 3");
+    expect(messages).toHaveLength(2);
+    expect(
+      (messages[0]! as { message: { content: Array<{ text: string }> } }).message.content[0]!.text
+    ).toBe("Message 3");
   });
 
   it("verifies compaction only adds JSON lines (doesn't delete)", () => {
@@ -516,15 +553,15 @@ describe("compaction handling", () => {
     expect(entries.length).toBe(5);
 
     // Verify document content excludes compaction
-    const result = buildDocumentContent(path, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
     // Only conversation messages, not compaction
-    expect(parsed).toHaveLength(4);
+    expect(messages).toHaveLength(4);
     expect(
-      parsed.every(
-        (p: { message: { role: string } }) =>
-          p.message.role === "user" || p.message.role === "assistant"
+      messages.every(
+        (p) =>
+          (p as { message: { role: string } }).message.role === "user" ||
+          (p as { message: { role: string } }).message.role === "assistant"
       )
     ).toBe(true);
   });
@@ -535,7 +572,7 @@ describe("compaction handling", () => {
 // ============================================
 
 describe("bad path handling", () => {
-  it("fails with warning for missing parent session", () => {
+  it("returns empty messages with warning for missing parent session", () => {
     const forkPath = createSessionFile(
       "orphan-fork.jsonl",
       {
@@ -545,11 +582,38 @@ describe("bad path handling", () => {
       [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi!", "resp-orphan")]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { messages, warning, sessionId } = parseAndBuild(forkPath, defaultConfig);
 
-    expect(result.content).toBe("[]");
-    expect(result.warning).toContain("Parent session not found");
-    expect(result.documentId).toBe("orphan-session");
+    // Cannot determine fork point without parent — returns empty with warning
+    expect(messages).toHaveLength(0);
+    expect(warning).toContain("Cannot determine fork point");
+    expect(warning).toContain("Parent session file not found");
+    expect(sessionId).toBe("orphan-session");
+  });
+
+  it("returns empty messages with warning for malformed parent session", () => {
+    // Create a parent file that exists but is malformed (no session header)
+    const parentPath = join(TEST_SESSIONS_DIR, "malformed-parent.jsonl");
+    writeFileSync(parentPath, `${JSON.stringify(userEntry("u1", null, "No header"))}\n`);
+
+    const forkPath = createSessionFile(
+      "fork-malformed-parent.jsonl",
+      {
+        id: "fork-malformed-parent-session",
+        parentSession: parentPath,
+      },
+      [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi!", "resp-fmp")]
+    );
+
+    const { messages, warning, sessionId } = parseAndBuild(forkPath, defaultConfig);
+
+    // Parent exists but is malformed — returns empty with warning that includes
+    // the actual error (not falsely claiming "Parent session not found")
+    expect(messages).toHaveLength(0);
+    expect(warning).toContain("Cannot determine fork point");
+    expect(warning).toContain("missing header");
+    expect(warning).not.toContain("Parent session file not found");
+    expect(sessionId).toBe("fork-malformed-parent-session");
   });
 
   it("throws for session file without header", () => {
@@ -557,7 +621,7 @@ describe("bad path handling", () => {
     const path = join(TEST_SESSIONS_DIR, "no-header.jsonl");
     writeFileSync(path, `${JSON.stringify(userEntry("u1", null, "No header"))}\n`);
 
-    expect(() => buildDocumentContent(path, defaultConfig)).toThrow("missing header");
+    expect(() => parseSessionFile(path)).toThrow("missing header");
   });
 });
 
@@ -631,7 +695,7 @@ describe("document tags with session metadata", () => {
     };
 
     const tags = buildDocumentTags(header, defaultConfig, {
-      sessionTags: ["topic:ai", "priority:high"],
+      sessionUserTags: ["topic:ai", "priority:high"],
     });
 
     expect(tags).toContain("topic:ai");
@@ -664,7 +728,7 @@ describe("document tags with session metadata", () => {
     };
 
     const tags = buildDocumentTags(header, defaultConfig, {
-      sessionTags: ["topic:fork"],
+      sessionUserTags: ["topic:fork"],
     });
 
     expect(tags).toContain("topic:fork");
@@ -683,7 +747,7 @@ describe("hindsight context", () => {
       assistantEntry("a1", "u1", "Sure!", "resp-ctx"),
     ]);
 
-    const context = getHindsightContext(path, defaultConfig, "My Custom Session Name");
+    const context = getContext(path, defaultConfig, "My Custom Session Name");
 
     expect(context).toBe("pi: My Custom Session Name");
   });
@@ -694,7 +758,7 @@ describe("hindsight context", () => {
       assistantEntry("a1", "u1", "Sure!", "resp-ctx"),
     ]);
 
-    const context = getHindsightContext(path, defaultConfig);
+    const context = getContext(path, defaultConfig);
 
     expect(context).toBe("pi: Build me a homepage");
   });
@@ -712,7 +776,7 @@ describe("hindsight context", () => {
       hindsightContextMaxLength: 50,
     };
 
-    const context = getHindsightContext(path, config, longName);
+    const context = getContext(path, config, longName);
 
     // Explicit session names are not truncated — hindsightContextMaxLength only applies
     // to auto-derived names from the first user message
@@ -732,7 +796,7 @@ describe("hindsight context", () => {
       hindsightContextMaxLength: 50,
     };
 
-    const context = getHindsightContext(path, config);
+    const context = getContext(path, config);
 
     expect(context.length).toBe(50);
     expect(context.endsWith("…")).toBe(true);
@@ -741,7 +805,7 @@ describe("hindsight context", () => {
   it("uses default context when no user message or session name", () => {
     const path = createSessionFile("context-empty.jsonl", { id: "context-empty-session" }, []);
 
-    const context = getHindsightContext(path, defaultConfig);
+    const context = getContext(path, defaultConfig);
 
     expect(context).toBe("pi: Untitled");
   });
@@ -749,7 +813,7 @@ describe("hindsight context", () => {
   it("appends extra context after session name with newline separator", () => {
     const path = createSessionFile("context-extra.jsonl", { id: "context-extra-session" }, []);
 
-    const context = getHindsightContext(
+    const context = getContext(
       path,
       defaultConfig,
       "My Session",
@@ -766,7 +830,7 @@ describe("hindsight context", () => {
       [userEntry("u1", null, "Hello world")]
     );
 
-    const context = getHindsightContext(path, defaultConfig, undefined, "Fiction session");
+    const context = getContext(path, defaultConfig, undefined, "Fiction session");
 
     expect(context).toBe("pi: Hello world\nFiction session");
   });
@@ -786,7 +850,7 @@ describe("hindsight context", () => {
 
     const extraContext =
       "This is a very long extra context that should not be truncated at all even though it exceeds the max length";
-    const context = getHindsightContext(path, config, undefined, extraContext);
+    const context = getContext(path, config, undefined, extraContext);
 
     // Base part is truncated, extra context is appended in full
     expect(context).toContain(extraContext);
@@ -800,7 +864,7 @@ describe("hindsight context", () => {
       []
     );
 
-    const context = getHindsightContext(path, defaultConfig, "My Session", "");
+    const context = getContext(path, defaultConfig, "My Session", "");
 
     expect(context).toBe("pi: My Session");
   });
@@ -812,7 +876,7 @@ describe("hindsight context", () => {
       []
     );
 
-    const context = getHindsightContext(path, defaultConfig, "My Session", undefined);
+    const context = getContext(path, defaultConfig, "My Session", undefined);
 
     expect(context).toBe("pi: My Session");
   });
@@ -831,15 +895,15 @@ describe("content filtering", () => {
       assistantEntry("a2", "t1", "Done", "resp-002"),
     ]);
 
-    const result = buildDocumentContent(path, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
     // Tool results excluded by default (empty toolResult array in config)
-    expect(parsed).toHaveLength(3);
+    expect(messages).toHaveLength(3);
     expect(
-      parsed.every(
-        (p: { message: { role: string } }) =>
-          p.message.role === "user" || p.message.role === "assistant"
+      messages.every(
+        (p) =>
+          (p as { message: { role: string } }).message.role === "user" ||
+          (p as { message: { role: string } }).message.role === "assistant"
       )
     ).toBe(true);
   });
@@ -860,12 +924,11 @@ describe("content filtering", () => {
       assistantEntry("a2", "t1", "Done", "resp-002"),
     ]);
 
-    const result = buildDocumentContent(path, configWithTools);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, configWithTools);
 
     // Tool results included
-    expect(parsed).toHaveLength(4);
-    expect(parsed[2].message.role).toBe("toolResult");
+    expect(messages).toHaveLength(4);
+    expect((messages[2] as { message: { role: string } }).message.role).toBe("toolResult");
   });
 
   it("filters assistant content types", () => {
@@ -900,12 +963,13 @@ describe("content filtering", () => {
       },
     };
 
-    const result = buildDocumentContent(path, configNoThinking);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, configNoThinking);
 
-    expect(parsed[1].message.content).toHaveLength(2);
-    expect(parsed[1].message.content[0].type).toBe("text");
-    expect(parsed[1].message.content[1].type).toBe("toolCall");
+    const assistantContent = (messages[1] as { message: { content: Array<{ type: string }> } })
+      .message.content;
+    expect(assistantContent).toHaveLength(2);
+    expect(assistantContent[0]!.type).toBe("text");
+    expect(assistantContent[1]!.type).toBe("toolCall");
   });
 
   it("filters user content types (excludes images by default)", () => {
@@ -929,12 +993,13 @@ describe("content filtering", () => {
       assistantEntry("a1", "u1", "I see it", "resp-img"),
     ]);
 
-    const result = buildDocumentContent(path, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
     // Image excluded by default (user: ["text"])
-    expect(parsed[0].message.content).toHaveLength(1);
-    expect(parsed[0].message.content[0].type).toBe("text");
+    const userContent = (messages[0] as { message: { content: Array<{ type: string }> } }).message
+      .content;
+    expect(userContent).toHaveLength(1);
+    expect(userContent[0]!.type).toBe("text");
   });
 
   it("includes images when configured", () => {
@@ -967,11 +1032,12 @@ describe("content filtering", () => {
       },
     };
 
-    const result = buildDocumentContent(path, configWithImages);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, configWithImages);
 
-    expect(parsed[0].message.content).toHaveLength(2);
-    expect(parsed[0].message.content[1].type).toBe("image");
+    const userContent = (messages[0] as { message: { content: Array<{ type: string }> } }).message
+      .content;
+    expect(userContent).toHaveLength(2);
+    expect(userContent[1]!.type).toBe("image");
   });
 
   it("excludes custom-role messages (e.g. hindsight-recall)", () => {
@@ -998,33 +1064,32 @@ describe("content filtering", () => {
       assistantEntry("a2", "u2", "You're welcome", "resp-2"),
     ]);
 
-    const result = buildDocumentContent(path, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
     // Should have 4 messages (u1, a1, u2, a2) - recall entry filtered out
-    expect(parsed).toHaveLength(4);
+    expect(messages).toHaveLength(4);
     expect(
-      parsed.every(
-        (p: { message: { customType?: string } }) => p.message.customType !== "hindsight-recall"
+      messages.every(
+        (p) => (p as { message: { customType?: string } }).message.customType !== "hindsight-recall"
       )
     ).toBe(true);
   });
 });
 
 // ============================================
-// buildMessageArrayFromSession (for parse-session command)
+// buildMessageArrayFromParsedSession (for parse-session command)
 // ============================================
 
-describe("buildMessageArrayFromSession", () => {
+describe("buildMessageArrayFromParsedSession", () => {
   it("returns all messages for non-fork session", () => {
     const path = createSessionFile("non-fork-msgs.jsonl", { id: "non-fork-msgs-session" }, [
       userEntry("u1", null, "Hello"),
       assistantEntry("a1", "u1", "Hi!", "resp-nf"),
     ]);
 
-    const { messages, documentId } = buildMessageArrayFromSession(path, defaultConfig);
+    const { messages, sessionId } = parseAndBuild(path, defaultConfig);
 
-    expect(documentId).toBe("non-fork-msgs-session");
+    expect(sessionId).toBe("non-fork-msgs-session");
     expect(messages).toHaveLength(2);
     expect(messages[0]).toHaveProperty("message");
   });
@@ -1046,23 +1111,24 @@ describe("buildMessageArrayFromSession", () => {
       ]
     );
 
-    const { messages, documentId } = buildMessageArrayFromSession(forkPath, defaultConfig);
+    const { messages, sessionId } = parseAndBuild(forkPath, defaultConfig);
 
-    expect(documentId).toBe("fork-msgs-session");
+    expect(sessionId).toBe("fork-msgs-session");
     expect(messages).toHaveLength(2);
   });
 
-  it("returns warning for missing parent", () => {
+  it("returns empty messages with warning for missing parent", () => {
     const path = createSessionFile(
       "orphan-msgs.jsonl",
       { id: "orphan-msgs-session", parentSession: "/nonexistent/parent.jsonl" },
       [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi!", "resp-om")]
     );
 
-    const { messages, warning } = buildMessageArrayFromSession(path, defaultConfig);
+    const { messages, warning } = parseAndBuild(path, defaultConfig);
 
-    expect(messages).toHaveLength(0);
-    expect(warning).toContain("Parent session not found");
+    // Cannot determine fork point without parent — returns empty with warning
+    expect(messages.length).toBe(0);
+    expect(warning).toContain("Cannot determine fork point");
   });
 });
 
@@ -1145,20 +1211,22 @@ describe("tool filtering", () => {
       ]
     );
 
-    const result = buildDocumentContent(path, configWithToolFilter);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, configWithToolFilter);
 
     // bash and read toolCalls excluded, hindsight_retain kept
     // a1 has bash call -> only text retained
     // a2 has read call -> only text retained
     // a3 has hindsight_retain call -> text + toolCall retained
-    expect(parsed).toHaveLength(4); // u1, a1, a2, a3 (toolResults excluded by retainContent)
-    const a1Content = parsed[1].message.content;
+    expect(messages).toHaveLength(4); // u1, a1, a2, a3 (toolResults excluded by retainContent)
+    const a1Content = (messages[1] as { message: { content: Array<{ type: string }> } }).message
+      .content;
     expect(a1Content).toHaveLength(1);
-    expect(a1Content[0].type).toBe("text");
-    const a3Content = parsed[3].message.content;
+    expect(a1Content[0]!.type).toBe("text");
+    const a3Content = (
+      messages[3] as { message: { content: Array<{ type: string; name?: string }> } }
+    ).message.content;
     expect(a3Content).toHaveLength(2);
-    expect(a3Content[1].name).toBe("hindsight_retain");
+    expect(a3Content[1]!.name).toBe("hindsight_retain");
   });
 
   it("excludes toolResult messages by tool name via toolFilter", () => {
@@ -1188,15 +1256,14 @@ describe("tool filtering", () => {
       ]
     );
 
-    const result = buildDocumentContent(path, configWithToolFilter);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, configWithToolFilter);
 
     // bash and write toolResults excluded, read toolResult kept
-    const toolResults = parsed.filter(
-      (p: { message: { role: string } }) => p.message.role === "toolResult"
+    const toolResults = messages.filter(
+      (p) => (p as { message: { role: string } }).message.role === "toolResult"
     );
     expect(toolResults).toHaveLength(1); // only read result
-    expect(toolResults[0].message.toolName).toBe("read");
+    expect((toolResults[0] as { message: { toolName: string } }).message.toolName).toBe("read");
   });
 
   it("includes only listed tools via include filter", () => {
@@ -1225,25 +1292,29 @@ describe("tool filtering", () => {
       ]
     );
 
-    const result = buildDocumentContent(path, configWithToolFilter);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, configWithToolFilter);
 
     // a1: bash call excluded -> only text; t1: bash result excluded entirely
     // a2: hindsight_retain call kept; t2: hindsight_retain result kept
-    expect(parsed).toHaveLength(4); // u1, a1 (text only), a2, t2
-    const a1Content = parsed[1].message.content;
+    expect(messages).toHaveLength(4); // u1, a1 (text only), a2, t2
+    const a1Content = (messages[1] as { message: { content: Array<{ type: string }> } }).message
+      .content;
     expect(a1Content).toHaveLength(1);
-    expect(a1Content[0].type).toBe("text"); // no bash toolCall
+    expect(a1Content[0]!.type).toBe("text"); // no bash toolCall
 
-    const a2Content = parsed[2].message.content;
+    const a2Content = (
+      messages[2] as { message: { content: Array<{ type: string; name?: string }> } }
+    ).message.content;
     expect(a2Content).toHaveLength(2);
-    expect(a2Content[1].name).toBe("hindsight_retain");
+    expect(a2Content[1]!.name).toBe("hindsight_retain");
 
-    const toolResults = parsed.filter(
-      (p: { message: { role: string } }) => p.message.role === "toolResult"
+    const toolResults = messages.filter(
+      (p) => (p as { message: { role: string } }).message.role === "toolResult"
     );
     expect(toolResults).toHaveLength(1); // t2 kept (hindsight_retain)
-    expect(toolResults[0].message.toolName).toBe("hindsight_retain");
+    expect((toolResults[0] as { message: { toolName: string } }).message.toolName).toBe(
+      "hindsight_retain"
+    );
   });
 
   it("combines retainContent, toolFilter, and strip in session parsing", () => {
@@ -1355,20 +1426,24 @@ describe("tool filtering", () => {
       retainResult,
     ]);
 
-    const result = buildDocumentContent(path, config);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, config);
 
     // u1 + a1 + grep/writing/retain results
     // grep and write toolResults excluded by toolFilter.toolResult
     // retain toolResult kept
-    expect(parsed).toHaveLength(3); // u1, a1, t3 (retain result);
+    expect(messages).toHaveLength(3); // u1, a1, t3 (retain result);
 
     // Check user message - just text, no stripping artifacts
-    expect(parsed[0].message.role).toBe("user");
-    expect(parsed[0].message.content[0].type).toBe("text");
+    expect((messages[0] as { message: { role: string } }).message.role).toBe("user");
+    expect(
+      (messages[0]! as { message: { content: Array<{ type: string }> } }).message.content[0]!.type
+    ).toBe("text");
 
     // Check assistant message
-    const assistantMsg = parsed[1].message;
+    const assistantMsg = (messages[1] as { message: Record<string, unknown> }).message as Record<
+      string,
+      unknown
+    >;
     // retainContent: thinking removed, toolCall kept
     // toolFilter: grep and read calls excluded, hindsight_retain kept
     // strip: api, provider, model, responseId removed
@@ -1376,19 +1451,24 @@ describe("tool filtering", () => {
     expect(assistantMsg.provider).toBeUndefined();
     expect(assistantMsg.model).toBeUndefined();
     expect(assistantMsg.responseId).toBeUndefined();
-    expect(assistantMsg.content).toHaveLength(2); // text + hindsight_retain toolCall
-    expect(assistantMsg.content[0].type).toBe("text");
-    expect(assistantMsg.content[1].type).toBe("toolCall");
-    expect(assistantMsg.content[1].name).toBe("hindsight_retain");
+    const assistantContent = assistantMsg.content as Array<{ type: string; name?: string }>;
+    expect(assistantContent).toHaveLength(2); // text + hindsight_retain toolCall
+    expect(assistantContent[0]!.type).toBe("text");
+    expect(assistantContent[1]!.type).toBe("toolCall");
+    expect(assistantContent[1]!.name).toBe("hindsight_retain");
 
     // Tool results
-    const toolResults = parsed.filter(
-      (p: { message: { role: string } }) => p.message.role === "toolResult"
+    const toolResults = messages.filter(
+      (p) => (p as { message: { role: string } }).message.role === "toolResult"
     );
     expect(toolResults).toHaveLength(1); // only hindsight_retain result
-    expect(toolResults[0].message.toolName).toBe("hindsight_retain");
+    expect(
+      (toolResults[0] as { message: { toolName: string; toolCallId?: string } }).message.toolName
+    ).toBe("hindsight_retain");
     // toolCallId stripped by strip.message config
-    expect(toolResults[0].message.toolCallId).toBeUndefined();
+    expect(
+      (toolResults[0] as { message: { toolCallId?: string } }).message.toolCallId
+    ).toBeUndefined();
   });
 
   it("toolFilter with forked sessions", () => {
@@ -1424,43 +1504,45 @@ describe("tool filtering", () => {
       ]
     );
 
-    const result = buildDocumentContent(forkPath, configWithToolFilter);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(forkPath, configWithToolFilter);
 
     // Fork content: u2 + a2
     // a2 has hindsight_retain -> toolCall not filtered
-    expect(parsed).toHaveLength(2);
-    const a2Content = parsed[1].message.content;
+    expect(messages).toHaveLength(2);
+    const a2Content = (
+      messages[1] as { message: { content: Array<{ type: string; name?: string }> } }
+    ).message.content;
     expect(a2Content).toHaveLength(2); // text + toolCall
-    expect(a2Content[1].name).toBe("hindsight_retain");
+    expect(a2Content[1]!.name).toBe("hindsight_retain");
   });
 });
 
 // ============================================
-// Regression: documentId must be raw session ID
+// Regression: sessionId must be raw session ID
 // ============================================
 
-describe("documentId is raw session ID (no session: prefix)", () => {
-  it("buildDocumentContent returns raw session ID for non-fork session", () => {
-    const path = createSessionFile("docid-nonfork.jsonl", { id: "abc-123-def" }, [
+describe("sessionId is raw session ID (no session: prefix)", () => {
+  it("buildMessageArrayFromParsedSession returns raw session ID for non-fork session", () => {
+    const path = createSessionFile("sessionid-nonfork.jsonl", { id: "abc-123-def" }, [
       userEntry("u1", null, "Hello"),
       assistantEntry("a1", "u1", "Hi", "resp-1"),
     ]);
 
-    const result = buildDocumentContent(path, defaultConfig);
+    const { sessionId } = parseAndBuild(path, defaultConfig);
 
-    expect(result.documentId).toBe("abc-123-def");
-    expect(result.documentId).not.toContain("session:");
+    expect(sessionId).toBe("abc-123-def");
+    expect(sessionId).not.toContain("session:");
   });
 
-  it("buildDocumentContent returns raw session ID for forked session", () => {
-    const parentPath = createSessionFile("docid-parent.jsonl", { id: "docid-parent-session" }, [
-      userEntry("u1", null, "Hello"),
-      assistantEntry("a1", "u1", "Hi", "resp-p"),
-    ]);
+  it("buildMessageArrayFromParsedSession returns raw session ID for forked session", () => {
+    const parentPath = createSessionFile(
+      "sessionid-parent.jsonl",
+      { id: "sessionid-parent-session" },
+      [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi", "resp-p")]
+    );
 
     const forkPath = createSessionFile(
-      "docid-fork.jsonl",
+      "sessionid-fork.jsonl",
       { id: "fork-xyz-456", parentSession: parentPath },
       [
         userEntry("u1", null, "Hello"),
@@ -1470,118 +1552,51 @@ describe("documentId is raw session ID (no session: prefix)", () => {
       ]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { sessionId } = parseAndBuild(forkPath, defaultConfig);
 
-    expect(result.documentId).toBe("fork-xyz-456");
-    expect(result.documentId).not.toContain("session:");
+    expect(sessionId).toBe("fork-xyz-456");
+    expect(sessionId).not.toContain("session:");
   });
 
-  it("buildDocumentContent returns raw session ID for fork with no new content", () => {
+  it("buildMessageArrayFromParsedSession returns raw session ID for fork with no new content", () => {
     const parentPath = createSessionFile(
-      "docid-replay-parent.jsonl",
-      { id: "docid-replay-parent" },
+      "sessionid-replay-parent.jsonl",
+      { id: "sessionid-replay-parent" },
       [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi", "resp-rp")]
     );
 
     const forkPath = createSessionFile(
-      "docid-replay.jsonl",
+      "sessionid-replay.jsonl",
       { id: "replay-789", parentSession: parentPath },
       [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi", "resp-rp")]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { sessionId } = parseAndBuild(forkPath, defaultConfig);
 
-    expect(result.documentId).toBe("replay-789");
-    expect(result.documentId).not.toContain("session:");
+    expect(sessionId).toBe("replay-789");
+    expect(sessionId).not.toContain("session:");
   });
 
-  it("buildDocumentContent returns raw session ID for missing parent", () => {
+  it("buildMessageArrayFromParsedSession returns raw session ID for missing parent", () => {
     const forkPath = createSessionFile(
-      "docid-orphan.jsonl",
+      "sessionid-orphan.jsonl",
       { id: "orphan-id-999", parentSession: "/nonexistent/parent.jsonl" },
       [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi", "resp-o")]
     );
 
-    const result = buildDocumentContent(forkPath, defaultConfig);
+    const { sessionId } = parseAndBuild(forkPath, defaultConfig);
 
-    expect(result.documentId).toBe("orphan-id-999");
-    expect(result.documentId).not.toContain("session:");
+    expect(sessionId).toBe("orphan-id-999");
+    expect(sessionId).not.toContain("session:");
   });
 
-  it("buildDocumentContent returns raw session ID for empty session", () => {
-    const path = createSessionFile("docid-empty.jsonl", { id: "empty-raw-id" }, []);
+  it("buildMessageArrayFromParsedSession returns raw session ID for empty session", () => {
+    const path = createSessionFile("sessionid-empty.jsonl", { id: "empty-raw-id" }, []);
 
-    const result = buildDocumentContent(path, defaultConfig);
+    const { sessionId } = parseAndBuild(path, defaultConfig);
 
-    expect(result.documentId).toBe("empty-raw-id");
-    expect(result.documentId).not.toContain("session:");
-  });
-
-  it("buildMessageArrayFromSession returns raw session ID for non-fork", () => {
-    const path = createSessionFile("docid-msgs-nonfork.jsonl", { id: "msgs-nonfork-id" }, [
-      userEntry("u1", null, "Hello"),
-      assistantEntry("a1", "u1", "Hi", "resp-mn"),
-    ]);
-
-    const { documentId } = buildMessageArrayFromSession(path, defaultConfig);
-
-    expect(documentId).toBe("msgs-nonfork-id");
-    expect(documentId).not.toContain("session:");
-  });
-
-  it("buildMessageArrayFromSession returns raw session ID for forked session", () => {
-    const parentPath = createSessionFile("docid-msgs-parent.jsonl", { id: "docid-msgs-parent" }, [
-      userEntry("u1", null, "Hello"),
-      assistantEntry("a1", "u1", "Hi", "resp-mp"),
-    ]);
-
-    const forkPath = createSessionFile(
-      "docid-msgs-fork.jsonl",
-      { id: "msgs-fork-id", parentSession: parentPath },
-      [
-        userEntry("u1", null, "Hello"),
-        assistantEntry("a1", "u1", "Hi", "resp-mp"),
-        userEntry("u2", "a1", "New"),
-        assistantEntry("a2", "u2", "Answer", "resp-mf"),
-      ]
-    );
-
-    const { documentId } = buildMessageArrayFromSession(forkPath, defaultConfig);
-
-    expect(documentId).toBe("msgs-fork-id");
-    expect(documentId).not.toContain("session:");
-  });
-
-  it("buildMessageArrayFromSession returns raw session ID for missing parent", () => {
-    const path = createSessionFile(
-      "docid-msgs-orphan.jsonl",
-      { id: "msgs-orphan-id", parentSession: "/nonexistent/parent.jsonl" },
-      [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi", "resp-mo")]
-    );
-
-    const { documentId } = buildMessageArrayFromSession(path, defaultConfig);
-
-    expect(documentId).toBe("msgs-orphan-id");
-    expect(documentId).not.toContain("session:");
-  });
-
-  it("buildMessageArrayFromSession returns raw session ID for fork with no new content", () => {
-    const parentPath = createSessionFile(
-      "docid-msgs-replay-parent.jsonl",
-      { id: "docid-msgs-replay-parent" },
-      [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi", "resp-mrp")]
-    );
-
-    const forkPath = createSessionFile(
-      "docid-msgs-replay.jsonl",
-      { id: "msgs-replay-id", parentSession: parentPath },
-      [userEntry("u1", null, "Hello"), assistantEntry("a1", "u1", "Hi", "resp-mrp")]
-    );
-
-    const { documentId } = buildMessageArrayFromSession(forkPath, defaultConfig);
-
-    expect(documentId).toBe("msgs-replay-id");
-    expect(documentId).not.toContain("session:");
+    expect(sessionId).toBe("empty-raw-id");
+    expect(sessionId).not.toContain("session:");
   });
 });
 
@@ -1624,18 +1639,17 @@ describe("runtime/parsing filtering parity", () => {
       assistantEntry("a1", "u1", "Hi", "resp-p1"),
       recallEntry,
     ]);
-    const result = buildDocumentContent(path, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
     // Both should produce the same count of non-recall messages
     expect(runtimeFiltered).toHaveLength(2);
-    expect(parsed).toHaveLength(2);
+    expect(messages).toHaveLength(2);
     expect(
       runtimeFiltered.every((m) => (m as { customType?: string }).customType !== "hindsight-recall")
     ).toBe(true);
     expect(
-      parsed.every(
-        (p: { message: { customType?: string } }) => p.message.customType !== "hindsight-recall"
+      messages.every(
+        (p) => (p as { message: { customType?: string } }).message.customType !== "hindsight-recall"
       )
     ).toBe(true);
   });
@@ -1675,11 +1689,10 @@ describe("runtime/parsing filtering parity", () => {
       assistantEntry("a1", "u1", "Hi", "resp-p2"),
       otherEntry,
     ]);
-    const result = buildDocumentContent(path, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
     // Parsing excludes custom-role messages (by shouldRetainMessage)
-    expect(parsed).toHaveLength(2); // user + assistant only
+    expect(messages).toHaveLength(2); // user + assistant only
   });
 
   it("both paths filter out hindsight-recall from mixed messages", () => {
@@ -1737,22 +1750,70 @@ describe("runtime/parsing filtering parity", () => {
       otherEntry,
       recallEntry2,
     ]);
-    const result = buildDocumentContent(path, defaultConfig);
-    const parsed = JSON.parse(result.content);
+    const { messages } = parseAndBuild(path, defaultConfig);
 
     // Both should filter out exactly the 2 hindsight-recall messages
     const runtimeRecallCount = runtimeMessages.length - runtimeFiltered.length;
-    // 3 entries minus kept entries (assistant may be filtered by retainContent)
     expect(runtimeRecallCount).toBe(2);
 
     // Runtime: 3 kept (user, other-type, assistant)
     expect(runtimeFiltered).toHaveLength(3);
-    // Parsing: at least user + other-type (assistant may be filtered by retainContent)
-    expect(parsed.length).toBeGreaterThanOrEqual(2);
+    // Parsing: at least user (assistant may be filtered by retainContent)
+    expect(messages.length).toBeGreaterThanOrEqual(2);
     expect(
-      parsed.every(
-        (p: { message: { customType?: string } }) => p.message.customType !== "hindsight-recall"
+      messages.every(
+        (p) => (p as { message: { customType?: string } }).message.customType !== "hindsight-recall"
       )
     ).toBe(true);
+  });
+});
+
+describe("getSessionNameFromEntries", () => {
+  it("returns session_info name from latest entry", () => {
+    const entries = [
+      { type: "message", message: { role: "user", content: "first message" } },
+      { type: "session_info", name: "my session" },
+    ];
+    expect(getSessionNameFromEntries(entries)).toBe("my session");
+  });
+
+  it("finds the latest session_info when multiple exist", () => {
+    const entries = [
+      { type: "session_info", name: "old name" },
+      { type: "message", message: { role: "user", content: "hello" } },
+      { type: "session_info", name: "new name" },
+    ];
+    expect(getSessionNameFromEntries(entries)).toBe("new name");
+  });
+
+  it("falls back to first user message when no session_info exists", () => {
+    const entries = [
+      { type: "message", message: { role: "user", content: "hello world" } },
+      { type: "message", message: { role: "assistant", content: "hi" } },
+    ];
+    expect(getSessionNameFromEntries(entries)).toBe("hello world");
+  });
+
+  it("returns Untitled when no session_info and no user messages", () => {
+    const entries = [{ type: "message", message: { role: "assistant", content: "hi" } }];
+    expect(getSessionNameFromEntries(entries)).toBe("Untitled");
+  });
+
+  it("falls back to first user message when session_info has empty name", () => {
+    const entries = [
+      { type: "message", message: { role: "user", content: "hello" } },
+      { type: "session_info", name: "" },
+    ];
+    expect(getSessionNameFromEntries(entries)).toBe("hello");
+  });
+
+  it("does not truncate session_info name", () => {
+    const entries = [{ type: "session_info", name: "a".repeat(200) }];
+    expect(getSessionNameFromEntries(entries, 50)).toBe("a".repeat(200));
+  });
+
+  it("truncates long first-user-message fallback with ellipsis", () => {
+    const entries = [{ type: "message", message: { role: "user", content: "b".repeat(200) } }];
+    expect(getSessionNameFromEntries(entries, 50)).toBe(`${"b".repeat(49)}…`);
   });
 });

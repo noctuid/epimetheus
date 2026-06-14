@@ -1,25 +1,48 @@
 /**
  * Retention handling for pi message events.
+ *
+ * Handles flushing both tool-queue entries and full session upserts to Hindsight.
  */
 
-/** Message shown when a flush is blocked because extra context is not set. */
-export const FLUSH_BLOCKED_NO_EXTRA_CONTEXT =
-  "Hindsight flush blocked: extra context not set. Use /hindsight set-extra-context or the hindsight_set_extra_context tool to set extraction caveats before flushing.";
-
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { basename } from "node:path";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MemoryItemInput } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig } from "./config";
 import { expandSessionObservationScopes } from "./config";
-import { buildContextFromSessionName } from "./document";
-import { getHindsightMeta } from "./meta";
-import type { ToolQueueEntry } from "./queue";
 import {
-  deleteAutoQueue,
-  deleteToolQueue,
+  buildDocumentTags,
+  buildMessageArrayFromParsedSession,
+  parseSessionFile,
+  type SessionEntry,
+  type SessionHeader,
+} from "./document";
+import {
+  buildMetaFile,
+  FLUSH_BLOCKED_NO_EXTRA_CONTEXT,
+  getHindsightMeta,
+  type HindsightMeta,
+  isExtraContextSet,
+  type MetaFile,
+  shouldSessionBeRetained,
+  writeMetaFile,
+} from "./meta";
+import { resolveParsedSessionMetadata, writeMessagesJsonl } from "./parsed-store";
+import type { ClaimReadError, QueueClaim, QueueResult, ToolQueueEntry } from "./queue";
+import {
+  claimPendingFlag,
+  claimToolQueue,
+  completeClaim,
   enqueueToolMessage,
-  readAutoQueue,
-  readToolQueue,
+  getToolQueueEntryCount,
+  hasPendingFlag,
+  readClaimedToolEntries,
+  recoverStaleInflightClaims,
+  restoreClaim,
 } from "./queue";
+import { readSessionState, type SessionStateFile, writeSessionState } from "./session-state";
 import { getBasedir, getProjectName } from "./utils";
 
 /**
@@ -27,18 +50,18 @@ import { getBasedir, getProjectName } from "./utils";
  * Tags are built at queue time to capture the session context when retained.
  * Observation scopes are captured from config at queue time
  * (not settable by the LLM - re-evaluate if want it to be manually settable).
- * Returns true on success, false on failure.
+ * Returns structured result — callers should notify on failure.
  */
-export function queueToolRetain(
+export async function queueToolRetain(
   sessionId: string,
   content: string,
-  userTags: string[] | undefined,
+  toolTags: string[] | undefined,
   metadata: Record<string, string> | undefined,
   sessionCwd: string,
   parentSessionId: string | undefined,
   config: Pick<HindsightConfig, "constantTags" | "observationScopes">,
-  sessionTags?: string[]
-): boolean {
+  sessionUserTags: string[]
+): Promise<QueueResult> {
   const projectName = getProjectName(sessionCwd);
   // Build complete tags at queue time
   const tags = [
@@ -49,8 +72,8 @@ export function queueToolRetain(
     `project:${projectName}`,
     `store_method:tool`,
     `parent:${parentSessionId ?? sessionId}`,
-    ...(userTags ?? []),
-    ...(sessionTags ?? []),
+    ...(toolTags ?? []),
+    ...sessionUserTags,
   ];
 
   // Expand placeholders in observation scopes at queue time
@@ -68,167 +91,610 @@ export function queueToolRetain(
     metadata,
     timestamp: new Date().toISOString(),
     store_method: "tool",
+    sessionId,
+    parentSessionId,
+    sessionCwd,
+    document_id: `tool:${sessionId}:${randomUUID()}`,
     ...(expandedScopes ? { observation_scopes: expandedScopes } : {}),
   };
+
   return enqueueToolMessage(sessionId, entry);
 }
 
 /**
- * Flush auto-queue entries to Hindsight.
- * All auto entries are combined into a single document with session ID.
+ * Convert a tool queue entry (disk/recovery format) to a Hindsight memory input
+ * for the retainBatch API.
  */
-export async function flushAutoQueue(
-  sessionId: string,
-  sessionName: string,
-  sessionStartTime: string,
-  sessionCwd: string,
-  parentSessionId: string | undefined,
-  config: HindsightConfig,
-  client: HindsightClientWrapper,
-  signal?: AbortSignal,
-  entries?: Array<{ type: string; customType?: string; data?: unknown }>
-): Promise<{ success: boolean; error?: string; count: number }> {
-  const autoEntries = readAutoQueue(sessionId);
-  if (autoEntries.length === 0) {
-    return { success: true, count: 0 };
-  }
-
-  // Build tags: base session tags + session metadata tags
-  const meta = entries ? getHindsightMeta(entries) : null;
-  const sessionTags = meta?.tags ?? [];
-  const projectName = getProjectName(sessionCwd);
-  const tags = [
-    ...config.constantTags,
-    `session:${sessionId}`,
-    `cwd:${sessionCwd}`,
-    `basedir:${getBasedir(sessionCwd)}`,
-    `project:${projectName}`,
-    `store_method:auto`,
-    `parent:${parentSessionId ?? sessionId}`,
-    ...sessionTags,
-  ];
-
-  // Build context using shared function for parity with document.ts.
-  // The session name is derived and truncated by getSessionDisplayName()
-  // (using hindsightContextMaxLength) before being passed here.
-  // buildContextFromSessionName only assembles prefix + name + extraContext.
-  const extraContext = meta?.extraContext;
-  const context = buildContextFromSessionName(
-    config.hindsightContextPrefix,
-    sessionName,
-    extraContext
-  );
-
-  // Concatenate all entries into single content array
-  const contentItems = autoEntries.map((entry) => entry.entry);
-
-  // Expand placeholders in observation scopes
-  const expandedScopes = expandSessionObservationScopes(
-    config,
-    sessionId,
-    parentSessionId,
-    sessionCwd,
-    projectName
-  );
-
-  const result = await client.retain(
-    {
-      content: JSON.stringify(contentItems),
-      documentId: sessionId,
-      updateMode: "append",
-      context,
-      timestamp: sessionStartTime,
-      tags,
-      entities: config.entities.length > 0 ? config.entities : undefined,
-      observationScopes: expandedScopes,
-    },
-    signal
-  );
-
-  if (result.success) {
-    deleteAutoQueue(sessionId);
-  }
+function toolQueueEntryToMemoryItem(entry: ToolQueueEntry): MemoryItemInput {
   return {
-    success: result.success,
-    error: result.error,
-    count: result.success ? autoEntries.length : 0,
+    content: entry.content,
+    tags: entry.tags,
+    metadata: entry.metadata,
+    observation_scopes: entry.observation_scopes,
+    timestamp: entry.timestamp,
+    update_mode: "replace",
+    ...(entry.document_id ? { document_id: entry.document_id } : {}),
   };
 }
 
 /**
  * Flush tool-queue entries to Hindsight.
+ *
+ * The flush guard (requireExtraContextBeforeFlush) does not apply here —
+ * tool retains are explicit manual observations from the `hindsight_retain` tool.
+ *
  * Uses batch retain for efficiency.
  * On success, clears the queue. On failure, leaves queue intact for retry.
  */
 export async function flushToolQueue(
   sessionId: string,
   client: HindsightClientWrapper,
+  ctx: ExtensionContext,
   signal?: AbortSignal
 ): Promise<{ success: boolean; error?: string; count: number }> {
-  const entries = readToolQueue(sessionId);
-  if (entries.length === 0) {
-    return { success: true, count: 0 };
-  }
+  const fail = (error: unknown): { success: false; error: string; count: 0 } => {
+    const msg = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Failed to flush tool queue: ${msg}`, "error");
+    return { success: false, error: msg, count: 0 };
+  };
 
-  const items: MemoryItemInput[] = entries.map((entry) => ({
-    content: entry.content,
-    tags: entry.tags,
-    metadata: entry.metadata,
-    observation_scopes: entry.observation_scopes,
-    timestamp: entry.timestamp,
-  }));
+  let activeClaim: QueueClaim | undefined;
+  let claimCompleted = false;
 
-  const result = await client.retainBatch(items, signal);
+  try {
+    recoverStaleInflightClaims(sessionId);
 
-  if (result.success) {
-    deleteToolQueue(sessionId);
-    return { success: true, count: entries.length };
-  } else {
-    // Leave queue intact for retry
-    console.warn(`Failed to flush tool queue: ${result.error}`);
-    return { success: false, error: result.error, count: 0 };
+    const claim = claimToolQueue(sessionId);
+    if (!claim) {
+      return { success: true, count: 0 };
+    }
+    activeClaim = claim;
+
+    const { entries, errors: readErrors } = readClaimedToolEntries(claim);
+    if (readErrors.length > 0) {
+      restoreClaim(claim);
+      claimCompleted = true;
+      const detail = readErrors
+        .map((e: ClaimReadError) => {
+          const name = basename(e.filePath);
+          if (e.type === "missing") return `${name}: file missing from claim`;
+          if (e.type === "malformed_json") return `${name}: malformed JSON (${e.error})`;
+          return `${name}: invalid tool entry (${e.reason})`;
+        })
+        .join("; ");
+      const msg = `Corrupt tool queue entries — claim restored: ${detail}`;
+      ctx.ui.notify(msg, "error");
+      return { success: false, error: msg, count: 0 };
+    }
+    if (entries.length === 0) {
+      completeClaim(claim);
+      claimCompleted = true;
+      return { success: true, count: 0 };
+    }
+
+    const items = entries.map(toolQueueEntryToMemoryItem);
+    const result = await client.retainBatch(items, signal);
+
+    if (result.success) {
+      completeClaim(claim);
+      claimCompleted = true;
+      ctx.ui.notify(`Flushed ${entries.length} tool entries`, "info");
+      return { success: true, count: entries.length };
+    }
+
+    restoreClaim(claim);
+    return fail(result.error ?? "Unknown error");
+  } catch (e) {
+    if (activeClaim && !claimCompleted) {
+      try {
+        restoreClaim(activeClaim);
+      } catch (restoreError) {
+        const restoreMsg =
+          restoreError instanceof Error ? restoreError.message : String(restoreError);
+        const origMsg = e instanceof Error ? e.message : String(e);
+        const msg = `${origMsg} (restore also failed: ${restoreMsg})`;
+        ctx.ui.notify(`Failed to flush tool queue: ${msg}`, "error");
+        return { success: false, error: msg, count: 0 };
+      }
+    }
+    return fail(e);
   }
 }
 
 /**
- * Flush both auto and tool queues for a session.
+ * Count user-facing pending work units for a session: pending session reparse
+ * counts as 1 if any pending marker exists, plus all tool entries.
  */
-export async function flushQueues(
+export function getPendingWorkCount(sessionId: string): number {
+  const pendingCount = hasPendingFlag(sessionId) ? 1 : 0;
+  const toolCount = getToolQueueEntryCount(sessionId);
+  return pendingCount + toolCount;
+}
+
+/**
+ * Flush the current session — check for pending work, parse+upsert if needed,
+ * and flush tool queue.
+ */
+export async function flushCurrentSession(
   sessionId: string,
-  sessionName: string,
-  sessionStartTime: string,
-  sessionCwd: string,
-  parentSessionId: string | undefined,
+  sessionPath: string,
   config: HindsightConfig,
   client: HindsightClientWrapper,
+  ctx: ExtensionContext,
   signal?: AbortSignal,
-  entries?: Array<{ type: string; customType?: string; data?: unknown }>
-): Promise<{ success: boolean; error?: string; autoCount: number; toolCount: number }> {
-  const autoResult = await flushAutoQueue(
-    sessionId,
-    sessionName,
-    sessionStartTime,
-    sessionCwd,
-    parentSessionId,
+  options?: { notifyNoWork?: boolean }
+): Promise<void> {
+  try {
+    recoverStaleInflightClaims(sessionId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    ctx.ui.notify(`In-flight recovery failed: ${msg}`, "error");
+  }
+
+  let sessionHadPendingWork = false;
+
+  if (hasPendingFlag(sessionId)) {
+    if (sessionPath && existsSync(sessionPath)) {
+      await parseAndUpsertSession(sessionPath, sessionId, config, client, ctx, signal, {
+        requirePending: true,
+      });
+      sessionHadPendingWork = true;
+    } else {
+      ctx.ui.notify(
+        "Session file not found — pending session work left queued. Restore or fix the session file, then retry flush.",
+        "warning"
+      );
+      sessionHadPendingWork = true;
+    }
+  }
+
+  const toolResult = await flushToolQueue(sessionId, client, ctx, signal);
+  const toolDidWork = toolResult.count > 0 || !toolResult.success;
+
+  if (!sessionHadPendingWork && !toolDidWork && options?.notifyNoWork) {
+    ctx.ui.notify("No pending changes", "info");
+  }
+}
+
+// ============================================
+// Upsert to Hindsight
+// ============================================
+
+/** Params shared by upsertToHindsight and parseAndUpsertSession. */
+export interface UpsertParams {
+  content: string;
+  documentId: string;
+  context: string;
+  timestamp: string;
+  tags: string[];
+  sessionId: string;
+  parentSessionId?: string;
+  sessionCwd: string;
+}
+
+/**
+ * Call client.retain with standard options (updateMode=replace, entities from config).
+ * Throws on failure.
+ */
+export async function upsertToHindsight(
+  client: HindsightClientWrapper,
+  params: UpsertParams,
+  config: HindsightConfig,
+  signal?: AbortSignal
+): Promise<void> {
+  const expandedScopes = expandSessionObservationScopes(
     config,
-    client,
-    signal,
-    entries
+    params.sessionId,
+    params.parentSessionId,
+    params.sessionCwd,
+    getProjectName(params.sessionCwd)
   );
 
-  const toolResult = await flushToolQueue(sessionId, client, signal);
+  const result = await client.retain(
+    {
+      content: params.content,
+      documentId: params.documentId,
+      context: params.context,
+      timestamp: params.timestamp,
+      tags: params.tags,
+      updateMode: "replace",
+      entities: config.entities.length > 0 ? config.entities : undefined,
+      observationScopes: expandedScopes,
+    },
+    signal
+  );
 
+  if (!result.success) {
+    throw new Error(result.error ?? "Unknown error");
+  }
+}
+
+// ============================================
+// Flush guard check using live state
+// ============================================
+
+/**
+ * Fast-path check using live session state to avoid parsing large session files.
+ *
+ * Returns `{ blocked: true }` with a result message if the session should be
+ * skipped, or `{ blocked: false }` with the parsed live state (or null if missing).
+ *
+ * When live state is missing or malformed, returns `{ blocked: false }` so the
+ * caller falls back to parsing the session file.
+ */
+function preFlushCheck(
+  sessionId: string,
+  config: HindsightConfig
+): {
+  blocked: boolean;
+  result?: { message: string; level: "info" | "warning" };
+  liveState: SessionStateFile | null;
+} {
+  const liveState = readSessionState(sessionId);
+  if (!liveState) {
+    // Missing state — not blocking; fall back to parsing
+    return { blocked: false, liveState: null };
+  }
+
+  if (!liveState.retained) {
+    return {
+      blocked: true,
+      result: { message: "Session does not allow retention", level: "info" },
+      liveState,
+    };
+  }
+
+  if (config.requireExtraContextBeforeFlush && !isExtraContextSet(liveState.extraContext)) {
+    return {
+      blocked: true,
+      result: { message: FLUSH_BLOCKED_NO_EXTRA_CONTEXT, level: "warning" },
+      liveState,
+    };
+  }
+
+  return { blocked: false, liveState };
+}
+
+// ============================================
+// parseAndUpsertSession helpers
+// ============================================
+
+/**
+ * Handle the retention-disabled fast-block: clear pending markers and notify.
+ * Extra-context guard blocks leave pending markers — setting context later
+ * should allow flushing the same work.
+ */
+function notifyPreFlushBlocked(
+  sessionId: string,
+  retained: boolean,
+  result: { message: string; level: "info" | "warning" },
+  ctx: ExtensionContext
+): void {
+  if (!retained) {
+    const claim = claimPendingFlag(sessionId);
+    if (claim) completeClaim(claim);
+  }
+  ctx.ui.notify(result.message, result.level);
+}
+
+/**
+ * Write parsed-session cache files and complete the claim after a successful flush.
+ */
+function finalizeSuccessfulFlush(
+  sessionId: string,
+  formattedStrs: string[],
+  meta: MetaFile,
+  claim: QueueClaim | null
+): boolean {
+  if (claim && !existsSync(claim.claimDir)) {
+    return false;
+  }
+  writeMessagesJsonl(sessionId, formattedStrs);
+  writeMetaFile(sessionId, meta);
+  if (claim) {
+    completeClaim(claim);
+  }
+  return true;
+}
+
+/**
+ * Best-effort claim restore after a flush failure.
+ */
+function restoreClaimAfterFailure(claim: QueueClaim, originalError: unknown): string | null {
+  try {
+    restoreClaim(claim);
+    return null;
+  } catch (restoreError) {
+    const restoreMsg = restoreError instanceof Error ? restoreError.message : String(restoreError);
+    const origMsg = originalError instanceof Error ? originalError.message : String(originalError);
+    return `${origMsg} (claim restore also failed: ${restoreMsg})`;
+  }
+}
+
+/**
+ * Resolve session flush metadata from parsed session data.
+ *
+ * After parsing, the session file is the sole authority for all metadata.
+ * Live state is NOT consulted here — it was only used for pre-parse fast guards.
+ * Structural/upsert identity comes from the parsed session header.
+ * User-controlled metadata (extra context, tags) comes from parsed entries.
+ * Context is built from current config.
+ */
+function resolveSessionFlushMetadata(
+  header: SessionHeader,
+  entries: SessionEntry[],
+  hindsightMeta: HindsightMeta | null,
+  config: HindsightConfig
+): {
+  parentSessionId: string | undefined;
+  sessionCwd: string;
+  sessionTimestamp: string;
+  sessionName: string;
+  extraContext: string | null;
+  sessionUserTags: string[];
+  tags: string[];
+  context: string;
+} {
+  const base = resolveParsedSessionMetadata(header, entries, hindsightMeta, config);
+  const tags = buildDocumentTags(header, config, {
+    sessionUserTags: base.sessionUserTags,
+    parentSessionId: base.parentSessionId,
+  });
   return {
-    success: autoResult.success && toolResult.success,
-    error: autoResult.error ?? toolResult.error,
-    autoCount: autoResult.count,
-    toolCount: toolResult.count,
+    ...base,
+    tags,
   };
 }
 
 /**
- * Get total count of queued messages for a session (auto + tool).
+ * Build the MetaFile (parsed artifact) for writing after a successful flush.
  */
-export function getQueueCount(sessionId: string): number {
-  return readAutoQueue(sessionId).length + readToolQueue(sessionId).length;
+function buildSessionMetaFile(params: {
+  sessionId: string;
+  sessionName: string;
+  extraContext: string | null;
+  sessionUserTags: string[];
+  parentSessionId: string | undefined;
+  sessionCwd: string;
+  sessionTimestamp: string;
+  messageCount: number;
+  isRetained: boolean;
+}): MetaFile {
+  return buildMetaFile({
+    sessionId: params.sessionId,
+    sessionName: params.sessionName,
+    extraContext: params.extraContext,
+    sessionUserTags: params.sessionUserTags,
+    parentSessionId: params.parentSessionId,
+    sessionCwd: params.sessionCwd,
+    sessionTimestamp: params.sessionTimestamp,
+    messageCount: params.messageCount,
+    retained: params.isRetained,
+  });
+}
+
+/**
+ * Build the UpsertParams for the Hindsight retain API call.
+ */
+function buildSessionUpsertParams(
+  content: string,
+  resolved: {
+    context: string;
+    sessionTimestamp: string;
+    tags: string[];
+    parentSessionId: string | undefined;
+    sessionCwd: string;
+  },
+  sessionId: string
+): UpsertParams {
+  return {
+    content,
+    documentId: sessionId,
+    context: resolved.context,
+    timestamp: resolved.sessionTimestamp,
+    tags: resolved.tags,
+    sessionId,
+    parentSessionId: resolved.parentSessionId,
+    sessionCwd: resolved.sessionCwd,
+  };
+}
+
+// ============================================
+// parseAndUpsertSession (unified flush path)
+// ============================================
+
+/**
+ * Parse a session file and upsert to Hindsight.
+ *
+ * Uses live session state only for fast pre-checks. If state is missing or
+ * malformed, falls back to parsing the session file. After parsing, derives
+ * all metadata from the parsed entries + config (not from stale cached data).
+ *
+ * After a successful upsert:
+ * - Writes `.messages.jsonl` (review/export artifact)
+ * - Writes `.meta.json` (parsed artifact manifest for upsert-all-parsed)
+ * - Updates live session state from parsed metadata
+ */
+export async function parseAndUpsertSession(
+  sessionPath: string,
+  sessionId: string,
+  config: HindsightConfig,
+  client: HindsightClientWrapper,
+  ctx: ExtensionContext,
+  signal?: AbortSignal,
+  options?: { requirePending?: boolean }
+): Promise<void> {
+  // Fast-path blocking checks using live state
+  const preCheck = preFlushCheck(sessionId, config);
+  if (preCheck.blocked) {
+    notifyPreFlushBlocked(
+      sessionId,
+      preCheck.liveState?.retained ?? true,
+      preCheck.result as { message: string; level: "info" | "warning" },
+      ctx
+    );
+    return;
+  }
+
+  let claim: QueueClaim | null = null;
+  try {
+    claim = claimPendingFlag(sessionId);
+    if (options?.requirePending && !claim) {
+      ctx.ui.notify("No pending changes", "info");
+      return;
+    }
+
+    // Always reparse the session file for conversation messages.
+    const { header, entries } = parseSessionFile(sessionPath);
+    // Defensive invariant: the caller-supplied sessionId must match the parsed
+    // session file header id. This should never happen in normal operation —
+    // the caller derives sessionId from the same file path/source. But if a
+    // wrong or corrupt session file is somehow passed, proceeding would write
+    // parsed artifacts/live state/upserts under the wrong identity (tags,
+    // document id, cache paths all key off the caller sessionId). Hard-fail
+    // instead so the pending claim is restored (the catch below restores it)
+    // and the user is notified of the mismatch for retry/fix.
+    if (header.id !== sessionId) {
+      throw new Error(
+        `Session ID mismatch: expected ${sessionId} but session file header has ${header.id}`
+      );
+    }
+    const hindsightMeta = getHindsightMeta(entries);
+    const liveState = preCheck.liveState;
+
+    // After parsing, session file is the sole authority for retention.
+    const isRetained = shouldSessionBeRetained(entries, config);
+    if (!isRetained) {
+      // Write/update live state so future flushes can fast-block without reparsing
+      const parsedExtraContext =
+        hindsightMeta && "extraContext" in hindsightMeta
+          ? (hindsightMeta.extraContext ?? "")
+          : null;
+      updateLiveStateFromParsed(sessionId, false, parsedExtraContext, liveState);
+      if (claim) completeClaim(claim);
+      ctx.ui.notify("Session does not allow retention", "info");
+      return;
+    }
+
+    // Extra context check: derive from parsed entries, not live state.
+    // Live state was only used for pre-parse fast guard above.
+    const parsedExtraContext =
+      hindsightMeta && "extraContext" in hindsightMeta ? (hindsightMeta.extraContext ?? "") : null;
+    if (config.requireExtraContextBeforeFlush && !isExtraContextSet(parsedExtraContext)) {
+      // Write/update live state so future flushes can fast-block without reparsing
+      updateLiveStateFromParsed(sessionId, true, parsedExtraContext, liveState);
+      if (claim) restoreClaim(claim);
+      ctx.ui.notify(FLUSH_BLOCKED_NO_EXTRA_CONTEXT, "warning");
+      return;
+    }
+
+    const {
+      messages,
+      sessionId: parsedSessionId,
+      warning,
+    } = buildMessageArrayFromParsedSession(header, entries, config);
+
+    if (messages.length === 0) {
+      if (warning) {
+        if (claim) restoreClaim(claim);
+        ctx.ui.notify(warning, "warning");
+        return;
+      }
+      if (claim) completeClaim(claim);
+      ctx.ui.notify("No messages to parse", "info");
+      return;
+    }
+
+    // Resolve metadata from parsed session data (session file is authority, not live state)
+    const resolved = resolveSessionFlushMetadata(header, entries, hindsightMeta, config);
+
+    // Serialize messages
+    const formattedStrs = messages.map((m) => JSON.stringify(m));
+    const content = formattedStrs.join("\n");
+
+    // Build parsed artifact meta and upsert params
+    const meta = buildSessionMetaFile({
+      sessionId: parsedSessionId,
+      sessionName: resolved.sessionName,
+      extraContext: resolved.extraContext,
+      sessionUserTags: resolved.sessionUserTags,
+      parentSessionId: resolved.parentSessionId,
+      sessionCwd: resolved.sessionCwd,
+      sessionTimestamp: resolved.sessionTimestamp,
+      messageCount: formattedStrs.length,
+      isRetained,
+    });
+    const upsertParams = buildSessionUpsertParams(
+      content,
+      {
+        context: resolved.context,
+        sessionTimestamp: resolved.sessionTimestamp,
+        tags: resolved.tags,
+        parentSessionId: resolved.parentSessionId,
+        sessionCwd: resolved.sessionCwd,
+      },
+      parsedSessionId
+    );
+
+    // Network call
+    await upsertToHindsight(client, upsertParams, config, signal);
+
+    // Finalize: write parsed artifacts and complete the claim. If the claim dir
+    // disappeared during the network call, queue state was concurrently cleared;
+    // do not rewrite parsed artifacts, live state, or success notifications from
+    // this stale flush.
+    const finalized = finalizeSuccessfulFlush(sessionId, formattedStrs, meta, claim);
+    if (!finalized) {
+      claim = null;
+      return;
+    }
+
+    // Update live session state from parsed metadata if it was missing or stale
+    updateLiveStateFromParsed(sessionId, isRetained, resolved.extraContext, liveState);
+
+    claim = null;
+
+    ctx.ui.notify(`Parsed and upserted ${formattedStrs.length} messages`, "info");
+  } catch (e) {
+    if (claim) {
+      const combinedMsg = restoreClaimAfterFailure(claim, e);
+      if (combinedMsg) {
+        ctx.ui.notify(combinedMsg, "error");
+        return;
+      }
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    ctx.ui.notify(msg, "error");
+  }
+}
+
+/**
+ * Update live session state after a successful parse/upsert.
+ * Only writes if the state was missing or would change.
+ */
+function updateLiveStateFromParsed(
+  sessionId: string,
+  retained: boolean,
+  extraContext: string | null,
+  currentState: SessionStateFile | null
+): void {
+  // Only update if state is missing or would actually change
+  if (
+    currentState &&
+    currentState.retained === retained &&
+    currentState.extraContext === extraContext
+  ) {
+    return;
+  }
+
+  const newState: SessionStateFile = {
+    retained,
+    extraContext,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const success = writeSessionState(sessionId, newState);
+  if (!success) {
+    console.warn(`Failed to update live session state for ${sessionId} after flush`);
+  }
 }

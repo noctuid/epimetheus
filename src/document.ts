@@ -1,17 +1,16 @@
 /**
- * Document building from pi session files.
+ * Low-level session file parsing (Hindsight agnostic).
+ *
+ * Reads raw session files, extracts header/entries, builds the message array
+ * for upsert, and computes document tags/context. Produces in-memory data only —
+ * does not write to disk. Higher-level orchestration (structured results,
+ * cache I/O) lives in parsed-store.ts.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import type { HindsightConfig, RetainContent, ToolFilter } from "./config";
 import { prepareEntry, shouldRetainMessage } from "./prepare";
-import {
-  deriveSessionName,
-  extractParentSessionId,
-  getBasedir,
-  getContextNameMaxLength,
-  getProjectName,
-} from "./utils";
+import { extractParentSessionId, getBasedir, getProjectName } from "./utils";
 
 export interface SessionHeader {
   type: "session";
@@ -27,18 +26,18 @@ export interface SessionEntry {
   id: string;
   parentId: string | null;
   timestamp: string;
+  /** Present on session_info entries. */
+  name?: string;
+  /** Present on custom entries (e.g. hindsight-meta). */
+  customType?: string;
+  /** Payload of custom entries. */
+  data?: unknown;
   message?: {
     role: string;
     content: unknown;
     responseId?: string;
     timestamp?: number;
   };
-}
-
-export interface DocumentContent {
-  content: string;
-  documentId: string;
-  warning?: string;
 }
 
 /**
@@ -50,7 +49,7 @@ export function parseSessionFile(sessionPath: string): {
   entries: SessionEntry[];
 } {
   const content = readFileSync(sessionPath, "utf-8");
-  const lines = content.trim().split("\n");
+  const lines = content.split("\n");
 
   let header: SessionHeader | null = null;
   const entries: SessionEntry[] = [];
@@ -101,7 +100,7 @@ function formatEntry(
   entry: SessionEntry,
   config: Pick<HindsightConfig, "retainContent" | "strip" | "toolFilter">
 ): object {
-  // Use prepareEntry for consistent handling with auto-queue
+  // Use prepareEntry for consistent handling with runtime message preparation
   return prepareEntry(entry as unknown as Record<string, unknown>, config);
 }
 
@@ -158,40 +157,6 @@ function findForkStartIndex(conversationEntries: SessionEntry[], forkPoint: numb
 }
 
 /**
- * Build document content from a session file.
- *
- * Delegates to {@link buildMessageArrayFromParsedSession} and serializes to JSON.
- */
-export function buildDocumentContent(
-  sessionPath: string,
-  config: HindsightConfig
-): DocumentContent {
-  const { header, entries } = parseSessionFile(sessionPath);
-  const { messages, documentId, warning } = buildMessageArrayFromParsedSession(
-    header,
-    entries,
-    config
-  );
-  return {
-    content: JSON.stringify(messages),
-    documentId,
-    warning,
-  };
-}
-
-/**
- * Build an array of formatted messages from session entries.
- * Uses fork detection if the session has a parent.
- */
-export function buildMessageArrayFromSession(
-  sessionPath: string,
-  config: HindsightConfig
-): { messages: object[]; documentId: string; warning?: string } {
-  const { header, entries } = parseSessionFile(sessionPath);
-  return buildMessageArrayFromParsedSession(header, entries, config);
-}
-
-/**
  * Build an array of formatted messages from pre-parsed session data.
  * Uses fork detection if the session has a parent.
  */
@@ -199,26 +164,32 @@ export function buildMessageArrayFromParsedSession(
   header: SessionHeader,
   entries: SessionEntry[],
   config: HindsightConfig
-): { messages: object[]; documentId: string; warning?: string } {
+): { messages: object[]; sessionId: string; warning?: string } {
   // Check parentSession BEFORE filtering
   if (header.parentSession) {
+    // Try to load parent assistant IDs; if this fails, we cannot determine
+    // the fork point and must return zero messages to avoid duplicating
+    // parent content in Hindsight.
+    let parentAssistantIds: Set<string>;
     try {
-      const parentAssistantIds = loadParentAssistantIds(header.parentSession);
-      return buildForkedMessages(entries, header, parentAssistantIds, config);
-    } catch (_e) {
+      parentAssistantIds = loadParentAssistantIds(header.parentSession);
+    } catch (e) {
+      // Preserve the actual error message for diagnostics
+      const reason = e instanceof Error ? e.message : String(e);
       return {
         messages: [],
-        documentId: header.id,
-        warning: `Parent session not found: ${header.parentSession}`,
+        sessionId: header.id,
+        warning: `Cannot determine fork point for ${header.parentSession}: ${reason}`,
       };
     }
+    return buildForkedMessages(entries, header, parentAssistantIds, config);
   }
 
   // Not a fork - include all conversation messages
   const messages = buildMessageArray(entries, config);
   return {
     messages,
-    documentId: header.id,
+    sessionId: header.id,
   };
 }
 
@@ -243,7 +214,7 @@ function buildForkedMessages(
   header: SessionHeader,
   parentAssistantIds: Set<string>,
   config: Pick<HindsightConfig, "retainContent" | "strip" | "toolFilter">
-): { messages: object[]; documentId: string; warning?: string } {
+): { messages: object[]; sessionId: string; warning?: string } {
   const conversationEntries = entries.filter((e) =>
     isConversationMessage(e, config.retainContent, config.toolFilter)
   );
@@ -252,7 +223,7 @@ function buildForkedMessages(
   const forkPoint = findForkPoint(conversationEntries, parentAssistantIds);
 
   if (forkPoint === -1) {
-    return { messages: [], documentId: header.id, warning: "No new content in fork" };
+    return { messages: [], sessionId: header.id, warning: "No new content in fork" };
   }
 
   // Walk backward in conversationEntries to find the previous user message
@@ -261,7 +232,7 @@ function buildForkedMessages(
 
   return {
     messages,
-    documentId: header.id,
+    sessionId: header.id,
   };
 }
 
@@ -271,7 +242,7 @@ function buildForkedMessages(
 export function buildDocumentTags(
   header: SessionHeader,
   config: HindsightConfig,
-  options?: { storeMethod?: "auto" | "tool"; sessionTags?: string[]; parentSessionId?: string }
+  options?: { storeMethod?: "auto" | "tool"; sessionUserTags?: string[]; parentSessionId?: string }
 ): string[] {
   const tags = [
     ...config.constantTags,
@@ -287,13 +258,15 @@ export function buildDocumentTags(
     // Use provided parent ID if available, otherwise extract from parent session file
     const parentId = options?.parentSessionId ?? extractParentSessionId(header.parentSession);
     tags.push(`parent:${parentId ?? header.id}`);
+  } else if (options?.parentSessionId) {
+    tags.push(`parent:${options.parentSessionId}`);
   } else {
     tags.push(`parent:${header.id}`);
   }
 
   // Add session metadata tags
-  if (options?.sessionTags) {
-    tags.push(...options.sessionTags);
+  if (options?.sessionUserTags) {
+    tags.push(...options.sessionUserTags);
   }
 
   return tags;
@@ -315,22 +288,4 @@ export function buildContextFromSessionName(
   const base = hindsightContextPrefix + sessionName;
   if (!extraContext) return base;
   return `${base}\n${extraContext}`;
-}
-
-/**
- * Get context string for Hindsight.
- *
- * Derives the session name using {@link deriveSessionName} (with proper
- * truncation via hindsightContextMaxLength) and assembles the final context
- * string with prefix and extra context.
- */
-export function getHindsightContext(
-  sessionPath: string,
-  config: HindsightConfig,
-  sessionName?: string,
-  extraContext?: string
-): string {
-  const { entries } = parseSessionFile(sessionPath);
-  const name = deriveSessionName(sessionName, entries, getContextNameMaxLength(config));
-  return buildContextFromSessionName(config.hindsightContextPrefix, name, extraContext);
 }

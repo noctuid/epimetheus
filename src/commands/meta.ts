@@ -5,23 +5,120 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
-import {
-  buildMetaUpdate,
-  getHindsightMeta,
-  hasExtraContext,
-  shouldSessionBeRetained,
-} from "../meta";
-import { deleteAutoQueue, deleteToolQueue } from "../queue";
+import { getHindsightMeta, shouldSessionBeRetained, updateSessionMetadata } from "../meta";
+import { clearSessionQueueState, touchPendingFlag } from "../queue";
+import { parseAndUpsertSession } from "../retention";
 import { isToolEnabled, updateRetainToolVisibility } from "../tools";
 import type { Subcommand } from "./types";
-import { parseAndUpsertSession } from "./utils";
+
+/**
+ * Enable retention for the current session.
+ *
+ * Always marks the session as retained. Prompts the user to parse-and-upsert
+ * the full session immediately, but does not cancel enabling retention if the
+ * user declines — the session will be retained on the next flush instead.
+ * Does not pre-clear queue state — any pending work will be flushed normally
+ * on the next flush cycle.
+ */
+async function enableRetention(
+  pi: ExtensionAPI,
+  client: HindsightClientWrapper,
+  config: HindsightConfig,
+  ctx: ExtensionContext,
+  entries: ReturnType<ExtensionContext["sessionManager"]["getEntries"]>
+): Promise<void> {
+  // No extra-context guard here: the user can enable retention and set
+  // extra context later. The guard only blocks actual upserts (flush,
+  // parse-and-upsert, upsert-all-parsed).
+  const sessionId = ctx.sessionManager.getSessionId();
+
+  await updateSessionMetadata(pi, sessionId, entries, { retained: true }, config);
+
+  if (isToolEnabled(config, "retain")) {
+    updateRetainToolVisibility(pi, true);
+  }
+
+  // Create a pending marker immediately so that if the upsert fails or can't
+  // run (missing session file, network/parse error), the session is still
+  // marked dirty and will be retained on the next flush.
+  if (sessionId) {
+    const result = touchPendingFlag(sessionId, "toggle-retain-on");
+    if (!result.success) {
+      ctx.ui.notify(`Failed to queue session for retention: ${result.error}`, "warning");
+    }
+  }
+
+  const answer = await ctx.ui.confirm(
+    "Upsert session now?",
+    "Upsert the full session to Hindsight now? If you decline, it will be retained on the next flush."
+  );
+
+  if (!answer) {
+    ctx.ui.notify(
+      "Session retention: enabled. The session will be retained on the next flush.",
+      "info"
+    );
+    return;
+  }
+
+  // Parse and upsert the full session
+  const sessionPath = ctx.sessionManager.getSessionFile();
+  ctx.ui.notify("Session retention: enabled", "info");
+
+  if (sessionId && sessionPath) {
+    await parseAndUpsertSession(sessionPath, sessionId, config, client, ctx, ctx.signal, {
+      requirePending: false,
+    });
+  } else {
+    ctx.ui.notify("Session file not found — could not parse and upsert", "warning");
+  }
+}
+
+/**
+ * Disable retention for the current session.
+ *
+ * Marks retained false before clearing queued state so new auto/tool
+ * retain attempts see retention disabled, then discards already-queued work.
+ */
+async function disableRetention(
+  pi: ExtensionAPI,
+  config: HindsightConfig,
+  ctx: ExtensionContext,
+  entries: ReturnType<ExtensionContext["sessionManager"]["getEntries"]>
+): Promise<void> {
+  // Toggling OFF: confirm since queued messages will be deleted
+  const answer = await ctx.ui.confirm(
+    "Disable retention?",
+    "Queued retain tool memories will be deleted and will not be flushed."
+  );
+
+  if (!answer) {
+    ctx.ui.notify("Retention not disabled. Use /hindsight toggle-retain again to disable.", "info");
+    return;
+  }
+
+  const sessionId = ctx.sessionManager.getSessionId();
+
+  await updateSessionMetadata(pi, sessionId, entries, { retained: false }, config);
+
+  if (isToolEnabled(config, "retain")) {
+    updateRetainToolVisibility(pi, false);
+  }
+
+  // clear after retain disabled to avoid new tool retains coming in and being
+  // missed
+  if (sessionId) {
+    clearSessionQueueState(sessionId);
+  }
+
+  ctx.ui.notify("Session retention: disabled (pending changes cleared)", "info");
+}
 
 /**
  * Create the toggle-retain subcommand — toggle whether the current session is retained.
  *
- * When toggling on, prompts the user to parse-and-upsert the full session first,
- * then deletes queue files since the full session was just upserted.
- * When toggling off, deletes queue files to prevent flushing.
+ * When toggling on, prompts the user to parse-and-upsert the full session first.
+ * When toggling off, clears queue files to prevent flushing.
  * Preserves existing tags in both directions.
  */
 export function createToggleRetainSubcommand(
@@ -39,96 +136,11 @@ export function createToggleRetainSubcommand(
 
       const entries = ctx.sessionManager.getEntries();
       const currentRetained = shouldSessionBeRetained(entries, config);
-      const newShouldRetain = !currentRetained;
 
-      const sessionId = ctx.sessionManager.getSessionId();
-
-      if (newShouldRetain) {
-        // Block toggling on if flush guard is active and extra context isn't set.
-        // Without extra context, the subsequent parse-and-upsert would also be blocked.
-        if (config.requireExtraContextBeforeFlush && !hasExtraContext(getHindsightMeta(entries))) {
-          ctx.ui.notify(
-            "Cannot enable retention: extra context not set. Use /hindsight set-extra-context or the hindsight_set_extra_context tool first.",
-            "warning"
-          );
-          return;
-        }
-
-        // Toggling ON: ask if user wants to parse-and-upsert first so the
-        // full session content is retained (newly queued messages append correctly)
-        const answer = await ctx.ui.confirm(
-          "Enable retention?",
-          "Parse and upsert the full session before enabling retention? This ensures the full conversation is retained."
-        );
-
-        if (!answer) {
-          ctx.ui.notify(
-            "Retention not enabled. Use /hindsight toggle-retain again to enable.",
-            "info"
-          );
-          return;
-        }
-
-        const existingMeta = getHindsightMeta(entries);
-        const meta = buildMetaUpdate(existingMeta, { retained: true });
-        pi.appendEntry("hindsight-meta", meta);
-
-        // Delete any existing queue files
-        // Note: there should not be a tool queue for a non-retained session
-        // (tool retains are only queued when retention is enabled), but clean up
-        // defensively in case the state got out of sync.
-        if (sessionId) {
-          deleteAutoQueue(sessionId);
-          deleteToolQueue(sessionId);
-        }
-
-        // Parse and upsert the full session
-        try {
-          const result = await parseAndUpsertSession(ctx, config, client);
-          ctx.ui.notify(`Session retention: enabled. ${result.message}.`, result.level);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          ctx.ui.notify(
-            `Session retention: enabled, but parse-and-upsert failed: ${msg}`,
-            "warning"
-          );
-        }
-
-        // Show hindsight_retain tool now that session is retained
-        if (isToolEnabled(config, "retain")) {
-          updateRetainToolVisibility(pi, true);
-        }
+      if (!currentRetained) {
+        await enableRetention(pi, client, config, ctx, entries);
       } else {
-        // Toggling OFF: confirm since queued messages will be deleted
-        const answer = await ctx.ui.confirm(
-          "Disable retention?",
-          "Queued messages will be deleted and will not be flushed."
-        );
-
-        if (!answer) {
-          ctx.ui.notify(
-            "Retention not disabled. Use /hindsight toggle-retain again to disable.",
-            "info"
-          );
-          return;
-        }
-
-        const existingMeta = getHindsightMeta(entries);
-        const meta = buildMetaUpdate(existingMeta, { retained: false });
-        pi.appendEntry("hindsight-meta", meta);
-
-        // Delete queue files so queued messages will NOT be flushed
-        if (sessionId) {
-          deleteAutoQueue(sessionId);
-          deleteToolQueue(sessionId);
-        }
-
-        ctx.ui.notify("Session retention: disabled (queued messages deleted)", "info");
-
-        // Hide hindsight_retain tool now that session is not retained
-        if (isToolEnabled(config, "retain")) {
-          updateRetainToolVisibility(pi, false);
-        }
+        await disableRetention(pi, config, ctx, entries);
       }
     },
   };
@@ -140,7 +152,7 @@ export function createToggleRetainSubcommand(
  * Appends the tag to the existing tag list, preserving the current retained state.
  * Warns if the tag already exists or no tag is provided.
  */
-export function createTagSubcommand(pi: ExtensionAPI): Subcommand {
+export function createTagSubcommand(pi: ExtensionAPI, config: HindsightConfig): Subcommand {
   return {
     description: "Add a tag to session metadata",
     handler: async (args: string, ctx: ExtensionContext) => {
@@ -161,8 +173,9 @@ export function createTagSubcommand(pi: ExtensionAPI): Subcommand {
 
       tags.push(tag);
 
-      const meta = buildMetaUpdate(existingMeta, { tags });
-      pi.appendEntry("hindsight-meta", meta);
+      const sessionId = ctx.sessionManager.getSessionId();
+      await updateSessionMetadata(pi, sessionId, entries, { tags }, config);
+
       ctx.ui.notify(`Tag "${tag}" added`, "info");
     },
   };
@@ -174,7 +187,7 @@ export function createTagSubcommand(pi: ExtensionAPI): Subcommand {
  * Removes the tag from the tag list, preserving the current retained state.
  * Omits the tags field entirely if no tags remain. Warns if the tag is not found.
  */
-export function createRemoveTagSubcommand(pi: ExtensionAPI): Subcommand {
+export function createRemoveTagSubcommand(pi: ExtensionAPI, config: HindsightConfig): Subcommand {
   return {
     description: "Remove a tag from session metadata",
     handler: async (args: string, ctx: ExtensionContext) => {
@@ -196,8 +209,9 @@ export function createRemoveTagSubcommand(pi: ExtensionAPI): Subcommand {
 
       tags.splice(index, 1);
 
-      const meta = buildMetaUpdate(existingMeta, { tags });
-      pi.appendEntry("hindsight-meta", meta);
+      const sessionId = ctx.sessionManager.getSessionId();
+      await updateSessionMetadata(pi, sessionId, entries, { tags }, config);
+
       ctx.ui.notify(`Tag "${tag}" removed`, "info");
     },
   };
@@ -224,19 +238,22 @@ export function createRemoveTagSubcommand(pi: ExtensionAPI): Subcommand {
  * need extra context), while never having set it blocks the flush.
  * Replaces any previously set extra context.
  */
-export function createExtraContextSubcommand(pi: ExtensionAPI): Subcommand {
+export function createExtraContextSubcommand(
+  pi: ExtensionAPI,
+  config: HindsightConfig
+): Subcommand {
   return {
     description: "Set extra context for extraction caveats (appended to Hindsight context field)",
     handler: async (args: string, ctx: ExtensionContext) => {
       const extraContext = args.trim();
 
       const entries = ctx.sessionManager.getEntries();
-      const existingMeta = getHindsightMeta(entries);
 
       // Always store extraContext (even empty string) so the flush guard
       // can distinguish "explicitly set to empty" from "never set".
-      const meta = buildMetaUpdate(existingMeta, { extraContext });
-      pi.appendEntry("hindsight-meta", meta);
+      const sessionId = ctx.sessionManager.getSessionId();
+      await updateSessionMetadata(pi, sessionId, entries, { extraContext }, config);
+
       if (extraContext) {
         ctx.ui.notify(`Extra context set`, "info");
       } else {

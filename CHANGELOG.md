@@ -2,6 +2,46 @@
 
 ## Pending
 
+## 0.4.0
+
+### Features
+
+- **`/hindsight flush-pending` subcommand** — Flushes all sessions with pending session markers or tool queue entries.
+- **Session chunking improvements** — Session flushes now consistently upsert the full reparsed session as jsonl with replace semantics instead of appending queued messages. This ensures that Hindsight will preferentially keep messages within the same chunk instead of splitting them.
+
+### Breaking Changes
+
+- **Message content is no longer queued to disk** — The `message_end` handler now creates pending markers instead of queueing message payloads. Session flushes reparse the Pi session JSONL and upsert the full session document with replace semantics.
+- **Parsed-session artifact format changed** — `parsed-sessions/{sessionId}.json` is replaced by `{sessionId}.messages.jsonl` plus `{sessionId}.meta.json`. The metadata artifact stores parsed inputs such as `sessionName`, `extraContext`, session user tags, cwd, timestamps, and retention state; full Hindsight context is rebuilt at upsert time.
+- **Live session state added for flush guards** — New `session-state/<session-id>.json` files store operational guard state (`retained`, `extraContext`, `updatedAt`) for fast pre-parse checks. Normal flush final metadata still comes from the freshly parsed session file.
+
+User note:
+- Please flush before updating if you have un-ingested memories from `hindsight_retain` tool calls.
+- Old parsed-session artifacts are not migrated. Re-parse and ingest sessions you want rechunked to avoid message splitting. Note that old sessions ingested with `parse-and-upsert-session` are already chunked to avoid message splitting.
+
+### Fixes
+
+- **Multiline slash command arguments** — `/hindsight` subcommand dispatch now preserves internal whitespace and newlines in arguments, so `/hindsight set-extra-context` can store multiline caveats entered with Shift+Return.
+- **Cross-platform concurrent queue** — Atomic rename-based claiming works without native locks and supports multiple Pi terminals enqueueing/flushing concurrently.
+- **Self-healing inflight recovery** — Abandoned claims are detected using claim metadata, same-host PID checks, and age-based fallbacks, then restored to the live queue for retry.
+- **Retry-idempotent tool retains** — Each queued tool retain stores a stable per-entry document ID and is flushed with replace semantics, avoiding duplicate memories when the same queued entry is retried.
+- **Flush guard correctness** — Automatic flushes respect retention and extra-context guard state. Fast guard checks use live session state, but once parsing happens, the session file is authoritative for retention, tags, session name, and extra context.
+- **Toggle-retain reliability** — Enabling retention writes metadata, shows the retain tool, and queues the session before the optional immediate upsert. Disabling retention updates metadata/tool visibility *before* clearing queued state. Given the new consistent ingestion method, it is also possible to toggle retention on without immediately upserting.
+- **Flush feedback improved** — `/hindsight flush-pending` confirmation counts session reparses and tool queues separately, per-session notifications replace the aggregate summary, and no-work notifications are scoped to explicit flushes.
+- **No data loss on corrupt tool queue entries** — `readClaimedToolEntries` now reports errors for missing, malformed-JSON, and invalid-schema claimed files instead of silently skipping them. `flushToolQueue` restores the claim and returns failure with a clear error (including filename and error type) when any claimed file is unreadable, rather than completing the claim and deleting the entries.
+- **Session ID invariant guard** — `parseAndUpsertSession` now hard-fails if the parsed session file header id does not match the caller-supplied session id. This is a defensive check for a condition that should never occur in normal operation; it prevents writing parsed artifacts/live state/upserts under the wrong identity if a wrong or corrupt session file is passed. On mismatch, the pending claim is restored (retryable) and the user is notified.
+- **Removed `lastUpsertedAt` from parsed `.meta.json`** — The `lastUpsertedAt` field is no longer stored in or validated for parsed-session artifact metadata. `/hindsight upsert-all-parsed` now derives the upsert timestamp from the required non-empty `sessionTimestamp`. Removes a misleading per-upsert clock field from the review/export manifest.
+- **Error reporting improved** — Flush paths report parse and tool-queue errors, and fork parent loading reports the underlying parent-load error instead of always claiming the parent session was not found.
+
+### Documentation
+
+- Added `docs/ARCHITECTURE.md` documenting the queue protocol, claim/recovery flow, live session state, parsed artifacts, and normal flush authority model.
+
+### Internal
+
+- Major refactor/simplification (no longer multiple parsing/upsert paths)
+- Removed obsolete auto-queue APIs and dead queue helpers (e.g. `readToolQueue`, `deleteToolQueue`, `getQueueItemCount`).
+
 ## 0.3.0
 
 ### Features

@@ -1,440 +1,695 @@
 /**
  * Unit tests for queue file management.
+ *
+ * Tests the lock-free queue protocol using per-entry files and atomic rename claims.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
-  autoQueueExists,
-  deleteAutoQueue,
-  deleteToolQueue,
-  enqueueAutoMessage,
+  claimPendingFlag,
+  claimToolQueue,
+  clearSessionQueueState,
+  completeClaim,
   enqueueToolMessage,
-  ensureQueueDir,
   getQueueDir,
-  getQueuePath,
-  getToolQueuePath,
-  readAutoQueue,
-  readToolQueue,
+  getToolQueueEntryCount,
+  hasPendingFlag,
+  readClaimedToolEntries,
+  recoverStaleInflightClaims,
+  removePendingFlag,
+  restoreClaim,
   toolQueueExists,
+  touchPendingFlag,
 } from "../src/queue";
-import { setupTempAgentDir } from "./fixtures";
+import { getToolDir, getToolInflightDir } from "../src/queue-paths";
+import { readToolQueueFromDisk, setupTempAgentDir } from "./fixtures";
 
 // Use a unique session ID per test run to avoid collisions
 const TEST_SESSION_ID = `test-session-${Date.now()}`;
 
-// Redirect agent-dir filesystem operations to a temp directory instead of
-// the real user's ~/.pi/agent/ directory. PI_CODING_AGENT_DIR is read by
-// getAgentDir() in @earendil-works/pi-coding-agent.
 setupTempAgentDir("queue");
 
 afterEach(() => {
-  // Clean up any queue files created during tests
-  deleteAutoQueue(TEST_SESSION_ID);
-  deleteToolQueue(TEST_SESSION_ID);
+  // Clean up test session queue
+  const sessionDir = join(getQueueDir(), TEST_SESSION_ID);
+  if (existsSync(sessionDir)) {
+    rmSync(sessionDir, { recursive: true, force: true });
+  }
 });
 
-describe("getQueuePath", () => {
-  it("returns path with session ID", () => {
-    const path = getQueuePath("abc123");
-    expect(path).toContain("abc123.queue.jsonl");
-  });
-});
-
-describe("getToolQueuePath", () => {
-  it("returns tool queue path with session ID", () => {
-    const path = getToolQueuePath("abc123");
-    expect(path).toContain("abc123.tool-queue.jsonl");
-  });
-});
-
-describe("ensureQueueDir", () => {
-  it("creates queue directory if it does not exist", () => {
-    ensureQueueDir();
-    const queueDir = getQueueDir();
-    expect(existsSync(queueDir)).toBe(true);
-  });
-});
-
-describe("enqueueAutoMessage and readAutoQueue", () => {
-  it("appends auto entries to auto queue file", () => {
-    const entry: import("../src/queue").AutoQueueEntry = {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
+describe("Tool Queue", () => {
+  it("should enqueue and read tool entries", async () => {
+    const entry = {
+      content: "test content",
+      tags: ["tag1"],
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
     };
 
-    const result = enqueueAutoMessage(TEST_SESSION_ID, entry);
-    expect(result).toBe(true);
+    const result = await enqueueToolMessage(TEST_SESSION_ID, entry);
+    expect(result.success).toBe(true);
 
-    const entries = readAutoQueue(TEST_SESSION_ID);
+    const entries = readToolQueueFromDisk(TEST_SESSION_ID);
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.store_method).toBe("auto");
+    expect(entries[0]?.content).toBe("test content");
+    expect(entries[0]?.tags).toEqual(["tag1"]);
   });
 
-  it("returns empty array for non-existent auto queue", () => {
-    const entries = readAutoQueue("nonexistent-session");
-    expect(entries).toEqual([]);
-  });
-
-  it("skips invalid entries without store_method", () => {
-    const validEntry: import("../src/queue").AutoQueueEntry = {
-      entry: { message: { role: "user", content: [] } },
-      store_method: "auto",
+  it("should enqueue multiple entries", async () => {
+    const entry1 = {
+      content: "first",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    const entry2 = {
+      content: "second",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
     };
 
-    enqueueAutoMessage(TEST_SESSION_ID, validEntry);
+    await enqueueToolMessage(TEST_SESSION_ID, entry1);
+    await enqueueToolMessage(TEST_SESSION_ID, entry2);
 
-    // Write invalid entries directly to the file
-    const queuePath = getQueuePath(TEST_SESSION_ID);
-    const invalidLines = [
-      JSON.stringify({ content: "no store_method" }),
-      JSON.stringify({ entry: {}, store_method: "auto" }), // valid
-      "not json at all",
-      JSON.stringify(null),
-      JSON.stringify({ content: "bad method", store_method: "invalid" }),
-    ];
-    writeFileSync(queuePath, `${invalidLines.join("\n")}\n`, { flag: "a" });
-
-    const entries = readAutoQueue(TEST_SESSION_ID);
-    // Should have original valid + one valid from invalidLines
+    const entries = readToolQueueFromDisk(TEST_SESSION_ID);
     expect(entries).toHaveLength(2);
   });
-});
 
-describe("enqueueToolMessage and readToolQueue", () => {
-  it("appends tool entries to tool queue file", () => {
-    const entry: import("../src/queue").ToolQueueEntry = {
-      content: "Important fact to remember",
-      tags: ["topic:important"],
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
+  it("should clear tool queue via clearSessionQueueState", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
     };
 
-    const result = enqueueToolMessage(TEST_SESSION_ID, entry);
-    expect(result).toBe(true);
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
 
-    const entries = readToolQueue(TEST_SESSION_ID);
-    expect(entries).toHaveLength(1);
-    expect(entries[0]?.store_method).toBe("tool");
-    expect(entries[0]?.content).toBe("Important fact to remember");
-    expect(entries[0]?.tags).toEqual(["topic:important"]);
-    expect(entries[0]?.timestamp).toBe("2024-01-01T00:00:00Z");
+    clearSessionQueueState(TEST_SESSION_ID);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
   });
 
-  it("returns empty array for non-existent tool queue", () => {
-    const entries = readToolQueue("nonexistent-session");
-    expect(entries).toEqual([]);
-  });
-
-  it("stores metadata when provided", () => {
-    const entry: import("../src/queue").ToolQueueEntry = {
-      content: "Fact with metadata",
-      metadata: { source: "user", priority: "high" },
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
-    };
-
-    enqueueToolMessage(TEST_SESSION_ID, entry);
-    const entries = readToolQueue(TEST_SESSION_ID);
-
-    expect(entries[0]?.metadata).toEqual({ source: "user", priority: "high" });
-  });
-
-  it("rejects entries without timestamp", () => {
-    const validEntry: import("../src/queue").ToolQueueEntry = {
-      content: "Valid entry",
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
-    };
-    enqueueToolMessage(TEST_SESSION_ID, validEntry);
-
-    // Write an entry without a timestamp directly
-    const queuePath = getToolQueuePath(TEST_SESSION_ID);
-    const invalidLines = [JSON.stringify({ content: "no timestamp", store_method: "tool" })];
-    writeFileSync(queuePath, `${invalidLines.join("\n")}\n`, { flag: "a" });
-
-    const entries = readToolQueue(TEST_SESSION_ID);
-    // Only the valid entry should be read; the one without timestamp should be skipped
-    expect(entries).toHaveLength(1);
-    expect(entries[0]?.content).toBe("Valid entry");
-  });
-});
-
-describe("deleteAutoQueue", () => {
-  it("deletes existing auto queue file", () => {
-    const entry: import("../src/queue").AutoQueueEntry = {
-      entry: { message: { role: "user", content: [] } },
-      store_method: "auto",
-    };
-    enqueueAutoMessage(TEST_SESSION_ID, entry);
-
-    expect(autoQueueExists(TEST_SESSION_ID)).toBe(true);
-
-    deleteAutoQueue(TEST_SESSION_ID);
-
-    expect(autoQueueExists(TEST_SESSION_ID)).toBe(false);
-  });
-
-  it("does not throw for non-existent queue", () => {
-    expect(() => deleteAutoQueue("nonexistent")).not.toThrow();
-  });
-});
-
-describe("deleteToolQueue", () => {
-  it("deletes existing tool queue file", () => {
-    const entry: import("../src/queue").ToolQueueEntry = {
-      content: "Test",
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
-    };
-    enqueueToolMessage(TEST_SESSION_ID, entry);
-
-    expect(toolQueueExists(TEST_SESSION_ID)).toBe(true);
-
-    deleteToolQueue(TEST_SESSION_ID);
-
+  it("should check if tool queue exists", async () => {
     expect(toolQueueExists(TEST_SESSION_ID)).toBe(false);
-  });
 
-  it("does not throw for non-existent queue", () => {
-    expect(() => deleteToolQueue("nonexistent")).not.toThrow();
-  });
-});
-
-describe("autoQueueExists", () => {
-  it("returns false when queue does not exist", () => {
-    expect(autoQueueExists("nonexistent-session")).toBe(false);
-  });
-
-  it("returns true when queue exists", () => {
-    const entry: import("../src/queue").AutoQueueEntry = {
-      entry: { message: { role: "user", content: [] } },
-      store_method: "auto",
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
     };
-    enqueueAutoMessage(TEST_SESSION_ID, entry);
-    expect(autoQueueExists(TEST_SESSION_ID)).toBe(true);
-  });
-});
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
 
-describe("toolQueueExists", () => {
-  it("returns false when queue does not exist", () => {
-    expect(toolQueueExists("nonexistent-session")).toBe(false);
-  });
-
-  it("returns true when queue exists", () => {
-    const entry: import("../src/queue").ToolQueueEntry = {
-      content: "Test",
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
-    };
-    enqueueToolMessage(TEST_SESSION_ID, entry);
     expect(toolQueueExists(TEST_SESSION_ID)).toBe(true);
   });
 });
 
-describe("separate queues", () => {
-  it("auto and tool queues are stored in separate files", () => {
-    const autoEntry: import("../src/queue").AutoQueueEntry = {
-      entry: { message: { role: "user", content: "Auto message" } },
-      store_method: "auto",
-    };
-    const toolEntry: import("../src/queue").ToolQueueEntry = {
-      content: "Tool content",
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
-    };
-
-    enqueueAutoMessage(TEST_SESSION_ID, autoEntry);
-    enqueueToolMessage(TEST_SESSION_ID, toolEntry);
-
-    // Verify separate storage
-    const autoEntries = readAutoQueue(TEST_SESSION_ID);
-    const toolEntries = readToolQueue(TEST_SESSION_ID);
-
-    expect(autoEntries).toHaveLength(1);
-    expect(toolEntries).toHaveLength(1);
-    expect(autoQueueExists(TEST_SESSION_ID)).toBe(true);
-    expect(toolQueueExists(TEST_SESSION_ID)).toBe(true);
+describe("Tool Queue Entry Count", () => {
+  it("should return 0 for empty queue", () => {
+    expect(getToolQueueEntryCount(TEST_SESSION_ID)).toBe(0);
   });
 
-  it("deleteAutoQueue only deletes auto queue", () => {
-    const autoEntry: import("../src/queue").AutoQueueEntry = {
-      entry: { message: { role: "user", content: "Auto" } },
-      store_method: "auto",
+  it("should count tool entries", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
     };
-    const toolEntry: import("../src/queue").ToolQueueEntry = {
-      content: "Tool",
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+    expect(getToolQueueEntryCount(TEST_SESSION_ID)).toBe(1);
+
+    const entry2 = {
+      content: "test2",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
     };
-
-    enqueueAutoMessage(TEST_SESSION_ID, autoEntry);
-    enqueueToolMessage(TEST_SESSION_ID, toolEntry);
-
-    deleteAutoQueue(TEST_SESSION_ID);
-
-    expect(autoQueueExists(TEST_SESSION_ID)).toBe(false);
-    expect(toolQueueExists(TEST_SESSION_ID)).toBe(true);
-  });
-
-  it("deleteToolQueue only deletes tool queue", () => {
-    const autoEntry: import("../src/queue").AutoQueueEntry = {
-      entry: { message: { role: "user", content: "Auto" } },
-      store_method: "auto",
-    };
-    const toolEntry: import("../src/queue").ToolQueueEntry = {
-      content: "Tool",
-      timestamp: "2024-01-01T00:00:00Z",
-      store_method: "tool",
-    };
-
-    enqueueAutoMessage(TEST_SESSION_ID, autoEntry);
-    enqueueToolMessage(TEST_SESSION_ID, toolEntry);
-
-    deleteToolQueue(TEST_SESSION_ID);
-
-    expect(autoQueueExists(TEST_SESSION_ID)).toBe(true);
-    expect(toolQueueExists(TEST_SESSION_ID)).toBe(false);
+    await enqueueToolMessage(TEST_SESSION_ID, entry2);
+    expect(getToolQueueEntryCount(TEST_SESSION_ID)).toBe(2);
   });
 });
 
-// ============================================
-// Filesystem failure tests
-// ============================================
+describe("Pending Flag", () => {
+  it("should create and check pending marker", () => {
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(false);
 
-/**
- * Attempt to make a path unwritable.
- * - As root: uses chattr +i (immutable flag) — root bypasses unix permissions
- * - As non-root: uses chmod 0o444
- *
- * Returns a restore function on success, or null if the path cannot be
- * made unwritable (caller should skip the test).
- */
-function tryMakeUnwritable(path: string): (() => void) | null {
-  if (process.getuid?.() === 0) {
-    // Root bypasses unix permissions — try chattr +i
-    try {
-      execFileSync("chattr", ["+i", path], { stdio: "pipe" });
-      return () => {
-        try {
-          execFileSync("chattr", ["-i", path], { stdio: "pipe" });
-        } catch {
-          // Best-effort: don't let cleanup failure mask test failures
-        }
-      };
-    } catch {
-      // Filesystem doesn't support chattr (overlayfs, FUSE, etc.)
-      return null;
-    }
-  }
-  // Non-root: chmod is sufficient. Save original mode for restore.
-  // Directories get 0o555 (traversable but not writable) so that
-  // existsSync still works and unlink actually fails with EACCES.
-  // Files get 0o444 (read-only).
-  const stats = statSync(path);
-  const originalMode = stats.mode & 0o777;
-  chmodSync(path, stats.isDirectory() ? 0o555 : 0o444);
-  return () => {
-    try {
-      chmodSync(path, originalMode);
-    } catch {
-      // Best-effort: don't let cleanup failure mask test failures
-    }
-  };
-}
+    const result = touchPendingFlag(TEST_SESSION_ID);
+    expect(result.success).toBe(true);
 
-describe("filesystem failures", () => {
-  it("enqueueAutoMessage returns false when queue dir is unwritable", () => {
-    const queueDir = getQueueDir();
-    ensureQueueDir();
-
-    const restore = tryMakeUnwritable(queueDir);
-    expect(restore).not.toBeNull();
-    // Type narrowing: restore is () => void after expect guard
-    const restoreFn = restore!;
-
-    try {
-      const result = enqueueAutoMessage("fs-fail-auto", {
-        entry: { message: { role: "user", content: "fail" } },
-        store_method: "auto",
-      });
-
-      expect(result).toBe(false);
-    } finally {
-      restoreFn();
-      deleteAutoQueue("fs-fail-auto");
-    }
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(true);
   });
 
-  it("enqueueToolMessage returns false when queue dir is unwritable", () => {
-    const queueDir = getQueueDir();
-    ensureQueueDir();
+  it("should return success result on successful creation", () => {
+    const result = touchPendingFlag(TEST_SESSION_ID, "test_reason");
+    expect(result.success).toBe(true);
+  });
 
-    const restore = tryMakeUnwritable(queueDir);
-    expect(restore).not.toBeNull();
-    // Type narrowing: restore is () => void after expect guard
-    const restoreFn = restore!;
+  it("should remove pending marker", () => {
+    touchPendingFlag(TEST_SESSION_ID);
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(true);
 
-    try {
-      const result = enqueueToolMessage("fs-fail-tool", {
-        content: "fail",
-        timestamp: "2026-01-01T00:00:00Z",
-        store_method: "tool",
-      });
+    removePendingFlag(TEST_SESSION_ID);
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(false);
+  });
 
-      expect(result).toBe(false);
-    } finally {
-      restoreFn();
-      deleteToolQueue("fs-fail-tool");
+  it("should create multiple pending markers", () => {
+    touchPendingFlag(TEST_SESSION_ID, "message_end");
+    touchPendingFlag(TEST_SESSION_ID, "session_switch");
+
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(true);
+  });
+});
+
+describe("Claiming", () => {
+  it("should claim tool queue entries", async () => {
+    const entry1 = {
+      content: "first",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    const entry2 = {
+      content: "second",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+
+    await enqueueToolMessage(TEST_SESSION_ID, entry1);
+    await enqueueToolMessage(TEST_SESSION_ID, entry2);
+
+    const claim = claimToolQueue(TEST_SESSION_ID);
+    expect(claim).not.toBeNull();
+    expect(claim?.claimedFiles?.length).toBe(2);
+
+    // Queue should be empty after claim
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+
+    // Should be able to read claimed entries
+    const result = readClaimedToolEntries(claim!);
+    expect(result.entries).toHaveLength(2);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("should report malformed JSON errors from readClaimedToolEntries", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const claim = claimToolQueue(TEST_SESSION_ID);
+    expect(claim).not.toBeNull();
+
+    // Corrupt the claimed file
+    writeFileSync(claim!.claimedFiles[0]!, "not valid json{{{", "utf8");
+
+    const result = readClaimedToolEntries(claim!);
+    expect(result.entries).toHaveLength(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]!.type).toBe("malformed_json");
+    expect(result.errors[0]!.filePath).toBe(claim!.claimedFiles[0] as string);
+  });
+
+  it("should report invalid schema errors from readClaimedToolEntries", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const claim = claimToolQueue(TEST_SESSION_ID);
+    expect(claim).not.toBeNull();
+
+    // Replace with valid JSON but invalid schema
+    writeFileSync(claim!.claimedFiles[0]!, JSON.stringify({ some: "object" }), "utf8");
+
+    const result = readClaimedToolEntries(claim!);
+    expect(result.entries).toHaveLength(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]!.type).toBe("invalid_schema");
+    expect(result.errors[0]!.filePath).toBe(claim!.claimedFiles[0] as string);
+    expect((result.errors[0] as { reason: string }).reason).toContain("store_method");
+  });
+
+  it("should report missing file errors from readClaimedToolEntries", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const claim = claimToolQueue(TEST_SESSION_ID);
+    expect(claim).not.toBeNull();
+
+    // Delete the claimed file
+    rmSync(claim!.claimedFiles[0]!, { force: true });
+
+    const result = readClaimedToolEntries(claim!);
+    expect(result.entries).toHaveLength(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]!.type).toBe("missing");
+    expect(result.errors[0]!.filePath).toBe(claim!.claimedFiles[0] as string);
+  });
+
+  it("should return null when claiming empty queue", () => {
+    const claim = claimToolQueue(TEST_SESSION_ID);
+    expect(claim).toBeNull();
+  });
+
+  it("should complete claim by deleting files", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const claim = claimToolQueue(TEST_SESSION_ID);
+    expect(claim).not.toBeNull();
+
+    completeClaim(claim!);
+
+    // Claim dir should be gone
+    expect(existsSync(claim!.claimDir)).toBe(false);
+  });
+
+  it("should restore claim by moving files back", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const claim = claimToolQueue(TEST_SESSION_ID);
+    expect(claim).not.toBeNull();
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+
+    restoreClaim(claim!);
+
+    // Entries should be back in the queue
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
+  });
+
+  it("should claim pending markers", () => {
+    touchPendingFlag(TEST_SESSION_ID, "reason1");
+    touchPendingFlag(TEST_SESSION_ID, "reason2");
+
+    const claim = claimPendingFlag(TEST_SESSION_ID);
+    expect(claim).not.toBeNull();
+    expect(claim?.claimedFiles?.length).toBe(2);
+
+    // Pending should be empty after claim
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(false);
+  });
+});
+
+describe("Recovery", () => {
+  it("should recover abandoned claims with dead PID on same host", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "dead-pid-claim");
+    mkdirSync(claimDir, { recursive: true });
+
+    // Same-host dead PID → abandoned immediately
+    const { getCurrentHostname } = await import("../src/queue-paths");
+    const claimMeta = {
+      claimId: "dead-pid-claim",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: 99999999,
+      hostname: getCurrentHostname(),
+      startedAt: new Date().toISOString(),
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+
+    // Move a file into the claim dir
+    const toolDir = getToolDir(TEST_SESSION_ID);
+    const files = readdirSync(toolDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0 && files[0]) {
+      const file = files[0];
+      writeFileSync(join(claimDir, file), readFileSync(join(toolDir, file), "utf8"));
+      rmSync(join(toolDir, files[0]));
     }
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
   });
 
-  it("deleteAutoQueue does not throw on permission error", () => {
-    const queueDir = getQueueDir();
+  it("should not recover claims with live PID on same host", async () => {
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "live-pid-claim");
+    mkdirSync(claimDir, { recursive: true });
 
-    // Create a queue file
-    const queuePath = getQueuePath("fs-fail-delete");
-    writeFileSync(queuePath, '{"store_method":"auto","entry":{}}\n', "utf8");
+    // Same-host live PID (current process) → NOT abandoned
+    const { getCurrentHostname } = await import("../src/queue-paths");
+    const claimMeta = {
+      claimId: "live-pid-claim",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: process.pid,
+      hostname: getCurrentHostname(),
+      startedAt: new Date().toISOString(),
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+    writeFileSync(join(claimDir, "fake-entry.json"), JSON.stringify({ content: "test" }), "utf8");
 
-    const restoreFile = tryMakeUnwritable(queuePath);
-    const restoreDir = tryMakeUnwritable(queueDir);
-    expect(restoreFile).not.toBeNull();
-    expect(restoreDir).not.toBeNull();
-    // Type narrowing: non-null after expect guards
-    const restoreFileFn = restoreFile!;
-    const restoreDirFn = restoreDir!;
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    // Claim should still exist
+    expect(existsSync(claimDir)).toBe(true);
+  });
 
-    try {
-      // Should not throw
-      expect(() => deleteAutoQueue("fs-fail-delete")).not.toThrow();
-    } finally {
-      // Restore directory first, then file — directory must be writable
-      // before we can chmod the file back (if using chmod path).
-      restoreDirFn();
-      restoreFileFn();
-      deleteAutoQueue("fs-fail-delete");
+  it("should not recover recent claims on different host", async () => {
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "diff-host-recent");
+    mkdirSync(claimDir, { recursive: true });
+
+    // Different host, recent → NOT abandoned
+    const claimMeta = {
+      claimId: "diff-host-recent",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: 99999999,
+      hostname: "a-different-host",
+      startedAt: new Date().toISOString(),
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+    writeFileSync(join(claimDir, "fake-entry.json"), JSON.stringify({ content: "test" }), "utf8");
+
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(existsSync(claimDir)).toBe(true);
+  });
+
+  it("should recover old claims on different host", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "diff-host-old");
+    mkdirSync(claimDir, { recursive: true });
+
+    // Different host, old (> 30min) → abandoned
+    const claimMeta = {
+      claimId: "diff-host-old",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: 99999999,
+      hostname: "a-different-host",
+      startedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+
+    // Move a file into the claim dir
+    const toolDir = getToolDir(TEST_SESSION_ID);
+    const files = readdirSync(toolDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0 && files[0]) {
+      const file = files[0];
+      writeFileSync(join(claimDir, file), readFileSync(join(toolDir, file), "utf8"));
+      rmSync(join(toolDir, files[0]));
     }
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
   });
 
-  it("readAutoQueue returns empty array on corrupted queue file", () => {
-    const queuePath = getQueuePath("fs-corrupt");
-    // Write invalid JSON
-    writeFileSync(queuePath, "not json at all\nalso garbage\n", "utf8");
+  it("should not recover recent claims with missing metadata", async () => {
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "no-meta-recent");
+    mkdirSync(claimDir, { recursive: true });
+    writeFileSync(join(claimDir, "fake-entry.json"), JSON.stringify({ content: "test" }), "utf8");
 
-    const entries = readAutoQueue("fs-corrupt");
-    expect(entries).toEqual([]);
-
-    deleteAutoQueue("fs-corrupt");
+    // Missing metadata, recent → NOT abandoned
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(existsSync(claimDir)).toBe(true);
   });
 
-  it("readToolQueue returns empty array on corrupted queue file", () => {
-    const queuePath = getToolQueuePath("fs-corrupt-tool");
-    writeFileSync(queuePath, "\0\0binary garbage\n", "utf8");
+  it("should recover old claims with missing metadata", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
 
-    const entries = readToolQueue("fs-corrupt-tool");
-    expect(entries).toEqual([]);
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "no-meta-old");
+    mkdirSync(claimDir, { recursive: true });
 
-    deleteToolQueue("fs-corrupt-tool");
+    // Move a real file into the claim dir
+    const toolDir = getToolDir(TEST_SESSION_ID);
+    const files = readdirSync(toolDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0 && files[0]) {
+      const file = files[0];
+      writeFileSync(join(claimDir, file), readFileSync(join(toolDir, file), "utf8"));
+      rmSync(join(toolDir, files[0]));
+    }
+
+    // Missing metadata, old → abandoned (mtime fallback)
+    // Set directory mtime to 1 hour ago
+    const { utimesSync } = await import("node:fs");
+    const oldTime = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(claimDir, oldTime, oldTime);
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
+  });
+
+  it("should not recover recent claims with invalid metadata", async () => {
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "invalid-meta-recent");
+    mkdirSync(claimDir, { recursive: true });
+    writeFileSync(join(claimDir, ".claim.json"), "not valid json{{{", "utf8");
+    writeFileSync(join(claimDir, "fake-entry.json"), JSON.stringify({ content: "test" }), "utf8");
+
+    // Invalid metadata, recent → NOT abandoned
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(existsSync(claimDir)).toBe(true);
+  });
+
+  it("should recover old claims with invalid metadata", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "invalid-meta-old");
+    mkdirSync(claimDir, { recursive: true });
+    writeFileSync(join(claimDir, ".claim.json"), "not valid json{{{", "utf8");
+
+    // Move a real file into the claim dir
+    const toolDir = getToolDir(TEST_SESSION_ID);
+    const files = readdirSync(toolDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0 && files[0]) {
+      const file = files[0];
+      writeFileSync(join(claimDir, file), readFileSync(join(toolDir, file), "utf8"));
+      rmSync(join(toolDir, files[0]));
+    }
+
+    // Invalid metadata, old → abandoned (mtime fallback)
+    const { utimesSync } = await import("node:fs");
+    const oldTime = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(claimDir, oldTime, oldTime);
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
+  });
+
+  it("should recover old claims with invalid startedAt via mtime fallback", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "invalid-startedAt");
+    mkdirSync(claimDir, { recursive: true });
+
+    // Different host so PID check is skipped; age-based recovery with
+    // invalid startedAt should fall back to directory mtime.
+    const claimMeta = {
+      claimId: "invalid-startedAt",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: 99999999,
+      hostname: "a-different-host",
+      startedAt: "not-a-valid-date",
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+
+    // Move a file into the claim dir
+    const toolDir = getToolDir(TEST_SESSION_ID);
+    const files = readdirSync(toolDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0 && files[0]) {
+      const file = files[0];
+      writeFileSync(join(claimDir, file), readFileSync(join(toolDir, file), "utf8"));
+      rmSync(join(toolDir, files[0]));
+    }
+
+    // Set directory mtime to 1 hour ago so mtime-based age is old
+    const { utimesSync } = await import("node:fs");
+    const oldTime = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(claimDir, oldTime, oldTime);
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
+  });
+
+  it("should not recover recent claims with invalid startedAt via mtime fallback", async () => {
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "invalid-startedAt-recent");
+    mkdirSync(claimDir, { recursive: true });
+
+    // Different host with invalid startedAt but recent mtime — should NOT be abandoned
+    // (Different host skips PID check, uses age-based recovery only)
+    const claimMeta = {
+      claimId: "invalid-startedAt-recent",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: 99999999,
+      hostname: "a-different-host",
+      startedAt: "not-a-valid-date",
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+    writeFileSync(join(claimDir, "fake-entry.json"), JSON.stringify({ content: "test" }), "utf8");
+
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    // Recent claim with invalid startedAt should NOT be abandoned (mtime fallback is recent)
+    expect(existsSync(claimDir)).toBe(true);
+  });
+
+  it("should not treat invalid PID as dead PID on same host", async () => {
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "invalid-pid");
+    mkdirSync(claimDir, { recursive: true });
+
+    // Invalid PID (not a positive integer) on same host — should NOT be treated as dead PID
+    // Instead, should use age-based recovery
+    const { getCurrentHostname } = await import("../src/queue-paths");
+    const claimMeta = {
+      claimId: "invalid-pid",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: -1,
+      hostname: getCurrentHostname(),
+      startedAt: new Date().toISOString(),
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+    writeFileSync(join(claimDir, "fake-entry.json"), JSON.stringify({ content: "test" }), "utf8");
+
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    // Recent claim with invalid PID on same host should NOT be abandoned
+    expect(existsSync(claimDir)).toBe(true);
+  });
+
+  it("should recover old claims with invalid PID on same host via age-based recovery", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+
+    const inflightDir = getToolInflightDir(TEST_SESSION_ID);
+    mkdirSync(inflightDir, { recursive: true });
+    const claimDir = join(inflightDir, "invalid-pid-old");
+    mkdirSync(claimDir, { recursive: true });
+
+    // Invalid PID (0) on same host, old claim — should recover via age
+    const { getCurrentHostname } = await import("../src/queue-paths");
+    const claimMeta = {
+      claimId: "invalid-pid-old",
+      sessionId: TEST_SESSION_ID,
+      queue: "tool",
+      pid: 0,
+      hostname: getCurrentHostname(),
+      startedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    };
+    writeFileSync(join(claimDir, ".claim.json"), JSON.stringify(claimMeta), "utf8");
+
+    // Move a file into the claim dir
+    const toolDir = getToolDir(TEST_SESSION_ID);
+    const files = readdirSync(toolDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0 && files[0]) {
+      const file = files[0];
+      writeFileSync(join(claimDir, file), readFileSync(join(toolDir, file), "utf8"));
+      rmSync(join(toolDir, files[0]));
+    }
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    recoverStaleInflightClaims(TEST_SESSION_ID);
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
+  });
+});
+
+describe("Clear Session Queue State", () => {
+  it("should clear all queue state", async () => {
+    const entry = {
+      content: "test",
+      timestamp: new Date().toISOString(),
+      store_method: "tool" as const,
+      sessionId: TEST_SESSION_ID,
+    };
+    await enqueueToolMessage(TEST_SESSION_ID, entry);
+    touchPendingFlag(TEST_SESSION_ID);
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(1);
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(true);
+
+    clearSessionQueueState(TEST_SESSION_ID);
+
+    expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    expect(hasPendingFlag(TEST_SESSION_ID)).toBe(false);
   });
 });

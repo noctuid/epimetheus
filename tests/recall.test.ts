@@ -1,7 +1,7 @@
 /**
  * Unit tests for recall message formatting and the popup subcommand.
  *
- * Tests formatRecallMessage, renderRecallMessage, doAutoRecallImpl,
+ * Tests formatRecallMessage, doAutoRecallImpl,
  * RecallOverlayComponent, and the real popup command handler
  * (via registerCommands → createPopupSubcommand).
  */
@@ -12,7 +12,7 @@ import type { RecallResponse } from "@vectorize-io/hindsight-client";
 import { registerCommands } from "../src/commands";
 import type { HindsightConfig } from "../src/config";
 import type { AutoRecallConfig, RecallClient, RecallMessageDetails } from "../src/index";
-import { doAutoRecallImpl, formatRecallMessage, renderRecallMessage } from "../src/index";
+import { doAutoRecallImpl, formatRecallMessage } from "../src/index";
 import { RecallOverlayComponent } from "../src/overlay";
 import { testConfig } from "./fixtures";
 
@@ -287,100 +287,6 @@ describe("autoRecallPersist behavior", () => {
     });
   });
 });
-
-// ============================================
-// Message renderer tests
-// ============================================
-
-describe("renderRecallMessage", () => {
-  it("collapsed view shows summary with snippet", () => {
-    const details = {
-      count: 3,
-      snippet: "Memory 1 \u00b7 Memory 2 \u00b7 Memory 3",
-      memories: "Memory 1\n\n---\n\nMemory 2\n\n---\n\nMemory 3",
-    };
-
-    const rendered = renderRecallMessage(details, false);
-
-    expect(rendered).toContain("Hindsight recalled 3 memories");
-    expect(rendered).toContain("[Memory 1 \u00b7 Memory 2 \u00b7 Memory 3]");
-    expect(rendered).not.toContain("---"); // separator not shown in collapsed
-  });
-
-  it("expanded view shows full content", () => {
-    const details = {
-      count: 3,
-      snippet: "Memory 1 \u00b7 Memory 2 \u00b7 Memory 3",
-      memories: "Memory 1\n\n---\n\nMemory 2\n\n---\n\nMemory 3",
-    };
-
-    const rendered = renderRecallMessage(details, true);
-
-    expect(rendered).toContain("Hindsight recalled 3 memories");
-    expect(rendered).toContain("Memory 1");
-    expect(rendered).toContain("Memory 2");
-    expect(rendered).toContain("Memory 3");
-    expect(rendered).toContain("---"); // separator shown in expanded
-  });
-
-  it("uses singular 'memory' for count of 1", () => {
-    const details = {
-      count: 1,
-      snippet: "Single memory",
-      memories: "Single memory",
-    };
-
-    const collapsed = renderRecallMessage(details, false);
-    const expanded = renderRecallMessage(details, true);
-
-    expect(collapsed).toContain("1 memory");
-    expect(expanded).toContain("1 memory");
-  });
-
-  it("uses plural 'memories' for count > 1", () => {
-    const details = {
-      count: 5,
-      snippet: "Truncated...",
-      memories: "Full content",
-    };
-
-    const collapsed = renderRecallMessage(details, false);
-    const expanded = renderRecallMessage(details, true);
-
-    expect(collapsed).toContain("5 memories");
-    expect(expanded).toContain("5 memories");
-  });
-
-  it("includes separator line in expanded view", () => {
-    const details = {
-      count: 2,
-      snippet: "A \u00b7 B",
-      memories: "A\n\n---\n\nB",
-    };
-
-    const rendered = renderRecallMessage(details, true);
-
-    // Should have a separator line made of box-drawing characters
-    expect(rendered).toContain("\u2500".repeat(80));
-  });
-
-  it("works with formatRecallMessage output", () => {
-    const results: RecallResponse["results"] = [
-      { id: "1", text: "First memory" },
-      { id: "2", text: "Second memory" },
-    ];
-
-    const message = formatRecallMessage(results, DEFAULT_PREAMBLE, false);
-    const collapsed = renderRecallMessage(message.details, false);
-    const expanded = renderRecallMessage(message.details, true);
-
-    expect(collapsed).toContain("Hindsight recalled 2 memories");
-    expect(collapsed).toContain("First memory");
-    expect(expanded).toContain("First memory");
-    expect(expanded).toContain("Second memory");
-  });
-});
-
 // ============================================
 // /hindsight popup command tests (real handler)
 // ============================================

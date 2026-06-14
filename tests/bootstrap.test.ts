@@ -16,9 +16,11 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as realConfig from "../src/config";
 
 import {
+  cleanupSessionCache,
   createMockContext,
   createMockPi,
   HINDSIGHT_ENV_KEYS,
+  readToolQueueFromDisk,
   saveEnvKeys,
   setupTempAgentDir,
   testConfig,
@@ -96,11 +98,14 @@ beforeEach(() => {
   restoreEnv = saveEnvKeys(HINDSIGHT_ENV_KEYS);
 });
 
-afterEach(() => {
-  const { deleteAutoQueue, deleteToolQueue } =
+afterEach(async () => {
+  const { removePendingFlag, clearSessionQueueState } =
     require("../src/queue") as typeof import("../src/queue");
-  deleteAutoQueue(BOOTSTRAP_SESSION);
-  deleteToolQueue(BOOTSTRAP_SESSION);
+  removePendingFlag(BOOTSTRAP_SESSION);
+  clearSessionQueueState(BOOTSTRAP_SESSION);
+
+  // Clean up parsed session cache to prevent stale cache from blocking flushes
+  cleanupSessionCache(BOOTSTRAP_SESSION);
 
   // Reset module-level mutable state (autoRecallDisplayOverride, lastRecallMessage)
   // to prevent test order dependencies — toggle-display tests mutate this state
@@ -322,28 +327,29 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueToolMessage, readToolQueue, deleteAutoQueue, deleteToolQueue } =
+    const { enqueueToolMessage, removePendingFlag, clearSessionQueueState } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     // Simulate a tool retain (hindsight_retain tool queues to tool queue)
-    enqueueToolMessage(sessionId, {
+    await enqueueToolMessage(sessionId, {
       content: "Important fact",
       tags: ["harness:pi", `session:${sessionId}`],
       timestamp: new Date().toISOString(),
       store_method: "tool",
+      sessionId,
     });
-    expect(readToolQueue(sessionId)).toHaveLength(1);
+    expect(readToolQueueFromDisk(sessionId)).toHaveLength(1);
 
     // Shutdown should flush the tool queue even though autoRetainEnabled=false
     const shutdownHandler = pi.handlers.get("session_shutdown")!;
     const ctx = createMockContext({ _sessionId: sessionId });
     await shutdownHandler({ type: "session_shutdown" }, ctx);
 
-    expect(readToolQueue(sessionId)).toHaveLength(0);
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    expect(readToolQueueFromDisk(sessionId)).toHaveLength(0);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("auto-queue stays empty on shutdown when autoRetainEnabled=false and session retained=true", async () => {
@@ -354,10 +360,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     // message_end handler should NOT queue because autoRetainEnabled=false
     const messageEndHandler = pi.handlers.get("message_end")!;
@@ -370,9 +376,9 @@ describe("real entrypoint bootstrap", () => {
       ctx
     );
 
-    expect(readAutoQueue(sessionId)).toHaveLength(0);
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(false);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   // ============================================
@@ -393,10 +399,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     // Auto-queue: message_end should queue
     const messageEndHandler = pi.handlers.get("message_end")!;
@@ -408,7 +414,7 @@ describe("real entrypoint bootstrap", () => {
       },
       ctx
     );
-    expect(readAutoQueue(sessionId)).toHaveLength(1);
+    expect(hasPendingFlag(sessionId)).toBe(true);
 
     // Tool: hindsight_retain should succeed
     const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
@@ -426,13 +432,13 @@ describe("real entrypoint bootstrap", () => {
     const { writeSessionFile, withTempDir } = await import("./fixtures");
     await withTempDir(async (tmpDir) => {
       const sessionPath = writeSessionFile(tmpDir, sessionId);
-      deleteAutoQueue(sessionId);
-      deleteToolQueue(sessionId);
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
 
       const parseCtx = createMockContext({
         _sessionId: sessionId,
         sessionManager: {
-          ...createMockContext().sessionManager,
+          ...createMockContext({ _sessionId: sessionId }).sessionManager,
           getSessionFile: mock(() => sessionPath),
         },
       });
@@ -451,11 +457,11 @@ describe("real entrypoint bootstrap", () => {
       expect(lastCall[0]).not.toContain("does not allow retention");
     });
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
-  it("autoRetainEnabled=true + retained=false: no auto-queue, tool blocked, parse-session blocked", async () => {
+  it("autoRetainEnabled=true + retained=false: no auto-queue, tool blocked, parse-and-upsert-session blocked", async () => {
     // Default autoRetainEnabled=true, but retained=false
     activeConfig = { ...testConfig, retainSessionsByDefault: false };
 
@@ -464,15 +470,16 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     const ctx = createMockContext({
       _sessionId: sessionId,
+      _retained: false,
       sessionManager: {
-        ...createMockContext().sessionManager,
+        ...createMockContext({ _sessionId: sessionId }).sessionManager,
         getEntries: mock(() => [
           { type: "custom", customType: "hindsight-meta", data: { retained: false } },
         ]),
@@ -488,7 +495,7 @@ describe("real entrypoint bootstrap", () => {
       },
       ctx
     );
-    expect(readAutoQueue(sessionId)).toHaveLength(0);
+    expect(hasPendingFlag(sessionId)).toBe(false);
 
     // Tool: hindsight_retain should be blocked (retained=false)
     const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
@@ -506,12 +513,20 @@ describe("real entrypoint bootstrap", () => {
     // Parse-and-upsert: should be blocked (retained=false)
     // Need a session file so parseCurrentSession gets past the file check
     const { writeSessionFile, withTempDir } = await import("./fixtures");
+    const { writeSessionState } = await import("../src/session-state");
     await withTempDir(async (tmpDir) => {
-      const sessionPath = writeSessionFile(tmpDir, sessionId);
+      const sessionPath = writeSessionFile(tmpDir, sessionId, { retained: false });
+      // Write live state with retained=false (session_start may have created retained=true)
+      writeSessionState(sessionId, {
+        retained: false,
+        extraContext: null,
+        updatedAt: new Date().toISOString(),
+      });
       const parseCtx = createMockContext({
         _sessionId: sessionId,
+        _retained: false,
         sessionManager: {
-          ...createMockContext().sessionManager,
+          ...createMockContext({ _sessionId: sessionId }).sessionManager,
           getSessionFile: mock(() => sessionPath),
           getEntries: mock(() => [
             { type: "custom", customType: "hindsight-meta", data: { retained: false } },
@@ -530,11 +545,11 @@ describe("real entrypoint bootstrap", () => {
         .ui.notify.mock.calls;
       const lastCall = parseNotification[parseNotification.length - 1]!;
       expect(lastCall[0]).toContain("does not allow retention");
-      expect(lastCall[1]).toBe("warning");
+      expect(lastCall[1]).toBe("info");
     });
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("autoRetainEnabled=false + retained=true: no auto-queue, tool works, parse-and-upsert works", async () => {
@@ -545,10 +560,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     const ctx = createMockContext({ _sessionId: sessionId });
 
@@ -561,7 +576,7 @@ describe("real entrypoint bootstrap", () => {
       },
       ctx
     );
-    expect(readAutoQueue(sessionId)).toHaveLength(0);
+    expect(hasPendingFlag(sessionId)).toBe(false);
 
     // Tool: hindsight_retain should succeed (retained=true, autoRetainEnabled not checked)
     const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
@@ -579,13 +594,13 @@ describe("real entrypoint bootstrap", () => {
     const { writeSessionFile, withTempDir } = await import("./fixtures");
     await withTempDir(async (tmpDir) => {
       const sessionPath = writeSessionFile(tmpDir, sessionId);
-      deleteAutoQueue(sessionId);
-      deleteToolQueue(sessionId);
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
 
       const parseCtx = createMockContext({
         _sessionId: sessionId,
         sessionManager: {
-          ...createMockContext().sessionManager,
+          ...createMockContext({ _sessionId: sessionId }).sessionManager,
           getSessionFile: mock(() => sessionPath),
         },
       });
@@ -604,11 +619,11 @@ describe("real entrypoint bootstrap", () => {
       expect(lastCall[0]).not.toContain("does not allow retention");
     });
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
-  it("autoRetainEnabled=false + retained=false: no auto-queue, tool blocked, parse-session blocked", async () => {
+  it("autoRetainEnabled=false + retained=false: no auto-queue, tool blocked, parse-and-upsert-session blocked", async () => {
     activeConfig = { ...testConfig, autoRetainEnabled: false, retainSessionsByDefault: false };
 
     const pi = createMockPi();
@@ -616,15 +631,16 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { readAutoQueue, deleteAutoQueue, deleteToolQueue } =
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     const ctx = createMockContext({
       _sessionId: sessionId,
+      _retained: false,
       sessionManager: {
-        ...createMockContext().sessionManager,
+        ...createMockContext({ _sessionId: sessionId }).sessionManager,
         getEntries: mock(() => [
           { type: "custom", customType: "hindsight-meta", data: { retained: false } },
         ]),
@@ -640,7 +656,7 @@ describe("real entrypoint bootstrap", () => {
       },
       ctx
     );
-    expect(readAutoQueue(sessionId)).toHaveLength(0);
+    expect(hasPendingFlag(sessionId)).toBe(false);
 
     // Tool: hindsight_retain should be blocked (retained=false)
     const retainTool = pi.tools.find((t) => t.name === "hindsight_retain")!;
@@ -657,12 +673,20 @@ describe("real entrypoint bootstrap", () => {
 
     // Parse-and-upsert: should be blocked (retained=false)
     const { writeSessionFile, withTempDir } = await import("./fixtures");
+    const { writeSessionState } = await import("../src/session-state");
     await withTempDir(async (tmpDir) => {
-      const sessionPath = writeSessionFile(tmpDir, sessionId);
+      const sessionPath = writeSessionFile(tmpDir, sessionId, { retained: false });
+      // Write live state with retained=false (session_start may have created retained=true)
+      writeSessionState(sessionId, {
+        retained: false,
+        extraContext: null,
+        updatedAt: new Date().toISOString(),
+      });
       const parseCtx = createMockContext({
         _sessionId: sessionId,
+        _retained: false,
         sessionManager: {
-          ...createMockContext().sessionManager,
+          ...createMockContext({ _sessionId: sessionId }).sessionManager,
           getSessionFile: mock(() => sessionPath),
           getEntries: mock(() => [
             { type: "custom", customType: "hindsight-meta", data: { retained: false } },
@@ -681,11 +705,11 @@ describe("real entrypoint bootstrap", () => {
         .ui.notify.mock.calls;
       const lastCall = parseNotification[parseNotification.length - 1]!;
       expect(lastCall[0]).toContain("does not allow retention");
-      expect(lastCall[1]).toBe("warning");
+      expect(lastCall[1]).toBe("info");
     });
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("context handler filters out hindsight-recall messages", async () => {
@@ -735,9 +759,9 @@ describe("real entrypoint bootstrap", () => {
     const handler = pi.handlers.get("message_end")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
-    const { deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    removePendingFlag(BOOTSTRAP_SESSION);
 
     await handler(
       {
@@ -747,10 +771,10 @@ describe("real entrypoint bootstrap", () => {
       ctx
     );
 
-    const queued = readAutoQueue(BOOTSTRAP_SESSION);
-    expect(queued.length).toBeGreaterThan(0);
+    const queued = hasPendingFlag(BOOTSTRAP_SESSION);
+    expect(queued).toBe(true);
 
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    removePendingFlag(BOOTSTRAP_SESSION);
   });
 
   it("message_end handler does not queue system messages", async () => {
@@ -761,17 +785,17 @@ describe("real entrypoint bootstrap", () => {
     const handler = pi.handlers.get("message_end")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
-    const { deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    removePendingFlag(BOOTSTRAP_SESSION);
 
     await handler(
       { type: "message_end", message: { role: "system", content: "system prompt" } },
       ctx
     );
 
-    expect(readAutoQueue(BOOTSTRAP_SESSION)).toHaveLength(0);
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    removePendingFlag(BOOTSTRAP_SESSION);
   });
 
   it("disabled extension registers context handler and message renderer", async () => {
@@ -888,19 +912,16 @@ describe("real entrypoint bootstrap", () => {
     const handler = pi.handlers.get("session_shutdown")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(BOOTSTRAP_SESSION);
-    enqueueAutoMessage(BOOTSTRAP_SESSION, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
-    expect(readAutoQueue(BOOTSTRAP_SESSION)).toHaveLength(1);
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
     await handler({ type: "session_shutdown" }, ctx);
 
-    expect(readAutoQueue(BOOTSTRAP_SESSION)).toHaveLength(0);
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    removePendingFlag(BOOTSTRAP_SESSION);
   });
 
   it("session_before_switch handler flushes queued messages", async () => {
@@ -911,18 +932,152 @@ describe("real entrypoint bootstrap", () => {
     const handler = pi.handlers.get("session_before_switch")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(BOOTSTRAP_SESSION);
-    enqueueAutoMessage(BOOTSTRAP_SESSION, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
 
     await handler({ type: "session_before_switch" }, ctx);
 
-    expect(readAutoQueue(BOOTSTRAP_SESSION)).toHaveLength(0);
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    removePendingFlag(BOOTSTRAP_SESSION);
+  });
+
+  it("invalid config: session_shutdown does not throw and skips flush without clearing queue", async () => {
+    // Invalid config: apiUrl and apiKey empty → validation fails, client is null
+    activeConfig = { ...testConfig, apiUrl: "", apiKey: "" };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_shutdown")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    // Should not throw
+    await handler({ type: "session_shutdown" }, ctx);
+
+    // Queue should still be intact — flush was skipped due to invalid config
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+    // Should have notified about Hindsight not being configured
+    const notifications = (ctx as unknown as { ui: { notify: ReturnType<typeof mock> } }).ui.notify
+      .mock.calls;
+    const configNotification = notifications.find((call: unknown[]) =>
+      (call[0] as string).includes("Hindsight not configured")
+    );
+    expect(configNotification).toBeDefined();
+
+    removePendingFlag(BOOTSTRAP_SESSION);
+  });
+
+  it("invalid config: session_before_switch does not throw and skips flush without clearing queue", async () => {
+    // Invalid config: apiUrl and apiKey empty → validation fails, client is null
+    activeConfig = { ...testConfig, apiUrl: "", apiKey: "" };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_before_switch")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    // Should not throw
+    await handler({ type: "session_before_switch" }, ctx);
+
+    // Queue should still be intact — flush was skipped due to invalid config
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+    // Should have notified about Hindsight not being configured
+    const notifications = (ctx as unknown as { ui: { notify: ReturnType<typeof mock> } }).ui.notify
+      .mock.calls;
+    const configNotification = notifications.find((call: unknown[]) =>
+      (call[0] as string).includes("Hindsight not configured")
+    );
+    expect(configNotification).toBeDefined();
+
+    removePendingFlag(BOOTSTRAP_SESSION);
+  });
+
+  it("session_start creates default metadata without rewriting parsed .meta.json cache", async () => {
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const sessionId = BOOTSTRAP_SESSION;
+    const { removePendingFlag, clearSessionQueueState } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
+
+    // Pre-create a parsed .meta.json artifact. Session-start metadata updates should
+    // not patch parsed artifacts; they are refreshed by parse/flush paths.
+    const { writeMetaFile, readMetaFile } = require("../src/meta") as typeof import("../src/meta");
+    const { cleanupSessionCache } = await import("./fixtures");
+    cleanupSessionCache(sessionId);
+
+    // Write an initial parsed artifact with retained=false. It should remain unchanged
+    // until the session is parsed/flushed again.
+    writeMetaFile(sessionId, {
+      sessionId: sessionId,
+      sessionName: "test session",
+      extraContext: null,
+      sessionUserTags: [],
+      sessionCwd: "/test",
+      sessionTimestamp: "2026-01-01T00:00:00Z",
+      messageCount: 0,
+      retained: false,
+    });
+
+    const { readSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
+
+    // Verify initial .meta.json exists with retained=false (pre-condition)
+    const beforeMeta = readMetaFile(sessionId);
+    expect(beforeMeta).toBeDefined();
+    expect(beforeMeta!.retained).toBe(false);
+
+    // Call session_start with no existing hindsight-meta entries
+    const ctx = createMockContext({
+      _sessionId: sessionId,
+      sessionManager: {
+        ...createMockContext({ _sessionId: sessionId }).sessionManager,
+        getEntries: mock(() => []),
+      },
+    });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+
+    // Verify in-session metadata was appended
+    expect(pi.appendedEntries).toHaveLength(1);
+    expect(pi.appendedEntries[0]).toEqual({
+      customType: "hindsight-meta",
+      data: { retained: true },
+    });
+
+    // Verify live session state was updated with retained=true
+    const liveState = readSessionState(sessionId);
+    expect(liveState).not.toBeNull();
+    expect(liveState!.retained).toBe(true);
+
+    // Re-read .meta.json cache and verify session_start did not patch the parsed artifact.
+    const afterMeta = readMetaFile(sessionId);
+    expect(afterMeta).not.toBeNull();
+    expect(afterMeta!.retained).toBe(false);
+
+    cleanupSessionCache(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("session_before_fork handler flushes queued messages", async () => {
@@ -933,18 +1088,15 @@ describe("real entrypoint bootstrap", () => {
     const handler = pi.handlers.get("session_before_fork")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(BOOTSTRAP_SESSION);
-    enqueueAutoMessage(BOOTSTRAP_SESSION, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
 
     await handler({ type: "session_before_fork" }, ctx);
 
-    expect(readAutoQueue(BOOTSTRAP_SESSION)).toHaveLength(0);
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    removePendingFlag(BOOTSTRAP_SESSION);
   });
 
   it("session_before_compact handler skips flush when flushOnCompact is false", async () => {
@@ -957,19 +1109,16 @@ describe("real entrypoint bootstrap", () => {
     const handler = pi.handlers.get("session_before_compact")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(BOOTSTRAP_SESSION);
-    enqueueAutoMessage(BOOTSTRAP_SESSION, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
 
     await handler({ type: "session_before_compact" }, ctx);
 
     // Queue should still be intact — flushOnCompact is false
-    expect(readAutoQueue(BOOTSTRAP_SESSION)).toHaveLength(1);
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+    removePendingFlag(BOOTSTRAP_SESSION);
   });
 
   it("session_before_compact handler flushes when flushOnCompact is true", async () => {
@@ -982,18 +1131,15 @@ describe("real entrypoint bootstrap", () => {
     const handler = pi.handlers.get("session_before_compact")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(BOOTSTRAP_SESSION);
-    enqueueAutoMessage(BOOTSTRAP_SESSION, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
 
     await handler({ type: "session_before_compact" }, ctx);
 
-    expect(readAutoQueue(BOOTSTRAP_SESSION)).toHaveLength(0);
-    deleteAutoQueue(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    removePendingFlag(BOOTSTRAP_SESSION);
   });
 
   it("session_start handler sets unhealthy status when server is unreachable", async () => {
@@ -2125,14 +2271,11 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
-    expect(readAutoQueue(sessionId)).toHaveLength(1);
+    removePendingFlag(sessionId);
+    await touchPendingFlag(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(true);
 
     const handler = pi.handlers.get("session_before_switch")!;
     const ctx = createMockContext({
@@ -2146,8 +2289,8 @@ describe("real entrypoint bootstrap", () => {
     await handler({ type: "session_before_switch" }, ctx);
 
     // Queue should still be intact — flush was blocked
-    expect(readAutoQueue(sessionId)).toHaveLength(1);
-    deleteAutoQueue(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(true);
+    removePendingFlag(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: session_shutdown blocks flush when extra context is not set", async () => {
@@ -2158,13 +2301,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(sessionId);
+    await touchPendingFlag(sessionId);
 
     const handler = pi.handlers.get("session_shutdown")!;
     const ctx = createMockContext({
@@ -2178,8 +2318,8 @@ describe("real entrypoint bootstrap", () => {
     await handler({ type: "session_shutdown" }, ctx);
 
     // Queue should still be intact — flush was blocked
-    expect(readAutoQueue(sessionId)).toHaveLength(1);
-    deleteAutoQueue(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(true);
+    removePendingFlag(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: flush proceeds when extra context is set", async () => {
@@ -2190,20 +2330,24 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(sessionId);
+    await touchPendingFlag(sessionId);
+
+    const { writeSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
 
     const handler = pi.handlers.get("session_before_switch")!;
     // Entries include extra context in metadata
-    const ctx = createMockContext({
+    const baseCtx = createMockContext({
       _sessionId: sessionId,
+      _extraContext: "Fiction session",
+    });
+    const ctx = {
+      ...baseCtx,
       sessionManager: {
-        ...createMockContext({ _sessionId: sessionId }).sessionManager,
+        ...baseCtx.sessionManager,
         getEntries: mock(() => [
           {
             type: "custom",
@@ -2212,13 +2356,20 @@ describe("real entrypoint bootstrap", () => {
           },
         ]),
       },
+    } as unknown as ExtensionContext;
+
+    // Write live state with extraContext set (session_start may have created extraContext=null)
+    writeSessionState(sessionId, {
+      retained: true,
+      extraContext: "Fiction session",
+      updatedAt: new Date().toISOString(),
     });
 
     await handler({ type: "session_before_switch" }, ctx);
 
     // Queue should be flushed — extra context was set
-    expect(readAutoQueue(sessionId)).toHaveLength(0);
-    deleteAutoQueue(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(false);
+    removePendingFlag(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: parse-and-upsert-session subcommand blocks when extra context is not set", async () => {
@@ -2229,10 +2380,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { deleteAutoQueue, deleteToolQueue } =
+    const { removePendingFlag, clearSessionQueueState } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     const commandHandler = (
       pi.commands.get("hindsight") as {
@@ -2261,8 +2412,8 @@ describe("real entrypoint bootstrap", () => {
       expect(lastCall[1]).toBe("warning");
     });
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: parse-and-upsert-session subcommand proceeds when extra context is set", async () => {
@@ -2273,10 +2424,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { deleteAutoQueue, deleteToolQueue } =
+    const { removePendingFlag, clearSessionQueueState } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
 
     const commandHandler = (
       pi.commands.get("hindsight") as {
@@ -2285,10 +2436,19 @@ describe("real entrypoint bootstrap", () => {
     ).handler;
 
     const { writeSessionFile, withTempDir } = await import("./fixtures");
+    const { writeSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
     await withTempDir(async (tmpDir) => {
-      const sessionPath = writeSessionFile(tmpDir, sessionId);
+      const sessionPath = writeSessionFile(tmpDir, sessionId, { extraContext: "Fiction session" });
+      // Write live state with extraContext set (session_start may have created extraContext=null)
+      writeSessionState(sessionId, {
+        retained: true,
+        extraContext: "Fiction session",
+        updatedAt: new Date().toISOString(),
+      });
       const ctx = createMockContext({
         _sessionId: sessionId,
+        _extraContext: "Fiction session",
         sessionManager: {
           ...createMockContext({ _sessionId: sessionId }).sessionManager,
           getSessionFile: mock(() => sessionPath),
@@ -2310,8 +2470,8 @@ describe("real entrypoint bootstrap", () => {
       expect(lastCall[0]).toContain("Parsed and upserted");
     });
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: flush subcommand blocks when extra context is not set", async () => {
@@ -2322,14 +2482,11 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, deleteToolQueue, readAutoQueue } =
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
+    await touchPendingFlag(sessionId);
 
     const commandHandler = (
       pi.commands.get("hindsight") as {
@@ -2353,10 +2510,10 @@ describe("real entrypoint bootstrap", () => {
     expect(lastCall[0]).toContain("extra context not set");
     expect(lastCall[1]).toBe("warning");
     // Queue should still be intact
-    expect(readAutoQueue(sessionId)).toHaveLength(1);
+    expect(hasPendingFlag(sessionId)).toBe(true);
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: flush subcommand proceeds when extra context is set", async () => {
@@ -2367,14 +2524,11 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, deleteToolQueue, readAutoQueue } =
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
+    await touchPendingFlag(sessionId);
 
     const commandHandler = (
       pi.commands.get("hindsight") as {
@@ -2382,10 +2536,24 @@ describe("real entrypoint bootstrap", () => {
       }
     ).handler;
 
-    const ctx = createMockContext({
+    const { writeSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
+
+    // Write live state with extraContext set (session_start may have created extraContext=null)
+    writeSessionState(sessionId, {
+      retained: true,
+      extraContext: "Fiction session",
+      updatedAt: new Date().toISOString(),
+    });
+
+    const baseCtx = createMockContext({
       _sessionId: sessionId,
+      _extraContext: "Fiction session",
+    });
+    const ctx = {
+      ...baseCtx,
       sessionManager: {
-        ...createMockContext({ _sessionId: sessionId }).sessionManager,
+        ...baseCtx.sessionManager,
         getEntries: mock(() => [
           {
             type: "custom",
@@ -2394,19 +2562,18 @@ describe("real entrypoint bootstrap", () => {
           },
         ]),
       },
-    });
-
+    } as unknown as ExtensionContext;
     await commandHandler("flush", ctx);
 
     const notification = (ctx as unknown as { ui: { notify: ReturnType<typeof mock> } }).ui.notify
       .mock.calls;
     const lastCall = notification[notification.length - 1]!;
-    expect(lastCall[0]).toContain("Flushed");
+    expect(lastCall[0]).toContain("Parsed and upserted");
     // Queue should be flushed
-    expect(readAutoQueue(sessionId)).toHaveLength(0);
+    expect(hasPendingFlag(sessionId)).toBe(false);
 
-    deleteAutoQueue(sessionId);
-    deleteToolQueue(sessionId);
+    removePendingFlag(sessionId);
+    clearSessionQueueState(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: flush proceeds when extra context is explicitly set to empty string", async () => {
@@ -2417,20 +2584,31 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
+    removePendingFlag(sessionId);
+    await touchPendingFlag(sessionId);
+
+    const { writeSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
+
+    // Write live state with extraContext="" (session_start may have created extraContext=null)
+    writeSessionState(sessionId, {
+      retained: true,
+      extraContext: "",
+      updatedAt: new Date().toISOString(),
     });
 
     const handler = pi.handlers.get("session_before_switch")!;
     // Entries include extraContext set to empty string ("I don't need extra context")
-    const ctx = createMockContext({
+    const baseCtx = createMockContext({
       _sessionId: sessionId,
+      _extraContext: "",
+    });
+    const ctx = {
+      ...baseCtx,
       sessionManager: {
-        ...createMockContext({ _sessionId: sessionId }).sessionManager,
+        ...baseCtx.sessionManager,
         getEntries: mock(() => [
           {
             type: "custom",
@@ -2439,13 +2617,13 @@ describe("real entrypoint bootstrap", () => {
           },
         ]),
       },
-    });
+    } as unknown as ExtensionContext;
 
     await handler({ type: "session_before_switch" }, ctx);
 
     // Queue should be flushed — explicit empty string satisfies the guard
-    expect(readAutoQueue(sessionId)).toHaveLength(0);
-    deleteAutoQueue(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(false);
+    removePendingFlag(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: session_before_fork blocks flush when extra context is not set", async () => {
@@ -2456,13 +2634,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(sessionId);
+    await touchPendingFlag(sessionId);
 
     const handler = pi.handlers.get("session_before_fork")!;
     const ctx = createMockContext({
@@ -2476,8 +2651,8 @@ describe("real entrypoint bootstrap", () => {
     await handler({ type: "session_before_fork" }, ctx);
 
     // Queue should still be intact — flush was blocked
-    expect(readAutoQueue(sessionId)).toHaveLength(1);
-    deleteAutoQueue(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(true);
+    removePendingFlag(sessionId);
   });
 
   it("requireExtraContextBeforeFlush: session_before_compact blocks flush when extra context is not set and flushOnCompact is true", async () => {
@@ -2488,13 +2663,10 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
 
     const sessionId = BOOTSTRAP_SESSION;
-    const { enqueueAutoMessage, deleteAutoQueue, readAutoQueue } =
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
       require("../src/queue") as typeof import("../src/queue");
-    deleteAutoQueue(sessionId);
-    enqueueAutoMessage(sessionId, {
-      entry: { message: { role: "user", content: [{ type: "text", text: "Hello" }] } },
-      store_method: "auto",
-    });
+    removePendingFlag(sessionId);
+    await touchPendingFlag(sessionId);
 
     const handler = pi.handlers.get("session_before_compact")!;
     const ctx = createMockContext({
@@ -2508,7 +2680,7 @@ describe("real entrypoint bootstrap", () => {
     await handler({ type: "session_before_compact" }, ctx);
 
     // Queue should still be intact — flush was blocked
-    expect(readAutoQueue(sessionId)).toHaveLength(1);
-    deleteAutoQueue(sessionId);
+    expect(hasPendingFlag(sessionId)).toBe(true);
+    removePendingFlag(sessionId);
   });
 });

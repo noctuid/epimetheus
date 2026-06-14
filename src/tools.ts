@@ -8,7 +8,7 @@ import type { Budget, RecallResponse, ReflectResponse } from "@vectorize-io/hind
 import { type Static, Type } from "typebox";
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig, MemoryType, ToolName } from "./config";
-import { buildMetaUpdate, getHindsightMeta, shouldSessionBeRetained } from "./meta";
+import { getHindsightMeta, shouldSessionBeRetained, updateSessionMetadata } from "./meta";
 import { queueToolRetain } from "./retention";
 import { extractParentSessionId } from "./utils";
 
@@ -125,14 +125,12 @@ export function registerTools(
         ctx
       ): Promise<AgentToolResult<ExtraContextDetails>> {
         const entries = ctx.sessionManager.getEntries();
-        const existingMeta = getHindsightMeta(entries);
 
         const extraContext = params.text.trim();
         // Always store extraContext (even empty string) so the flush guard
         // can distinguish "explicitly set to empty" from "never set".
-        const meta = buildMetaUpdate(existingMeta, { extraContext });
-
-        pi.appendEntry("hindsight-meta", meta);
+        const sessionId = ctx.sessionManager.getSessionId();
+        await updateSessionMetadata(pi, sessionId, entries, { extraContext }, config);
 
         const message = extraContext
           ? "Extra context set."
@@ -265,9 +263,9 @@ export function registerTools(
 
         // Get session tags from metadata
         const meta = getHindsightMeta(entries);
-        const sessionTags = meta?.tags;
+        const sessionUserTags = meta?.tags ?? [];
 
-        const success = queueToolRetain(
+        const result = await queueToolRetain(
           sessionId,
           params.content,
           params.tags,
@@ -275,12 +273,12 @@ export function registerTools(
           ctx.cwd,
           parentSessionId,
           config,
-          sessionTags
+          sessionUserTags
         );
-        if (!success) {
+        if (!result.success) {
           return {
-            content: [{ type: "text", text: "Failed to queue memory for storage." }],
-            details: { success: false, error: "enqueue failed" },
+            content: [{ type: "text", text: `Failed to queue memory: ${result.error}` }],
+            details: { success: false, error: result.error },
           };
         }
 

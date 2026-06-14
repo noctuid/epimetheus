@@ -2,7 +2,7 @@
  * Unit tests for slash commands.
  */
 
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,6 +11,7 @@ import { registerCommands } from "../src/commands";
 import type { RecallMessageDetails } from "../src/index";
 import {
   createMockClient,
+  readToolQueueFromDisk,
   setupTempAgentDir,
   statusTestConfig,
   withTempDir,
@@ -20,6 +21,28 @@ import {
 // Redirect agent-dir filesystem operations to a temp directory instead of
 // the real user's ~/.pi/agent/ directory.
 setupTempAgentDir("commands");
+
+afterEach(() => {
+  // Clean up parsed-session cache and live state to prevent leaks between tests
+  // using the same session ID (test-session-123).
+  try {
+    const { getMetaPath, getMessagesPath } =
+      require("../src/parsed-store") as typeof import("../src/parsed-store");
+    const { getSessionStatePath } =
+      require("../src/session-state") as typeof import("../src/session-state");
+    const { existsSync } = require("node:fs");
+    const { rmSync } = require("node:fs");
+    for (const p of [
+      getMetaPath("test-session-123"),
+      getMessagesPath("test-session-123"),
+      getSessionStatePath("test-session-123"),
+    ]) {
+      if (existsSync(p)) rmSync(p, { force: true });
+    }
+  } catch {
+    // best-effort
+  }
+});
 
 interface RegisteredCmd {
   description: string;
@@ -359,19 +382,15 @@ describe("registerCommands", () => {
 
     it("deletes queued messages after upsert to prevent duplication", async () => {
       const sessionId = "test-session-123";
-      const { enqueueAutoMessage, readAutoQueue, deleteAutoQueue, deleteToolQueue } = await import(
-        "../src/queue"
-      );
+      const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+        await import("../src/queue");
 
       await withTempDir(async (tmpDir) => {
         const sessionPath = writeSessionFile(tmpDir, sessionId);
 
         try {
-          enqueueAutoMessage(sessionId, {
-            entry: { message: { role: "user", content: "Hello" } },
-            store_method: "auto",
-          });
-          expect(readAutoQueue(sessionId)).toHaveLength(1);
+          await touchPendingFlag(sessionId);
+          expect(hasPendingFlag(sessionId)).toBe(true);
 
           let retainCalled = false;
           mockClient = createMockClient({
@@ -395,19 +414,19 @@ describe("registerCommands", () => {
 
           await getHandler()("parse-and-upsert-session", ctx);
 
-          expect(readAutoQueue(sessionId)).toHaveLength(0);
+          expect(hasPendingFlag(sessionId)).toBe(false);
           expect(retainCalled).toBe(true);
           expect(lastNotification?.message).toContain("Parsed and upserted");
         } finally {
-          deleteAutoQueue(sessionId);
-          deleteToolQueue(sessionId);
+          removePendingFlag(sessionId);
+          clearSessionQueueState(sessionId);
         }
       });
     });
 
     it("does not error when no queue files exist", async () => {
       const sessionId = "test-session-123";
-      const { deleteAutoQueue, deleteToolQueue } = await import("../src/queue");
+      const { removePendingFlag, clearSessionQueueState } = await import("../src/queue");
 
       await withTempDir(async (tmpDir) => {
         const sessionPath = writeSessionFile(tmpDir, sessionId);
@@ -434,8 +453,8 @@ describe("registerCommands", () => {
           expect(retainCalled).toBe(true);
           expect(lastNotification?.message).toContain("Parsed and upserted");
         } finally {
-          deleteAutoQueue(sessionId);
-          deleteToolQueue(sessionId);
+          removePendingFlag(sessionId);
+          clearSessionQueueState(sessionId);
         }
       });
     });
@@ -443,12 +462,12 @@ describe("registerCommands", () => {
     it("preserves tool queue on upsert (tool retains are separate documents)", async () => {
       const sessionId = "test-session-123";
       const {
-        enqueueAutoMessage,
         enqueueToolMessage,
-        readAutoQueue,
-        readToolQueue,
-        deleteAutoQueue,
-        deleteToolQueue,
+
+        removePendingFlag,
+        clearSessionQueueState,
+        hasPendingFlag,
+        touchPendingFlag,
       } = await import("../src/queue");
 
       await withTempDir(async (tmpDir) => {
@@ -456,18 +475,16 @@ describe("registerCommands", () => {
 
         try {
           // Enqueue both auto and tool messages
-          enqueueAutoMessage(sessionId, {
-            entry: { message: { role: "user", content: "Hello" } },
-            store_method: "auto",
-          });
-          enqueueToolMessage(sessionId, {
+          await touchPendingFlag(sessionId);
+          await enqueueToolMessage(sessionId, {
             content: "User prefers dark mode",
             tags: ["topic:ui"],
             timestamp: new Date().toISOString(),
             store_method: "tool",
+            sessionId: "test-session",
           });
-          expect(readAutoQueue(sessionId)).toHaveLength(1);
-          expect(readToolQueue(sessionId)).toHaveLength(1);
+          expect(hasPendingFlag(sessionId)).toBe(true);
+          expect(readToolQueueFromDisk(sessionId)).toHaveLength(1);
 
           mockClient = createMockClient({
             retainResult: { success: true },
@@ -489,15 +506,15 @@ describe("registerCommands", () => {
           await getHandler()("parse-and-upsert-session", ctx);
 
           // Auto queue should be cleared (session messages are already upserted)
-          expect(readAutoQueue(sessionId)).toHaveLength(0);
+          expect(hasPendingFlag(sessionId)).toBe(false);
           // Tool queue should be preserved (tool retains are separate documents,
           // not included in the session upsert; deleting them would cause data loss)
-          expect(readToolQueue(sessionId)).toHaveLength(1);
-          expect(readToolQueue(sessionId)[0]?.content).toBe("User prefers dark mode");
+          expect(readToolQueueFromDisk(sessionId)).toHaveLength(1);
+          expect(readToolQueueFromDisk(sessionId)[0]?.content).toBe("User prefers dark mode");
           expect(lastNotification?.message).toContain("Parsed and upserted");
         } finally {
-          deleteAutoQueue(sessionId);
-          deleteToolQueue(sessionId);
+          removePendingFlag(sessionId);
+          clearSessionQueueState(sessionId);
         }
       });
     });
@@ -506,75 +523,200 @@ describe("registerCommands", () => {
   describe("toggle-retain subcommand", () => {
     it("toggles retention off, deletes queue files", async () => {
       const sessionId = "test-session-123";
-      const { enqueueAutoMessage, readAutoQueue, deleteAutoQueue, deleteToolQueue } = await import(
-        "../src/queue"
-      );
+      const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+        await import("../src/queue");
       try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
-        expect(readAutoQueue(sessionId)).toHaveLength(1);
+        await touchPendingFlag(sessionId);
+        expect(hasPendingFlag(sessionId)).toBe(true);
 
         register();
         await getHandler()("toggle-retain", makeCtx(sessionId));
 
-        expect(readAutoQueue(sessionId)).toHaveLength(0);
+        expect(hasPendingFlag(sessionId)).toBe(false);
         expect(lastNotification?.message).toContain("disabled");
         expect(appendedEntries).toHaveLength(1);
         expect(appendedEntries[0]?.data).toEqual({ retained: false });
       } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
       }
     });
 
-    it("toggles retention on with confirm=yes, appends meta and deletes queue", async () => {
-      sessionEntries = [
-        { type: "custom", customType: "hindsight-meta", data: { retained: false } },
-      ];
-      confirmResult = true;
-      register();
-      await getHandler()("toggle-retain", makeCtx());
-      expect(appendedEntries).toHaveLength(1);
-      expect(appendedEntries[0]?.data).toEqual({ retained: true });
-      expect(lastNotification?.message).toContain("enabled");
+    it("disable retention: metadata update and tool hiding happen before queue clear", async () => {
+      const sessionId = "test-session-disable-order";
+      const {
+        enqueueToolMessage,
+
+        removePendingFlag,
+        clearSessionQueueState,
+        hasPendingFlag,
+        touchPendingFlag,
+      } = await import("../src/queue");
+
+      // Track ordering: record what exists when appendEntry and setActiveTools are called
+      const orderingLog: Array<{ event: string; hadPending: boolean; hadToolEntries: boolean }> =
+        [];
+
+      try {
+        // Set up queued state
+        await touchPendingFlag(sessionId);
+        await enqueueToolMessage(sessionId, {
+          content: "Tool memory",
+          tags: ["test"],
+          store_method: "tool",
+          timestamp: new Date().toISOString(),
+          sessionId: "test-session",
+        });
+        expect(hasPendingFlag(sessionId)).toBe(true);
+        expect(readToolQueueFromDisk(sessionId)).toHaveLength(1);
+
+        sessionEntries = [
+          { type: "custom", customType: "hindsight-meta", data: { retained: true } },
+        ];
+
+        // Override appendEntry to capture ordering at metadata update time
+        mockPi.appendEntry = mock((customType: string, data?: unknown) => {
+          appendedEntries.push({ customType, data });
+          if (
+            customType === "hindsight-meta" &&
+            (data as Record<string, unknown>)?.retained === false
+          ) {
+            orderingLog.push({
+              event: "appendEntry(retained:false)",
+              hadPending: hasPendingFlag(sessionId),
+              hadToolEntries: readToolQueueFromDisk(sessionId).length > 0,
+            });
+          }
+        }) as typeof mockPi.appendEntry;
+
+        // Override setActiveTools to capture ordering at tool-hiding time
+        mockPi.setActiveTools = mock((names: string[]) => {
+          if (!names.includes("hindsight_retain")) {
+            orderingLog.push({
+              event: "setActiveTools(hide_retain)",
+              hadPending: hasPendingFlag(sessionId),
+              hadToolEntries: readToolQueueFromDisk(sessionId).length > 0,
+            });
+          }
+        }) as typeof mockPi.setActiveTools;
+
+        register();
+        await getHandler()("toggle-retain", makeCtx(sessionId));
+
+        // Verify ordering: metadata update and tool hiding happened while queue still existed
+        expect(orderingLog).toHaveLength(2);
+        expect(orderingLog[0]?.event).toBe("appendEntry(retained:false)");
+        expect(orderingLog[0]?.hadPending).toBe(true);
+        expect(orderingLog[0]?.hadToolEntries).toBe(true);
+        expect(orderingLog[1]?.event).toBe("setActiveTools(hide_retain)");
+        expect(orderingLog[1]?.hadPending).toBe(true);
+        expect(orderingLog[1]?.hadToolEntries).toBe(true);
+
+        // After handler completes, queue should be cleared
+        expect(hasPendingFlag(sessionId)).toBe(false);
+        expect(readToolQueueFromDisk(sessionId)).toHaveLength(0);
+        expect(lastNotification?.message).toContain("disabled");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
     });
 
-    it("toggles retention on with confirm=no, does not enable", async () => {
-      sessionEntries = [
-        { type: "custom", customType: "hindsight-meta", data: { retained: false } },
-      ];
-      confirmResult = false;
-      register();
-      await getHandler()("toggle-retain", makeCtx());
-      expect(appendedEntries).toHaveLength(0);
-      expect(lastNotification?.message).toContain("Retention not enabled");
+    it("toggles retention on with confirm=yes and appends meta", async () => {
+      const sessionId = "test-session-confirm-no-enable";
+      const { removePendingFlag, clearSessionQueueState, hasPendingFlag } = await import(
+        "../src/queue"
+      );
+      try {
+        sessionEntries = [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ];
+        confirmResult = true;
+        register();
+        await getHandler()("toggle-retain", makeCtx(sessionId));
+        expect(appendedEntries).toHaveLength(1);
+        expect(appendedEntries[0]?.data).toEqual({ retained: true });
+        // Pending marker is created before confirm prompt
+        expect(hasPendingFlag(sessionId)).toBe(true);
+        // Session retention is enabled even though parse-and-upsert fails (no session file)
+        expect(lastNotification?.message).toContain("Session file not found");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
+    });
+
+    it("toggles retention on with confirm=no, still enables and marks pending", async () => {
+      const sessionId = "test-session-confirm-no-enable";
+      const { removePendingFlag, clearSessionQueueState, hasPendingFlag } = await import(
+        "../src/queue"
+      );
+      try {
+        sessionEntries = [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ];
+        confirmResult = false;
+        register();
+        await getHandler()("toggle-retain", makeCtx(sessionId));
+        // Retention is enabled even when user declines immediate upsert
+        expect(appendedEntries).toHaveLength(1);
+        expect(appendedEntries[0]?.data).toEqual({ retained: true });
+        // Session is marked dirty (pending marker was created before confirm prompt)
+        expect(hasPendingFlag(sessionId)).toBe(true);
+        expect(lastNotification?.message).toContain("enabled");
+        expect(lastNotification?.message).toContain("next flush");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
+    });
+
+    it("confirm=yes with missing session file enables and leaves pending marker for retry", async () => {
+      const sessionId = "test-session-confirm-yes-missing-file";
+      const { removePendingFlag, clearSessionQueueState, hasPendingFlag } = await import(
+        "../src/queue"
+      );
+      try {
+        sessionEntries = [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ];
+        confirmResult = true;
+        // getSessionFile returns null to simulate missing session file
+        register();
+        await getHandler()("toggle-retain", makeCtx(sessionId));
+        // Retention is enabled
+        expect(appendedEntries).toHaveLength(1);
+        expect(appendedEntries[0]?.data).toEqual({ retained: true });
+        // Pending marker remains for retry since upsert couldn't run
+        expect(hasPendingFlag(sessionId)).toBe(true);
+        expect(lastNotification?.message).toContain("Session file not found");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
     });
 
     it("toggles retention off with confirm=no, does not disable or delete queues", async () => {
       const sessionId = "test-session-confirm-no";
       const {
-        enqueueAutoMessage,
         enqueueToolMessage,
-        readAutoQueue,
-        readToolQueue,
-        deleteAutoQueue,
-        deleteToolQueue,
+
+        removePendingFlag,
+        clearSessionQueueState,
+        hasPendingFlag,
+        touchPendingFlag,
       } = await import("../src/queue");
       try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
-        enqueueToolMessage(sessionId, {
+        await touchPendingFlag(sessionId);
+        await enqueueToolMessage(sessionId, {
           content: "Tool memory",
           tags: ["test"],
           store_method: "tool",
           timestamp: new Date().toISOString(),
+          sessionId: "test-session",
         });
-        expect(readAutoQueue(sessionId)).toHaveLength(1);
-        expect(readToolQueue(sessionId)).toHaveLength(1);
+        expect(hasPendingFlag(sessionId)).toBe(true);
+        expect(readToolQueueFromDisk(sessionId)).toHaveLength(1);
 
         sessionEntries = [
           { type: "custom", customType: "hindsight-meta", data: { retained: true } },
@@ -585,11 +727,11 @@ describe("registerCommands", () => {
 
         expect(appendedEntries).toHaveLength(0);
         expect(lastNotification?.message).toContain("Retention not disabled");
-        expect(readAutoQueue(sessionId)).toHaveLength(1);
-        expect(readToolQueue(sessionId)).toHaveLength(1);
+        expect(hasPendingFlag(sessionId)).toBe(true);
+        expect(readToolQueueFromDisk(sessionId)).toHaveLength(1);
       } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
       }
     });
 
@@ -627,16 +769,17 @@ describe("registerCommands", () => {
       expect(appendedEntries[0]?.data).toEqual({ retained: true });
     });
 
-    it("blocks toggling on when requireExtraContextBeforeFlush is true and extra context not set", async () => {
+    it("allows toggling on when requireExtraContextBeforeFlush is true and extra context not set", async () => {
       confirmResult = true;
       sessionEntries = [
         { type: "custom", customType: "hindsight-meta", data: { retained: false } },
       ];
       register({ ...statusTestConfig, requireExtraContextBeforeFlush: true });
       await getHandler()("toggle-retain", makeCtx());
-      expect(appendedEntries).toHaveLength(0);
-      expect(lastNotification?.message).toContain("extra context not set");
-      expect(lastNotification?.type).toBe("warning");
+      // Toggle-retain no longer blocks on missing extra context —
+      // the guard only applies at upsert time.
+      expect(appendedEntries).toHaveLength(1);
+      expect(appendedEntries[0]?.data).toEqual({ retained: true });
     });
 
     it("allows toggling on when requireExtraContextBeforeFlush is true and extra context is set", async () => {
@@ -669,7 +812,7 @@ describe("registerCommands", () => {
       expect(appendedEntries[0]?.data).toEqual({ retained: true, extraContext: "" });
     });
 
-    it("blocks toggling on when requireExtraContextBeforeFlush is true and no meta exists at all", async () => {
+    it("allows toggling on when requireExtraContextBeforeFlush is true and no meta exists at all", async () => {
       confirmResult = true;
       sessionEntries = []; // no hindsight-meta entries
       register({
@@ -678,11 +821,11 @@ describe("registerCommands", () => {
         retainSessionsByDefault: false,
       });
       await getHandler()("toggle-retain", makeCtx());
-      expect(appendedEntries).toHaveLength(0);
-      expect(lastNotification?.message).toContain("extra context not set");
+      // Toggle-retain no longer blocks on missing extra context
+      expect(appendedEntries).toHaveLength(1);
     });
 
-    it("blocks toggling on when requireExtraContextBeforeFlush is true and meta has no extraContext key", async () => {
+    it("allows toggling on when requireExtraContextBeforeFlush is true and meta has no extraContext key", async () => {
       confirmResult = true;
       sessionEntries = [
         {
@@ -693,8 +836,8 @@ describe("registerCommands", () => {
       ];
       register({ ...statusTestConfig, requireExtraContextBeforeFlush: true });
       await getHandler()("toggle-retain", makeCtx());
-      expect(appendedEntries).toHaveLength(0);
-      expect(lastNotification?.message).toContain("extra context not set");
+      // Toggle-retain no longer blocks on missing extra context
+      expect(appendedEntries).toHaveLength(1);
     });
   });
 
@@ -841,30 +984,57 @@ describe("registerCommands", () => {
       await getHandler()("set-extra-context new context", makeCtx());
       expect(appendedEntries[0]?.data).toEqual({ extraContext: "new context" });
     });
+
+    it("preserves internal newlines/multiline whitespace in the argument", async () => {
+      // Regression: argument parsing must only use whitespace to identify the
+      // first subcommand token; it must not collapse internal whitespace or
+      // newlines (e.g. inserted via Shift+Return) in the remaining args.
+      register();
+      // "line 1\nline 2" with a literal newline between the two lines.
+      await getHandler()("set-extra-context line 1\nline 2", makeCtx());
+      expect(appendedEntries).toHaveLength(1);
+      expect(appendedEntries[0]?.data).toEqual({ extraContext: "line 1\nline 2" });
+    });
+
+    it("preserves multiple spaces and tabs inside the argument", async () => {
+      // Regression: internal whitespace runs must not be collapsed to single
+      // spaces. Multiple spaces and tabs are significant inside extra context.
+      register();
+      await getHandler()("set-extra-context line   1\tline\t\t2", makeCtx());
+      expect(appendedEntries[0]?.data).toEqual({ extraContext: "line   1\tline\t\t2" });
+    });
+
+    it("trims only leading/trailing whitespace, preserving internal newlines", async () => {
+      // The set-extra-context handler itself trims boundaries; command parsing
+      // must hand it the internal-whitespace-preserving string (then the
+      // handler trims). Leading/trailing newlines/whitespace are dropped.
+      register();
+      await getHandler()("set-extra-context   \n  line 1\nline 2  \n  ", makeCtx());
+      expect(appendedEntries[0]?.data).toEqual({ extraContext: "line 1\nline 2" });
+    });
   });
 
   describe("status with queue count", () => {
     it("shows queued messages count when session is active", async () => {
       const sessionId = "test-session-123";
-      const { enqueueAutoMessage, deleteAutoQueue, deleteToolQueue } = await import("../src/queue");
+      const { removePendingFlag, clearSessionQueueState, touchPendingFlag } = await import(
+        "../src/queue"
+      );
       try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
+        await touchPendingFlag(sessionId);
         register();
         await getHandler()("status", makeCtx());
-        expect(lastNotification?.message).toContain("Queued messages: 1");
+        expect(lastNotification?.message).toContain("Queued documents: 1");
       } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
       }
     });
 
     it("shows queued messages: 0 when queue is empty", async () => {
       register();
       await getHandler()("status", makeCtx());
-      expect(lastNotification?.message).toContain("Queued messages: 0");
+      expect(lastNotification?.message).toContain("Queued documents: 0");
     });
 
     it("does not show queued messages when no session", async () => {
@@ -920,23 +1090,20 @@ describe("registerCommands", () => {
       expect(lastNotification?.message).toContain("No active session");
     });
 
-    it("notifies when no messages queued", async () => {
+    it("notifies when no active session", async () => {
       register();
       await getHandler()("flush", makeCtx());
-      expect(lastNotification?.message).toContain("No messages queued");
+      expect(lastNotification?.message).toContain("No active session");
     });
 
     it("flushes queued messages on success", async () => {
       const sessionId = "test-session-123";
-      const { enqueueAutoMessage, readAutoQueue, deleteAutoQueue, deleteToolQueue } = await import(
-        "../src/queue"
-      );
+      const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+        await import("../src/queue");
+      const { withTempDir, writeSessionFile } = await import("./fixtures");
       try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
-        expect(readAutoQueue(sessionId)).toHaveLength(1);
+        await touchPendingFlag(sessionId);
+        expect(hasPendingFlag(sessionId)).toBe(true);
 
         let flushCalled = false;
         mockClient = createMockClient();
@@ -946,23 +1113,33 @@ describe("registerCommands", () => {
         });
 
         register();
-        await getHandler()("flush", makeCtx());
+        await withTempDir(async (tmpDir) => {
+          const sessionPath = writeSessionFile(tmpDir, sessionId);
+          const ctx = {
+            ...makeCtx(),
+            sessionManager: {
+              ...makeCtx().sessionManager,
+              getSessionFile: () => sessionPath,
+            },
+          };
+          await getHandler()("flush", ctx);
+        });
         expect(flushCalled).toBe(true);
-        expect(lastNotification?.message).toContain("Flushed");
+        expect(lastNotification?.message).toContain("Parsed and upserted");
       } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
       }
     });
 
     it("shows error on flush failure", async () => {
       const sessionId = "test-session-123";
-      const { enqueueAutoMessage, deleteAutoQueue, deleteToolQueue } = await import("../src/queue");
+      const { removePendingFlag, clearSessionQueueState, touchPendingFlag } = await import(
+        "../src/queue"
+      );
+      const { withTempDir, writeSessionFile } = await import("./fixtures");
       try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
+        await touchPendingFlag(sessionId);
 
         mockClient = createMockClient();
         (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
@@ -971,11 +1148,148 @@ describe("registerCommands", () => {
         }));
 
         register();
-        await getHandler()("flush", makeCtx());
-        expect(lastNotification?.message).toContain("Flush failed");
+        await withTempDir(async (tmpDir) => {
+          const sessionPath = writeSessionFile(tmpDir, sessionId);
+          const ctx = {
+            ...makeCtx(),
+            sessionManager: {
+              ...makeCtx().sessionManager,
+              getSessionFile: () => sessionPath,
+            },
+          };
+          await getHandler()("flush", ctx);
+        });
+        expect(lastNotification?.message).toContain("error");
       } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
+    });
+  });
+
+  describe("flush-pending subcommand", () => {
+    it("errors when Hindsight not configured", async () => {
+      register(statusTestConfig, null);
+      await getHandler()("flush-pending", makeCtx());
+      expect(lastNotification?.message).toContain("Hindsight not configured");
+    });
+
+    it("notifies no pending changes when queue is empty", async () => {
+      register();
+      await getHandler()("flush-pending", makeCtx());
+      expect(lastNotification?.message).toContain("No pending changes");
+    });
+
+    it("cancels when user declines confirmation", async () => {
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const sessionId = "test-flush-pending-cancel";
+      try {
+        await touchPendingFlag(sessionId);
+        confirmResult = false;
+        register();
+        await getHandler()("flush-pending", makeCtx());
+        expect(lastNotification?.message).toContain("Flush cancelled");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
+    });
+
+    it("detects tool-queue-only sessions as pending work", async () => {
+      const { enqueueToolMessage, clearSessionQueueState } = await import("../src/queue");
+      const sessionId = "test-flush-pending-tool-only";
+      try {
+        await enqueueToolMessage(sessionId, {
+          content: "tool fact",
+          timestamp: "2024-01-01T00:00:00Z",
+          store_method: "tool",
+          sessionId: "test-session",
+        });
+        confirmResult = false;
+        register();
+        await getHandler()("flush-pending", makeCtx());
+        expect(lastNotification?.message).toContain("Flush cancelled");
+      } finally {
+        clearSessionQueueState(sessionId);
+      }
+    });
+
+    it("flushes tool-queue-only session and clears queue", async () => {
+      const { enqueueToolMessage, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const sessionId = "test-flush-pending-tool-flush";
+      try {
+        await enqueueToolMessage(sessionId, {
+          content: "tool fact",
+          timestamp: "2024-01-01T00:00:00Z",
+          store_method: "tool",
+          sessionId: "test-session",
+        });
+
+        mockClient = createMockClient();
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", makeCtx());
+
+        expect(mockClient!.retainBatch).toHaveBeenCalled();
+        expect(readToolQueueFromDisk(sessionId)).toHaveLength(0);
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
+    });
+
+    it("reports error when pending session not found", async () => {
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const sessionId = `test-missing-session-${Date.now()}`;
+      try {
+        await touchPendingFlag(sessionId);
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", makeCtx());
+
+        // Per-session notification includes the session ID and reason
+        expect(lastNotification?.message).toContain(sessionId);
+        expect(lastNotification?.message).toContain("session file not found");
+        // No final summary notification
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
+    });
+
+    it("flushes tool queue even when session file is missing", async () => {
+      const { enqueueToolMessage, touchPendingFlag, removePendingFlag, clearSessionQueueState } =
+        await import("../src/queue");
+      const sessionId = `test-missing-session-with-tool-${Date.now()}`;
+      try {
+        // Create both a pending marker (no session file) and a tool queue entry
+        await touchPendingFlag(sessionId);
+        await enqueueToolMessage(sessionId, {
+          content: "tool fact",
+          timestamp: "2024-01-01T00:00:00Z",
+          store_method: "tool",
+          sessionId: "test-session",
+        });
+
+        mockClient = createMockClient();
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", makeCtx());
+
+        // Per-session error notification for missing session file
+        // (may be overwritten by subsequent tool queue notification)
+        // Tool queue should still have been flushed
+        expect(mockClient!.retainBatch).toHaveBeenCalled();
+        expect(readToolQueueFromDisk(sessionId)).toHaveLength(0);
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
       }
     });
   });
@@ -987,6 +1301,40 @@ describe("registerCommands", () => {
       expect(lastNotification?.message).toContain("No session file found");
       expect(lastNotification?.type).toBe("error");
     });
+
+    it("writes .meta.json not containing lastUpsertedAt", async () => {
+      const sessionId = "test-session-meta-no-lastupserted";
+      const { getMetaPath } =
+        require("../src/parsed-store") as typeof import("../src/parsed-store");
+      const { readFileSync } = require("node:fs");
+
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId, {
+          messages: [{ role: "user", content: "hello" }],
+        });
+
+        register();
+        const ctx = {
+          ...makeCtx(),
+          sessionManager: {
+            ...makeCtx().sessionManager,
+            getSessionId: () => sessionId,
+            getSessionFile: () => sessionPath,
+          },
+        } as unknown as ExtensionContext;
+
+        await getHandler()("parse-session", ctx);
+
+        const metaContent = readFileSync(getMetaPath(sessionId), "utf-8");
+        const writtenMeta = JSON.parse(metaContent);
+        // Regression: parsed .meta.json must NOT contain lastUpsertedAt
+        expect("lastUpsertedAt" in writtenMeta).toBe(false);
+        // Required fields are still present
+        expect(writtenMeta.sessionId).toBe(sessionId);
+        expect(writtenMeta.messageCount).toBeGreaterThan(0);
+        expect(writtenMeta.retained).toBe(true);
+      });
+    });
   });
 
   describe("upsert-all-parsed subcommand", () => {
@@ -997,30 +1345,44 @@ describe("registerCommands", () => {
     });
 
     it("notifies when no parsed sessions directory", async () => {
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+      // Ensure directory is absent
+      rmSync(parsedDir, { recursive: true, force: true });
+
       mockClient = createMockClient();
       (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
         success: true,
       }));
       register();
       await getHandler()("upsert-all-parsed", makeCtx());
-      expect(lastNotification?.message).toBeDefined();
+      expect(lastNotification?.message).toContain("No parsed sessions found");
+      expect(mockClient!.retain).not.toHaveBeenCalled();
     });
 
     it("asks for confirmation before upserting", async () => {
       const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
       const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
-      const testFile = join(parsedDir, "test-upsert-confirm.json");
+      const sessionId = "test-upsert-confirm";
 
+      // Clean any leftovers first
+      rmSync(parsedDir, { recursive: true, force: true });
       mkdirSync(parsedDir, { recursive: true });
       writeFileSync(
-        testFile,
+        join(parsedDir, `${sessionId}.meta.json`),
         JSON.stringify({
-          messages: [{ role: "user", content: "hello" }],
-          documentId: "doc-confirm-test",
-          context: "test",
-          timestamp: new Date().toISOString(),
+          sessionId: sessionId,
+          sessionName: "test session",
+          extraContext: null,
+          sessionUserTags: [],
           tags: [],
+          retained: true,
         }),
+        "utf8"
+      );
+      writeFileSync(
+        join(parsedDir, `${sessionId}.messages.jsonl`),
+        `${JSON.stringify({ role: "user", content: "hello" })}\n`,
         "utf8"
       );
 
@@ -1055,25 +1417,33 @@ describe("registerCommands", () => {
         expect(confirmMessage).toContain("take a long time");
         expect(confirmMessage).toContain("many API requests");
       } finally {
-        rmSync(testFile, { force: true });
+        rmSync(join(parsedDir, `${sessionId}.meta.json`), { force: true });
+        rmSync(join(parsedDir, `${sessionId}.messages.jsonl`), { force: true });
       }
     });
 
     it("cancels upsert when user declines confirmation", async () => {
       const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
       const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
-      const testFile = join(parsedDir, "test-upsert-cancel.json");
+      const sessionId = "test-upsert-cancel";
 
+      rmSync(parsedDir, { recursive: true, force: true });
       mkdirSync(parsedDir, { recursive: true });
       writeFileSync(
-        testFile,
+        join(parsedDir, `${sessionId}.meta.json`),
         JSON.stringify({
-          messages: [{ role: "user", content: "hello" }],
-          documentId: "doc-cancel-test",
-          context: "test",
-          timestamp: new Date().toISOString(),
+          sessionId: sessionId,
+          sessionName: "test session",
+          extraContext: null,
+          sessionUserTags: [],
           tags: [],
+          retained: true,
         }),
+        "utf8"
+      );
+      writeFileSync(
+        join(parsedDir, `${sessionId}.messages.jsonl`),
+        `${JSON.stringify({ role: "user", content: "hello" })}\n`,
         "utf8"
       );
 
@@ -1098,27 +1468,37 @@ describe("registerCommands", () => {
         await getHandler()("upsert-all-parsed", trackedCtx);
 
         expect(lastNotification?.message).toContain("Upsert cancelled");
+        expect(mockClient!.retain).not.toHaveBeenCalled();
       } finally {
-        rmSync(testFile, { force: true });
+        rmSync(join(parsedDir, `${sessionId}.meta.json`), { force: true });
+        rmSync(join(parsedDir, `${sessionId}.messages.jsonl`), { force: true });
       }
     });
 
     it("proceeds with upsert when user accepts confirmation", async () => {
       const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
       const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
-      const testFile = join(parsedDir, "test-upsert-proceed.json");
+      const sessionId = "test-upsert-proceed";
 
+      rmSync(parsedDir, { recursive: true, force: true });
       mkdirSync(parsedDir, { recursive: true });
       writeFileSync(
-        testFile,
+        join(parsedDir, `${sessionId}.meta.json`),
         JSON.stringify({
-          messages: [{ role: "user", content: "hello" }],
-          documentId: "doc-proceed-test",
-          context: "test",
-          timestamp: new Date().toISOString(),
-          tags: [],
-          cwd: "/test/project",
+          sessionId: sessionId,
+          sessionName: "test session",
+          retained: true,
+          extraContext: null,
+          sessionUserTags: [],
+          sessionCwd: "/test/project",
+          sessionTimestamp: new Date().toISOString(),
+          messageCount: 1,
         }),
+        "utf8"
+      );
+      writeFileSync(
+        join(parsedDir, `${sessionId}.messages.jsonl`),
+        `${JSON.stringify({ role: "user", content: "hello" })}\n`,
         "utf8"
       );
 
@@ -1142,9 +1522,291 @@ describe("registerCommands", () => {
 
         await getHandler()("upsert-all-parsed", trackedCtx);
 
+        expect(mockClient!.retain).toHaveBeenCalled();
         expect(lastNotification?.message).toContain("Successfully upserted");
       } finally {
-        rmSync(testFile, { force: true });
+        rmSync(join(parsedDir, `${sessionId}.meta.json`), { force: true });
+        rmSync(join(parsedDir, `${sessionId}.messages.jsonl`), { force: true });
+      }
+    });
+
+    it("skips sessions with retained=false", async () => {
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+
+      rmSync(parsedDir, { recursive: true, force: true });
+      mkdirSync(parsedDir, { recursive: true });
+
+      // Session with retained=true should be upserted
+      writeFileSync(
+        join(parsedDir, "retained-session.meta.json"),
+        JSON.stringify({
+          sessionId: "retained-session",
+          sessionName: "retained session",
+          tags: [],
+          retained: true,
+          sessionCwd: "/test/project",
+          sessionTimestamp: new Date().toISOString(),
+          messageCount: 1,
+          extraContext: null,
+          sessionUserTags: [],
+        }),
+        "utf8"
+      );
+      writeFileSync(
+        join(parsedDir, "retained-session.messages.jsonl"),
+        `${JSON.stringify({ role: "user", content: "retained" })}\n`,
+        "utf8"
+      );
+
+      // Session with retained=false should be skipped
+      writeFileSync(
+        join(parsedDir, "not-retained-session.meta.json"),
+        JSON.stringify({
+          sessionId: "not-retained-session",
+          sessionName: "not retained session",
+          tags: [],
+          retained: false,
+          sessionCwd: "/test/project",
+          sessionTimestamp: new Date().toISOString(),
+          messageCount: 1,
+          extraContext: null,
+          sessionUserTags: [],
+        }),
+        "utf8"
+      );
+      writeFileSync(
+        join(parsedDir, "not-retained-session.messages.jsonl"),
+        `${JSON.stringify({ role: "user", content: "not retained" })}\n`,
+        "utf8"
+      );
+
+      try {
+        confirmResult = true;
+
+        mockClient = createMockClient();
+        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
+          success: true,
+        }));
+
+        register();
+
+        await getHandler()("upsert-all-parsed", makeCtx());
+
+        // Only the retained session should be upserted
+        expect(mockClient!.retain).toHaveBeenCalledTimes(1);
+        expect(lastNotification?.message).toContain("Successfully upserted 1 sessions");
+      } finally {
+        rmSync(join(parsedDir, "retained-session.meta.json"), { force: true });
+        rmSync(join(parsedDir, "retained-session.messages.jsonl"), { force: true });
+        rmSync(join(parsedDir, "not-retained-session.meta.json"), { force: true });
+        rmSync(join(parsedDir, "not-retained-session.messages.jsonl"), { force: true });
+      }
+    });
+
+    it("reports parsed sessions with missing retained metadata as malformed", async () => {
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+      const sessionId = "missing-retained-session";
+
+      rmSync(parsedDir, { recursive: true, force: true });
+      mkdirSync(parsedDir, { recursive: true });
+      writeFileSync(
+        join(parsedDir, `${sessionId}.meta.json`),
+        JSON.stringify({
+          sessionId: sessionId,
+          sessionName: "missing retained session",
+          sessionUserTags: [],
+          sessionCwd: "/test/project",
+          sessionTimestamp: new Date().toISOString(),
+          messageCount: 1,
+          extraContext: null,
+        }),
+        "utf8"
+      );
+      writeFileSync(
+        join(parsedDir, `${sessionId}.messages.jsonl`),
+        `${JSON.stringify({ role: "user", content: "missing retained" })}\n`,
+        "utf8"
+      );
+
+      try {
+        confirmResult = true;
+
+        mockClient = createMockClient();
+        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
+          success: true,
+        }));
+
+        register();
+
+        await getHandler()("upsert-all-parsed", makeCtx());
+
+        expect(mockClient!.retain).not.toHaveBeenCalled();
+        expect(lastNotification?.message).toContain("Invalid or malformed");
+      } finally {
+        rmSync(join(parsedDir, `${sessionId}.meta.json`), { force: true });
+        rmSync(join(parsedDir, `${sessionId}.messages.jsonl`), { force: true });
+      }
+    });
+
+    it("reports malformed parseable .meta.json as invalid", async () => {
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+      const sessionId = "malformed-meta-session";
+
+      rmSync(parsedDir, { recursive: true, force: true });
+      mkdirSync(parsedDir, { recursive: true });
+      // Valid JSON but structurally invalid (missing required fields)
+      writeFileSync(
+        join(parsedDir, `${sessionId}.meta.json`),
+        JSON.stringify({ sessionId: sessionId }),
+        "utf8"
+      );
+      writeFileSync(
+        join(parsedDir, `${sessionId}.messages.jsonl`),
+        `${JSON.stringify({ role: "user", content: "hello" })}\n`,
+        "utf8"
+      );
+
+      try {
+        confirmResult = true;
+
+        mockClient = createMockClient();
+        register();
+
+        await getHandler()("upsert-all-parsed", makeCtx());
+
+        expect(mockClient!.retain).not.toHaveBeenCalled();
+        expect(lastNotification?.message).toContain("failed");
+        expect(lastNotification?.message).toContain("Invalid or malformed");
+      } finally {
+        rmSync(join(parsedDir, `${sessionId}.meta.json`), { force: true });
+        rmSync(join(parsedDir, `${sessionId}.messages.jsonl`), { force: true });
+      }
+    });
+
+    it("stops upsert loop when signal is already aborted", async () => {
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+
+      rmSync(parsedDir, { recursive: true, force: true });
+      mkdirSync(parsedDir, { recursive: true });
+
+      const sessionIds = ["abort-s1", "abort-s2"];
+      for (const sid of sessionIds) {
+        writeFileSync(
+          join(parsedDir, `${sid}.meta.json`),
+          JSON.stringify({
+            sessionId: sid,
+            sessionName: `${sid} session`,
+            retained: true,
+            extraContext: null,
+            sessionUserTags: [],
+            sessionCwd: "/test",
+            sessionTimestamp: new Date().toISOString(),
+            messageCount: 1,
+          }),
+          "utf8"
+        );
+        writeFileSync(
+          join(parsedDir, `${sid}.messages.jsonl`),
+          `${JSON.stringify({ role: "user", content: "hello" })}\n`,
+          "utf8"
+        );
+      }
+
+      try {
+        confirmResult = true;
+
+        mockClient = createMockClient();
+        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
+          success: true,
+        }));
+        register();
+
+        const controller = new AbortController();
+        controller.abort();
+
+        const abortedCtx = {
+          ...makeCtx(),
+          signal: controller.signal,
+        } as unknown as ExtensionContext;
+
+        await getHandler()("upsert-all-parsed", abortedCtx);
+
+        expect(mockClient!.retain).not.toHaveBeenCalled();
+        expect(lastNotification?.message).toContain("cancelled");
+      } finally {
+        for (const sid of sessionIds) {
+          rmSync(join(parsedDir, `${sid}.meta.json`), { force: true });
+          rmSync(join(parsedDir, `${sid}.messages.jsonl`), { force: true });
+        }
+      }
+    });
+
+    it("stops upsert loop when signal aborts between iterations", async () => {
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+
+      rmSync(parsedDir, { recursive: true, force: true });
+      mkdirSync(parsedDir, { recursive: true });
+
+      const sessionIds = ["mid-abort-s1", "mid-abort-s2"];
+      for (const sid of sessionIds) {
+        writeFileSync(
+          join(parsedDir, `${sid}.meta.json`),
+          JSON.stringify({
+            sessionId: sid,
+            sessionName: `${sid} session`,
+            retained: true,
+            extraContext: null,
+            sessionUserTags: [],
+            sessionCwd: "/test",
+            sessionTimestamp: new Date().toISOString(),
+            messageCount: 1,
+          }),
+          "utf8"
+        );
+        writeFileSync(
+          join(parsedDir, `${sid}.messages.jsonl`),
+          `${JSON.stringify({ role: "user", content: "hello" })}\n`,
+          "utf8"
+        );
+      }
+
+      try {
+        confirmResult = true;
+
+        const controller = new AbortController();
+        let retainCallCount = 0;
+
+        mockClient = createMockClient();
+        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => {
+          retainCallCount++;
+          // Abort after the first session is upserted
+          if (retainCallCount === 1) {
+            controller.abort();
+          }
+          return { success: true };
+        });
+        register();
+
+        const abortedCtx = {
+          ...makeCtx(),
+          signal: controller.signal,
+        } as unknown as ExtensionContext;
+
+        await getHandler()("upsert-all-parsed", abortedCtx);
+
+        // First session should have been upserted, second should not
+        expect(mockClient!.retain).toHaveBeenCalledTimes(1);
+        expect(lastNotification?.message).toContain("cancelled after 1");
+      } finally {
+        for (const sid of sessionIds) {
+          rmSync(join(parsedDir, `${sid}.meta.json`), { force: true });
+          rmSync(join(parsedDir, `${sid}.messages.jsonl`), { force: true });
+        }
       }
     });
   });
@@ -1240,7 +1902,7 @@ describe("registerCommands", () => {
   });
 
   describe("filename mismatch regression (GLM bug 1)", () => {
-    it("parse-session reports path using header.id, not documentId", async () => {
+    it("parse-session reports path using header.id, not sessionId", async () => {
       const sessionId = "test-session-abc123";
 
       await withTempDir(async (tmpDir) => {
@@ -1283,7 +1945,7 @@ describe("registerCommands", () => {
         } as unknown as ExtensionContext;
 
         await getHandler()("parse-session", ctx);
-        expect(lastNotification?.message).toContain("Parent session not found");
+        expect(lastNotification?.message).toContain("Cannot determine fork point");
         expect(lastNotification?.message).not.toContain("No messages to parse");
         expect(lastNotification?.type).toBe("warning");
       });
@@ -1314,7 +1976,7 @@ describe("registerCommands", () => {
         } as unknown as ExtensionContext;
 
         await getHandler()("parse-and-upsert-session", ctx);
-        expect(lastNotification?.message).toContain("Parent session not found");
+        expect(lastNotification?.message).toContain("Cannot determine fork point");
         expect(lastNotification?.message).not.toContain("No messages to parse");
         expect(lastNotification?.type).toBe("warning");
       });
@@ -1324,12 +1986,12 @@ describe("registerCommands", () => {
   describe("parentSession path regression (GLM bug 3)", () => {
     it("flush subcommand extracts session ID from parent path, falls back to sessionId when parent is absent", async () => {
       const sessionId = "test-session-123";
-      const { enqueueAutoMessage, deleteAutoQueue, deleteToolQueue } = await import("../src/queue");
+      const { removePendingFlag, clearSessionQueueState, touchPendingFlag } = await import(
+        "../src/queue"
+      );
+      const { withTempDir, writeSessionFile } = await import("./fixtures");
       try {
-        enqueueAutoMessage(sessionId, {
-          entry: { message: { role: "user", content: "Hello" } },
-          store_method: "auto",
-        });
+        await touchPendingFlag(sessionId);
 
         let retainCalled = false;
         let retainTags: string[] | undefined;
@@ -1342,44 +2004,72 @@ describe("registerCommands", () => {
           }
         );
 
-        const ctx = {
-          ...makeCtx(),
-          sessionManager: {
-            ...makeCtx().sessionManager,
-            getHeader: () => ({
-              timestamp: new Date().toISOString(),
-              cwd: "/test",
-              parentSession: "/home/user/.pi/sessions/parent-uuid-456.jsonl",
-            }),
-          },
-        } as unknown as ExtensionContext;
-
         register();
-        await getHandler()("flush", ctx);
+        await withTempDir(async (tmpDir) => {
+          // Write a parent session file so fork detection works
+          writeSessionFile(tmpDir, "parent-uuid-456", {
+            messages: [
+              { role: "user", content: "Hi" },
+              { role: "assistant", content: "Hello" },
+            ],
+          });
+          const sessionPath = writeSessionFile(tmpDir, sessionId, {
+            parentSession: join(tmpDir, "parent-uuid-456.jsonl"),
+            messages: [
+              { role: "user", content: "Hi" },
+              { role: "assistant", content: "Hello there" },
+            ],
+          });
+          const ctx = {
+            ...makeCtx(),
+            sessionManager: {
+              ...makeCtx().sessionManager,
+              getSessionFile: () => sessionPath,
+              getHeader: () => ({
+                timestamp: new Date().toISOString(),
+                cwd: "/test",
+                parentSession: join(tmpDir, "parent-uuid-456.jsonl"),
+              }),
+            },
+          } as unknown as ExtensionContext;
+
+          await getHandler()("flush", ctx);
+        });
         expect(retainCalled).toBe(true);
         const parentTag = retainTags?.find((t: string) => t.startsWith("parent:"));
         expect(parentTag).toBeDefined();
         expect(parentTag).not.toContain("/");
         expect(parentTag).not.toContain(".pi/sessions");
-        expect(parentTag).toBe(`parent:${sessionId}`);
+        expect(parentTag).toBe(`parent:parent-uuid-456`);
       } finally {
-        deleteAutoQueue(sessionId);
-        deleteToolQueue(sessionId);
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
       }
     });
 
     it("flush subcommand uses extracted parent ID when parent file exists", async () => {
       const sessionId = "test-session-123";
-      const { enqueueAutoMessage, deleteAutoQueue, deleteToolQueue } = await import("../src/queue");
+      const { removePendingFlag, clearSessionQueueState, touchPendingFlag } = await import(
+        "../src/queue"
+      );
 
       await withTempDir(async (tmpDir) => {
-        const parentPath = writeSessionFile(tmpDir, "parent-uuid-789", { messages: [] });
+        const parentPath = writeSessionFile(tmpDir, "parent-uuid-789", {
+          messages: [
+            { role: "user", content: "Hi" },
+            { role: "assistant", content: "Hello" },
+          ],
+        });
+        const sessionPath = writeSessionFile(tmpDir, sessionId, {
+          parentSession: parentPath,
+          messages: [
+            { role: "user", content: "Hi" },
+            { role: "assistant", content: "Hello there" },
+          ],
+        });
 
         try {
-          enqueueAutoMessage(sessionId, {
-            entry: { message: { role: "user", content: "Hello" } },
-            store_method: "auto",
-          });
+          await touchPendingFlag(sessionId);
 
           let retainTags: string[] | undefined;
           mockClient = createMockClient();
@@ -1394,6 +2084,7 @@ describe("registerCommands", () => {
             ...makeCtx(),
             sessionManager: {
               ...makeCtx().sessionManager,
+              getSessionFile: () => sessionPath,
               getHeader: () => ({
                 timestamp: new Date().toISOString(),
                 cwd: "/test",
@@ -1409,8 +2100,8 @@ describe("registerCommands", () => {
           expect(parentTag).toBe("parent:parent-uuid-789");
           expect(parentTag).not.toContain("/");
         } finally {
-          deleteAutoQueue(sessionId);
-          deleteToolQueue(sessionId);
+          removePendingFlag(sessionId);
+          clearSessionQueueState(sessionId);
         }
       });
     });

@@ -11,7 +11,6 @@ import {
   extractTextFromContent,
   getBasedir,
   getProjectName,
-  getSessionDisplayName,
   truncate,
 } from "../src/utils";
 
@@ -164,77 +163,6 @@ describe("extractTextFromContent", () => {
 
   it("returns null for empty array", () => {
     expect(extractTextFromContent([])).toBe(null);
-  });
-});
-
-describe("getSessionDisplayName", () => {
-  it("returns session name if set", () => {
-    const result = getSessionDisplayName(
-      () => "My Session",
-      () => []
-    );
-    expect(result).toBe("My Session");
-  });
-
-  it("falls back to first user message", () => {
-    const entries = [
-      { type: "message", message: { role: "assistant", content: "hi" } },
-      {
-        type: "message",
-        message: { role: "user", content: [{ type: "text", text: "Hello world" }] },
-      },
-    ];
-    const result = getSessionDisplayName(
-      () => undefined,
-      () => entries
-    );
-    expect(result).toBe("Hello world");
-  });
-
-  it("extracts text from string content for first user message", () => {
-    const entries = [{ type: "message", message: { role: "user", content: "Simple text" } }];
-    const result = getSessionDisplayName(
-      () => undefined,
-      () => entries
-    );
-    expect(result).toBe("Simple text");
-  });
-
-  it("returns Untitled if no name or user message", () => {
-    const result = getSessionDisplayName(
-      () => undefined,
-      () => []
-    );
-    expect(result).toBe("Untitled");
-  });
-
-  it("returns Untitled if user message has no text content", () => {
-    const entries = [{ type: "message", message: { role: "user", content: [{ type: "image" }] } }];
-    const result = getSessionDisplayName(
-      () => undefined,
-      () => entries
-    );
-    expect(result).toBe("Untitled");
-  });
-
-  it("prefers session name over first user message", () => {
-    const entries = [{ type: "message", message: { role: "user", content: "First message" } }];
-    const result = getSessionDisplayName(
-      () => "Custom Title",
-      () => entries
-    );
-    expect(result).toBe("Custom Title");
-  });
-
-  it("truncates long first user message to 100 characters", () => {
-    const longText = "a".repeat(150);
-    const entries = [{ type: "message", message: { role: "user", content: longText } }];
-    const result = getSessionDisplayName(
-      () => undefined,
-      () => entries
-    );
-    expect(result.length).toBe(100);
-    expect(result.endsWith("…")).toBe(true);
   });
 });
 

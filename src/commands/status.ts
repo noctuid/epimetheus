@@ -7,7 +7,7 @@ import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
 import type { RecallMessageDetails } from "../index";
 import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
-import { getQueueCount } from "../retention";
+import { getPendingWorkCount } from "../retention";
 import type { Subcommand } from "./types";
 
 /**
@@ -53,8 +53,8 @@ export function createStatusSubcommand(
       const tags = meta?.tags ?? [];
       lines.push(`  Tags: ${tags.length > 0 ? tags.join(", ") : "none"}`);
       if (sessionId) {
-        const queueCount = getQueueCount(sessionId);
-        lines.push(`  Queued messages: ${queueCount}`);
+        const queueCount = getPendingWorkCount(sessionId);
+        lines.push(`  Queued documents: ${queueCount}`);
       }
 
       // Extra context

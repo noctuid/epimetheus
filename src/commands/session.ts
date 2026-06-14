@@ -2,30 +2,205 @@
  * Session parsing and upsert subcommands.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { existsSync, readdirSync } from "node:fs";
+import { basename, join } from "node:path";
+import type { ExtensionContext, SessionInfo } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
-import { getHindsightMeta, hasExtraContext } from "../meta";
-import { FLUSH_BLOCKED_NO_EXTRA_CONTEXT, flushQueues, getQueueCount } from "../retention";
-import { deriveSessionName, extractParentSessionId, getContextNameMaxLength } from "../utils";
+import { buildContextFromSessionName, buildDocumentTags } from "../document";
+import { buildMetaFile, readMetaFileByPath, writeMetaFile } from "../meta";
+import {
+  buildContentFromJsonl,
+  cacheExists,
+  ensureParsedSessionDir,
+  getMessagesPath,
+  getMetaPath,
+  getParsedSessionDir,
+  parseCurrentSession,
+  writeMessagesJsonl,
+} from "../parsed-store";
+import {
+  getPendingSessionIds,
+  hasPendingFlag,
+  recoverAllStaleInflightClaims,
+  toolQueueExists,
+} from "../queue";
+import {
+  flushCurrentSession,
+  flushToolQueue,
+  parseAndUpsertSession,
+  upsertToHindsight,
+} from "../retention";
 import type { Subcommand } from "./types";
-import { parseAndUpsertSession, parseCurrentSession, upsertToHindsight } from "./utils";
+
+// ============================================
+// Private helpers for flush-pending
+// ============================================
 
 /**
- * Create the flush subcommand — flushes queued messages to Hindsight.
+ * Build a map of session IDs to SessionInfo by listing all sessions.
+ * Throws on failure — callers should handle and notify.
+ */
+async function buildSessionMap(): Promise<Map<string, SessionInfo>> {
+  const allSessions = await SessionManager.listAll();
+  return new Map(allSessions.map((s) => [s.id, s]));
+}
+
+/**
+ * Flush a single pending session: re-parse and upsert if it has a pending marker,
+ * then flush any tool queue entries.
  *
- * Reads auto and tool queues for the current session and sends them
- * to Hindsight via {@link flushQueues}.
+ * Notifies per-session errors for missing session files.
+ * parseAndUpsertSession and flushToolQueue notify their own outcomes.
+ */
+async function flushPendingSession(
+  sessionId: string,
+  sessionMap: Map<string, SessionInfo>,
+  config: HindsightConfig,
+  client: HindsightClientWrapper,
+  ctx: ExtensionContext
+): Promise<void> {
+  // Re-parse and upsert if this session has a pending marker
+  if (hasPendingFlag(sessionId)) {
+    const sessionInfo = sessionMap.get(sessionId);
+    if (!sessionInfo) {
+      ctx.ui.notify(`${sessionId}: session file not found`, "error");
+    } else {
+      await parseAndUpsertSession(sessionInfo.path, sessionId, config, client, ctx, ctx.signal, {
+        requirePending: true,
+      });
+    }
+  }
+
+  // Tool queue flushing is independent of session ingestion.
+  if (toolQueueExists(sessionId)) {
+    await flushToolQueue(sessionId, client, ctx, ctx.signal);
+  }
+}
+
+// ============================================
+// Private helpers for upsert-all-parsed
+// ============================================
+
+/** Outcome of upserting a single parsed session. */
+type UpsertOutcome = "success" | "skipped" | "failed";
+
+/**
+ * List all .meta.json files in the parsed sessions directory.
+ * Returns full paths.
+ */
+function listParsedMetaFiles(parsedDir: string): string[] {
+  return readdirSync(parsedDir)
+    .filter((f) => f.endsWith(".meta.json"))
+    .map((f) => join(parsedDir, f));
+}
+
+/**
+ * Upsert a single parsed session from its .meta.json file.
+ *
+ * Returns a structured outcome:
+ * - "success": upserted successfully
+ * - "skipped": skipped because retention is explicitly disabled (no error)
+ * - "failed": failed with an error message (appended to errors array)
+ */
+async function upsertParsedSession(
+  metaPath: string,
+  config: HindsightConfig,
+  client: HindsightClientWrapper,
+  ctx: ExtensionContext,
+  errors: string[]
+): Promise<UpsertOutcome> {
+  const sessionId = basename(metaPath, ".meta.json");
+
+  try {
+    const meta = readMetaFileByPath(metaPath);
+    if (!meta) {
+      throw new Error("Invalid or malformed .meta.json");
+    }
+    if (meta.sessionId !== sessionId) {
+      throw new Error(
+        `Meta session id mismatch: file name ${sessionId} does not match stored ${meta.sessionId}`
+      );
+    }
+    // Skip sessions whose metadata explicitly indicates retention is disabled.
+    if (meta.retained === false) {
+      return "skipped";
+    }
+    // Flush guard: check before any other validation so blocked sessions
+    // report the right reason (not a misleading cache error)
+    if (config.requireExtraContextBeforeFlush && meta.extraContext === null) {
+      errors.push(`${sessionId}: flush blocked (extra context not set)`);
+      return "failed";
+    }
+    if (!cacheExists(sessionId)) {
+      throw new Error("Messages cache file not found");
+    }
+    // Build content from messages JSONL (no JSON.parse of message objects)
+    const content = buildContentFromJsonl(sessionId);
+    // Rebuild full document tags from cached user tags + current config
+    // so structural tags (constantTags, session, cwd, etc.) reflect latest config.
+    // Use sessionId (from filename) for the synthetic header so structural tag
+    // `session:<id>` matches the session ID and observation-scope expansion.
+    // The Hindsight document id is derived from the stored session id at upsert time.
+    const tags = buildDocumentTags(
+      {
+        type: "session",
+        id: sessionId,
+        timestamp: meta.sessionTimestamp,
+        cwd: meta.sessionCwd,
+      },
+      config,
+      {
+        sessionUserTags: meta.sessionUserTags,
+        parentSessionId: meta.parentSessionId,
+      }
+    );
+    await upsertToHindsight(
+      client,
+      {
+        content,
+        documentId: meta.sessionId,
+        context: buildContextFromSessionName(
+          config.hindsightContextPrefix,
+          meta.sessionName,
+          meta.extraContext ?? undefined
+        ),
+        timestamp: meta.sessionTimestamp,
+        tags,
+        sessionId,
+        parentSessionId: meta.parentSessionId,
+        sessionCwd: meta.sessionCwd ?? "",
+      },
+      config,
+      ctx.signal
+    );
+    return "success";
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    errors.push(`${sessionId}: ${message}`);
+    return "failed";
+  }
+}
+
+// ============================================
+// Subcommand factories
+// ============================================
+
+/**
+ * Create the flush subcommand — drain pending messages and tool entries for the current
+ * session to Hindsight.
+ *
+ * Parses the session file and upserts with updateMode=replace if the session
+ * has pending changes (via pending marker); does nothing if nothing has changed since the
+ * last flush. Also flushes any pending tool queue entries.
  */
 export function createFlushSubcommand(
   client: HindsightClientWrapper | null,
   config: HindsightConfig
 ): Subcommand {
   return {
-    description: "Flush queued messages to Hindsight",
+    description: "Drain pending messages and tool entries for the current session to Hindsight",
     handler: async (_args: string, ctx: ExtensionContext) => {
       if (!client) {
         ctx.ui.notify("Hindsight not configured", "error");
@@ -33,59 +208,94 @@ export function createFlushSubcommand(
       }
 
       const sessionId = ctx.sessionManager.getSessionId();
-      if (!sessionId) {
+      const sessionPath = ctx.sessionManager.getSessionFile();
+      if (!sessionId || !sessionPath) {
         ctx.ui.notify("No active session", "error");
         return;
       }
 
-      const count = getQueueCount(sessionId);
-      if (count === 0) {
-        ctx.ui.notify("No messages queued", "info");
+      await flushCurrentSession(sessionId, sessionPath, config, client, ctx, ctx.signal, {
+        notifyNoWork: true,
+      });
+    },
+  };
+}
+
+/**
+ * Create the flush-pending subcommand — flush all sessions with pending changes.
+ *
+ * Iterates sessions that have pending markers or tool queues, re-parses their
+ * session files, upserts with replace mode, and flushes any tool queue entries.
+ * Sessions with both pending markers and tool queues get both operations.
+ * Tool-only sessions (no pending markers) are included.
+ */
+export function createFlushPendingSubcommand(
+  client: HindsightClientWrapper | null,
+  config: HindsightConfig
+): Subcommand {
+  return {
+    description: "Drain pending messages and tool entries for all sessions to Hindsight",
+    handler: async (_args: string, ctx: ExtensionContext) => {
+      if (!client) {
+        ctx.ui.notify("Hindsight not configured", "error");
         return;
       }
 
-      // Check flush guard: requireExtraContextBeforeFlush
-      if (config.requireExtraContextBeforeFlush) {
-        const entries = ctx.sessionManager.getEntries();
-        const meta = getHindsightMeta(entries);
-        if (!hasExtraContext(meta)) {
-          ctx.ui.notify(FLUSH_BLOCKED_NO_EXTRA_CONTEXT, "warning");
-          return;
-        }
+      try {
+        recoverAllStaleInflightClaims();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        ctx.ui.notify(`In-flight recovery failed: ${msg}`, "error");
       }
 
-      const header = ctx.sessionManager.getHeader();
-      const entries = ctx.sessionManager.getEntries();
-      const sessionName = deriveSessionName(
-        ctx.sessionManager.getSessionName(),
-        entries,
-        getContextNameMaxLength(config)
+      // getPendingSessionIds is lock-free / best-effort: a session may disappear or be
+      // flushed concurrently. Per-session flush steps safely handle empty/no-work cases.
+      const allSessionIds = getPendingSessionIds();
+      if (allSessionIds.length === 0) {
+        ctx.ui.notify("No pending changes", "info");
+        return;
+      }
+
+      // Count sessions with pending markers and tool queues for accurate messaging.
+      const sessionsWithPending = allSessionIds.filter((id) => hasPendingFlag(id));
+      const sessionsWithToolQueue = allSessionIds.filter((id) => toolQueueExists(id));
+
+      const parts: string[] = [];
+      if (sessionsWithPending.length > 0) {
+        parts.push(`${sessionsWithPending.length} session(s) to re-parse and upsert`);
+      }
+      if (sessionsWithToolQueue.length > 0) {
+        parts.push(`${sessionsWithToolQueue.length} tool queue(s) to flush`);
+      }
+      const description = parts.join(" + ");
+
+      const answer = await ctx.ui.confirm(
+        "Flush pending sessions?",
+        `This will flush ${description}. Continue?`
       );
-      const sessionStartTime = header?.timestamp ?? new Date().toISOString();
-      const sessionCwd = header?.cwd ?? ctx.cwd;
-      const parentSessionId = extractParentSessionId(header?.parentSession);
+      if (!answer) {
+        ctx.ui.notify("Flush cancelled", "info");
+        return;
+      }
 
-      ctx.ui.notify(`Flushing ${count} messages...`, "info");
-
-      const result = await flushQueues(
-        sessionId,
-        sessionName,
-        sessionStartTime,
-        sessionCwd,
-        parentSessionId,
-        config,
-        client,
-        ctx.signal,
-        entries
-      );
-
-      if (result.success) {
+      // Build session map via SessionManager.listAll(). This is expected to be reliable
+      // in normal pi operation, and pending session upserts require it to resolve IDs
+      // to session files; abort the flush if session discovery itself fails.
+      let sessionMap: Map<string, SessionInfo>;
+      try {
+        sessionMap = await buildSessionMap();
+      } catch (e) {
         ctx.ui.notify(
-          `Flushed ${result.autoCount} auto + ${result.toolCount} tool entries`,
-          "info"
+          `Failed to list sessions: ${e instanceof Error ? e.message : String(e)}`,
+          "error"
         );
-      } else {
-        ctx.ui.notify(`Flush failed: ${result.error}`, "error");
+        return;
+      }
+
+      ctx.ui.notify(`Flushing ${allSessionIds.length} session(s)...`, "info");
+
+      for (const sessionId of allSessionIds) {
+        await flushPendingSession(sessionId, sessionMap, config, client, ctx);
       }
     },
   };
@@ -101,14 +311,32 @@ export function createParseSessionSubcommand(config: HindsightConfig): Subcomman
   return {
     description: "Parse current session to file for manual review",
     handler: async (_args: string, ctx: ExtensionContext) => {
-      const result = parseCurrentSession(ctx, config);
-
-      if ("message" in result) {
-        ctx.ui.notify(result.message, result.level);
+      const sessionPath = ctx.sessionManager.getSessionFile();
+      if (!sessionPath) {
+        ctx.ui.notify("No session file found", "error");
         return;
       }
 
-      ctx.ui.notify(`Parsed session saved to: ${result.outputPath}`, "info");
+      const sessionId = ctx.sessionManager.getSessionId();
+      if (!sessionId) {
+        ctx.ui.notify("No session ID available", "error");
+        return;
+      }
+
+      const result = parseCurrentSession(sessionPath, sessionId, config, ctx);
+
+      if (!result) {
+        return;
+      }
+
+      // Write cache files to disk for review
+      ensureParsedSessionDir();
+      writeMessagesJsonl(result.sessionId, result.formattedMessageStrs);
+      writeMetaFile(result.sessionId, buildMetaFile(result));
+      ctx.ui.notify(
+        `Parsed session saved to:\n  Messages: ${getMessagesPath(result.sessionId)}\n  Meta: ${getMetaPath(result.sessionId)}`,
+        "info"
+      );
     },
   };
 }
@@ -116,7 +344,7 @@ export function createParseSessionSubcommand(config: HindsightConfig): Subcomman
 /**
  * Create the parse-and-upsert-session subcommand — parse and upsert the full session.
  *
- * Delegates to {@link parseAndUpsertSession} which handles parsing, queue clearing,
+ * Delegates to {@link parseAndUpsertSession} which handles parsing, pending marker clearing,
  * and retention in one step.
  */
 export function createParseAndUpsertSessionSubcommand(
@@ -124,20 +352,24 @@ export function createParseAndUpsertSessionSubcommand(
   config: HindsightConfig
 ): Subcommand {
   return {
-    description: "Parse and upsert the full current session to Hindsight",
+    description:
+      "Parse and upsert the full current session to Hindsight (forced, bypasses pending markers)",
     handler: async (_args: string, ctx: ExtensionContext) => {
       if (!client) {
         ctx.ui.notify("Hindsight not configured", "error");
         return;
       }
 
-      try {
-        const result = await parseAndUpsertSession(ctx, config, client);
-        ctx.ui.notify(result.message, result.level);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        ctx.ui.notify(`Parse-and-upsert failed: ${msg}`, "error");
+      const sessionId = ctx.sessionManager.getSessionId();
+      const sessionPath = ctx.sessionManager.getSessionFile();
+      if (!sessionId || !sessionPath) {
+        ctx.ui.notify("No session file found", "error");
+        return;
       }
+
+      await parseAndUpsertSession(sessionPath, sessionId, config, client, ctx, ctx.signal, {
+        requirePending: false,
+      });
     },
   };
 }
@@ -145,8 +377,8 @@ export function createParseAndUpsertSessionSubcommand(
 /**
  * Create the upsert-all-parsed subcommand — upsert all previously parsed sessions.
  *
- * Reads all `.json` files from the parsed-sessions directory and upserts them
- * to Hindsight, including configured entities. Checks for abort between iterations.
+ * Reads all `.meta.json` files from the parsed-sessions directory and upserts them
+ * to Hindsight, including configured entities.
  */
 export function createUpsertAllParsedSubcommand(
   client: HindsightClientWrapper | null,
@@ -160,79 +392,54 @@ export function createUpsertAllParsedSubcommand(
         return;
       }
 
-      const parsedDir = join(getAgentDir(), "extensions", "pi-hindsight", "parsed-sessions");
+      const parsedDir = getParsedSessionDir();
       if (!existsSync(parsedDir)) {
         ctx.ui.notify("No parsed sessions found", "error");
         return;
       }
 
-      const files = readdirSync(parsedDir).filter((f) => f.endsWith(".json"));
-      if (files.length === 0) {
+      const metaFilePaths = listParsedMetaFiles(parsedDir);
+      if (metaFilePaths.length === 0) {
         ctx.ui.notify("No parsed sessions found", "error");
         return;
       }
 
       const answer = await ctx.ui.confirm(
         "Upsert all parsed sessions?",
-        `This will upsert ${files.length} session(s) to Hindsight, which can take a long time and make many API requests. Continue?`
+        `This will upsert ${metaFilePaths.length} session(s) to Hindsight, which can take a long time and make many API requests. Continue?`
       );
       if (!answer) {
         ctx.ui.notify("Upsert cancelled", "info");
         return;
       }
 
-      ctx.ui.notify(`Upserting ${files.length} parsed sessions...`, "info");
+      ctx.ui.notify(`Upserting ${metaFilePaths.length} parsed sessions...`, "info");
 
       let successCount = 0;
       let failCount = 0;
       const errors: string[] = [];
 
-      for (const file of files) {
-        // Check for abort between iterations
-        if (ctx.signal?.aborted) break;
-
-        const parsedPath = join(parsedDir, file);
-        const sessionId = file.replace(".json", "");
-
-        try {
-          const parsed = JSON.parse(readFileSync(parsedPath, "utf8"));
-          if (!parsed.messages || !parsed.documentId) {
-            throw new Error("Invalid session format: missing required fields");
-          }
-          await upsertToHindsight(
-            client,
-            {
-              content: JSON.stringify(parsed.messages),
-              documentId: parsed.documentId,
-              context: parsed.context,
-              timestamp: parsed.timestamp,
-              tags: parsed.tags,
-              sessionId: parsed.sessionId ?? sessionId,
-              parentSessionId: parsed.parentSessionId,
-              sessionCwd: parsed.cwd,
-            },
-            config,
-            ctx.signal
-          );
-          successCount++;
-        } catch (e) {
-          failCount++;
-          const message = e instanceof Error ? e.message : String(e);
-          errors.push(`${sessionId}: ${message}`);
+      for (const metaPath of metaFilePaths) {
+        if (ctx.signal?.aborted) {
+          ctx.ui.notify(`Upsert cancelled after ${successCount} session(s)`, "warning");
+          return;
         }
+        const outcome = await upsertParsedSession(metaPath, config, client, ctx, errors);
+        if (outcome === "success") {
+          successCount++;
+        } else if (outcome === "failed") {
+          failCount++;
+        }
+        // "skipped" is not counted as success or failure
       }
 
-      const aborted = ctx.signal?.aborted;
-      const abortNote = aborted ? " (operation cancelled — partial results)" : "";
-
       if (failCount === 0) {
-        ctx.ui.notify(`Successfully upserted ${successCount} sessions${abortNote}`, "info");
+        ctx.ui.notify(`Successfully upserted ${successCount} sessions`, "info");
       } else {
-        console.error("pi-hindsight: Upsert errors:", errors.join("; "));
         const sampleErrors = errors.slice(0, 3).join("; ");
         const suffix = errors.length > 3 ? `; and ${errors.length - 3} more` : "";
         ctx.ui.notify(
-          `Upserted ${successCount} sessions, ${failCount} failed (${sampleErrors}${suffix})${abortNote}`,
+          `Upserted ${successCount} sessions, ${failCount} failed (${sampleErrors}${suffix})`,
           "error"
         );
       }

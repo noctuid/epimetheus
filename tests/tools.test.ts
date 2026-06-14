@@ -8,9 +8,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
-import { deleteAutoQueue, deleteToolQueue, readToolQueue } from "../src/queue";
+import { clearSessionQueueState, removePendingFlag } from "../src/queue";
 import { isToolEnabled, registerTools, updateRetainToolVisibility } from "../src/tools";
-import { setupTempAgentDir, testConfig as sharedTestConfig } from "./fixtures";
+import {
+  readToolQueueFromDisk,
+  setupTempAgentDir,
+  testConfig as sharedTestConfig,
+} from "./fixtures";
 
 setupTempAgentDir("tools");
 
@@ -111,8 +115,8 @@ function createMockClient(): HindsightClientWrapper {
 
 afterEach(() => {
   // Clean up any queue files created during tests
-  deleteAutoQueue(TEST_SESSION_ID);
-  deleteToolQueue(TEST_SESSION_ID);
+  removePendingFlag(TEST_SESSION_ID);
+  clearSessionQueueState(TEST_SESSION_ID);
 });
 
 // ============================================
@@ -234,7 +238,7 @@ describe("hindsight_retain", () => {
     expect(result.content[0]?.text).toContain("queued");
 
     // Verify the tool queue was actually written
-    const queueEntries = readToolQueue(TEST_SESSION_ID);
+    const queueEntries = readToolQueueFromDisk(TEST_SESSION_ID);
     expect(queueEntries).toHaveLength(1);
     expect(queueEntries[0]?.content).toBe("Important fact");
   });
@@ -253,7 +257,7 @@ describe("hindsight_retain", () => {
       ctx
     );
 
-    const queueEntries = readToolQueue(TEST_SESSION_ID);
+    const queueEntries = readToolQueueFromDisk(TEST_SESSION_ID);
     expect(queueEntries[0]?.tags).toContain("topic:test");
     expect(queueEntries[0]?.metadata).toEqual({ source: "user" });
   });
@@ -717,7 +721,7 @@ describe("hindsight_retain context forwarding", () => {
 
     await retainTool!.execute("tc1", { content: "Important fact" }, undefined, undefined, ctx);
 
-    const queueEntries = readToolQueue(TEST_SESSION_ID);
+    const queueEntries = readToolQueueFromDisk(TEST_SESSION_ID);
     expect(queueEntries).toHaveLength(1);
     // Should include session and parent tags
     const tags = queueEntries[0]?.tags ?? [];
@@ -745,7 +749,7 @@ describe("hindsight_retain context forwarding", () => {
 
     await retainTool!.execute("tc1", { content: "Important fact" }, undefined, undefined, ctx);
 
-    const queueEntries = readToolQueue(TEST_SESSION_ID);
+    const queueEntries = readToolQueueFromDisk(TEST_SESSION_ID);
     const tags = queueEntries[0]?.tags ?? [];
     expect(tags).toContain("topic:ai");
     expect(tags).toContain("project:x");

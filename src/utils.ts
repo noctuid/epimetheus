@@ -114,7 +114,7 @@ export function getProjectName(cwd: string): string {
  *
  * This is the single source of truth for session name derivation + truncation.
  * Both the runtime flush path and the parsing path should use this function
- * (or its wrapper `getSessionDisplayName`) to ensure consistent context strings.
+ * to ensure consistent context strings.
  */
 export function deriveSessionName(
   explicitName: string | undefined,
@@ -150,13 +150,29 @@ export function getContextNameMaxLength(config: {
 }
 
 /**
- * Convenience wrapper around {@link deriveSessionName} that takes closures
- * (for use with pi's session manager API).
+ * Get the session name from parsed entries, without a SessionManager.
+ *
+ * Mirrors SessionManager.getSessionName(): scans entries in reverse for
+ * the latest `session_info` entry with a name field. Falls back to
+ * {@link deriveSessionName}'s first-user-message logic.
+ *
+ * Use this when you already have parsed entries (e.g. from `parseSessionFile`)
+ * to avoid a redundant session file read through SessionManager.
  */
-export function getSessionDisplayName(
-  getSessionName: () => string | undefined,
-  getEntries: () => Array<{ type: string; message?: { role?: string; content?: unknown } }>,
+export function getSessionNameFromEntries(
+  entries: Array<{ type: string; name?: string; message?: { role?: string; content?: unknown } }>,
   maxLength: number = 100
 ): string {
-  return deriveSessionName(getSessionName(), getEntries(), maxLength);
+  // Walk in reverse to find the latest session_info entry (same as SessionManager)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.type === "session_info") {
+      const name = entry.name?.trim();
+      if (name) return name;
+      // Empty name explicitly clears the title — stop looking for session_info
+      break;
+    }
+  }
+  // Fall back to first user message
+  return deriveSessionName(undefined, entries, maxLength);
 }
