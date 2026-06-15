@@ -60,6 +60,24 @@ export function registerCommands(
     "parse-session": createParseSessionSubcommand(config),
     "parse-and-upsert-session": createParseAndUpsertSessionSubcommand(client, config),
     "upsert-all-parsed": createUpsertAllParsedSubcommand(client, config),
+    ...(config.debug
+      ? {
+          "active-tools": {
+            description: "Show currently active tool names (debug)",
+            handler: async (_args: string, ctx: ExtensionContext) => {
+              const activeTools = pi.getActiveTools();
+              const hindsightTools = activeTools.filter((n) => n.startsWith("hindsight_"));
+              const otherTools = activeTools.filter((n) => !n.startsWith("hindsight_"));
+              ctx.ui.notify(
+                `Active tools (${activeTools.length}):\n` +
+                  `  hindsight: [${hindsightTools.join(", ") || "none"}]\n` +
+                  `  other: [${otherTools.join(", ")}]`,
+                "info"
+              );
+            },
+          },
+        }
+      : {}),
     "toggle-retain": createToggleRetainSubcommand(pi, client, config),
     tag: createTagSubcommand(pi, config),
     "remove-tag": createRemoveTagSubcommand(pi, config),

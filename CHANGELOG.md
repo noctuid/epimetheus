@@ -8,6 +8,10 @@
 
 - **`/hindsight flush-pending` subcommand** — Flushes all sessions with pending session markers or tool queue entries.
 - **Session chunking improvements** — Session flushes now consistently upsert the full reparsed session as jsonl with replace semantics instead of appending queued messages. This ensures that Hindsight will preferentially keep messages within the same chunk instead of splitting them.
+- Added `debug` config setting (`PI_HINDSIGHT_DEBUG`)
+  - When enabled, logs parse timing to console
+  - Added `/hindsight active-tools` subcommand — shows currently active tool names for debugging tool visibility issues.
+  - Blocked flush notifications ("Session does not allow retention", "extra context not set") now use `warning` severity, and auto-flush notifications (blocked, "no pending changes", and successful flush messages like "Parsed and upserted …" / "Flushed N tool entries") are suppressed during automatic flushes (session switch/fork) in normal mode and only shown when `debug: true`. They still show for `/quit` (user may want to know why data wasn't flushed) and user-initiated flushes (`/hindsight flush`, `/hindsight toggle-retain`). For `/reload`, they only show in debug mode.
 
 ### Breaking Changes
 

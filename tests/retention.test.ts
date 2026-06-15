@@ -969,6 +969,12 @@ describe("always-reparse flush", () => {
         const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages.some((m: string) => m.includes("does not allow retention"))).toBe(true);
+        expect(
+          notifyCalls.some(
+            (c: unknown[]) =>
+              String(c[0]).includes("does not allow retention") && c[1] === "warning"
+          )
+        ).toBe(true);
         // Should not have called retain at all
         expect(mockClient.retain).not.toHaveBeenCalled();
       });
@@ -1243,6 +1249,11 @@ describe("meta.json as primary metadata source", () => {
         const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages.some((m: string) => m.includes("extra context not set"))).toBe(true);
+        expect(
+          notifyCalls.some(
+            (c: unknown[]) => String(c[0]).includes("extra context not set") && c[1] === "warning"
+          )
+        ).toBe(true);
         // Pending markers should remain
         expect(hasPendingFlag(sessionId)).toBe(true);
         // Live state should be rewritten from parsed metadata
@@ -1311,6 +1322,12 @@ describe("meta.json as primary metadata source", () => {
         const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages.some((m: string) => m.includes("does not allow retention"))).toBe(true);
+        expect(
+          notifyCalls.some(
+            (c: unknown[]) =>
+              String(c[0]).includes("does not allow retention") && c[1] === "warning"
+          )
+        ).toBe(true);
         // Live state should be rewritten from parsed metadata
         const liveState = readSessionState(sessionId);
         expect(liveState).not.toBeNull();
@@ -2122,6 +2139,12 @@ describe("retention-disabled fast block clears pending markers", () => {
         const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages.some((m: string) => m.includes("does not allow retention"))).toBe(true);
+        expect(
+          notifyCalls.some(
+            (c: unknown[]) =>
+              String(c[0]).includes("does not allow retention") && c[1] === "warning"
+          )
+        ).toBe(true);
         // Pending markers should be cleared
         expect(hasPendingFlag(sessionId)).toBe(false);
         // No retain call should have been made
@@ -2169,6 +2192,11 @@ describe("retention-disabled fast block clears pending markers", () => {
         const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages.some((m: string) => m.includes("extra context not set"))).toBe(true);
+        expect(
+          notifyCalls.some(
+            (c: unknown[]) => String(c[0]).includes("extra context not set") && c[1] === "warning"
+          )
+        ).toBe(true);
         // Pending markers should remain (setting context later allows flush)
         expect(hasPendingFlag(sessionId)).toBe(true);
         // No retain call should have been made
@@ -2300,6 +2328,63 @@ describe("flushCurrentSession", () => {
     }
   });
 
+  it("notifies 'No pending changes' on autoFlush when debug is true and nothing to do", async () => {
+    const sessionId = `${TEST_SESSION_ID}-autoflush-debug`;
+
+    try {
+      const debugConfig = { ...sharedTestConfig, debug: true };
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = join(tmpDir, "nonexistent.jsonl");
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await flushCurrentSession(sessionId, sessionPath, debugConfig, mockClient, ctx, undefined, {
+          autoFlush: true,
+        });
+
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(messages).toContain("No pending changes");
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("does not notify 'No pending changes' on autoFlush when debug is false", async () => {
+    const sessionId = `${TEST_SESSION_ID}-autoflush-nodebug`;
+
+    try {
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = join(tmpDir, "nonexistent.jsonl");
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await flushCurrentSession(
+          sessionId,
+          sessionPath,
+          sharedTestConfig,
+          mockClient,
+          ctx,
+          undefined,
+          {
+            autoFlush: true,
+          }
+        );
+
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(messages).not.toContain("No pending changes");
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
   it("does not emit 'No pending changes' from parseAndUpsertSession during lifecycle hooks", async () => {
     // Regression: flushCurrentSession must not call parseAndUpsertSession
     // when there are no pending markers, so the "No pending changes"
@@ -2322,6 +2407,102 @@ describe("flushCurrentSession", () => {
         expect(mockClient.retain).not.toHaveBeenCalled();
         // No "No pending changes" notification should have been emitted
         expect(messages).not.toContain("No pending changes");
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("parseAndUpsertSession with requirePending+autoFlush stays silent when debug is false", async () => {
+    // Simulates the race where another flusher claimed/cleared the pending marker
+    // before claimPendingFlag(): no marker present when parseAndUpsertSession runs.
+    const sessionId = `${TEST_SESSION_ID}-require-pending-autoflush-quiet`;
+
+    try {
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await parseAndUpsertSession(
+          sessionPath,
+          sessionId,
+          sharedTestConfig,
+          mockClient,
+          ctx,
+          undefined,
+          { requirePending: true, autoFlush: true }
+        );
+
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(messages).not.toContain("No pending changes");
+        // Should not have attempted an upsert
+        expect(mockClient.retain).not.toHaveBeenCalled();
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("parseAndUpsertSession with requirePending+autoFlush notifies when debug is true", async () => {
+    const sessionId = `${TEST_SESSION_ID}-require-pending-autoflush-debug`;
+    const debugConfig = { ...sharedTestConfig, debug: true };
+
+    try {
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await parseAndUpsertSession(
+          sessionPath,
+          sessionId,
+          debugConfig,
+          mockClient,
+          ctx,
+          undefined,
+          { requirePending: true, autoFlush: true }
+        );
+
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(messages).toContain("No pending changes");
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("parseAndUpsertSession with requirePending (manual) notifies when no marker", async () => {
+    // Manual flush (no autoFlush): always notifies, regardless of debug.
+    const sessionId = `${TEST_SESSION_ID}-require-pending-manual`;
+
+    try {
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await parseAndUpsertSession(
+          sessionPath,
+          sessionId,
+          sharedTestConfig,
+          mockClient,
+          ctx,
+          undefined,
+          { requirePending: true }
+        );
+
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(messages).toContain("No pending changes");
       });
     } finally {
       removePendingFlag(sessionId);
@@ -2353,6 +2534,142 @@ describe("flushCurrentSession", () => {
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages).toContain("No pending changes");
         expect(mockClient.retain).not.toHaveBeenCalled();
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("suppresses session parse success notification on autoFlush when debug is false", async () => {
+    const sessionId = `${TEST_SESSION_ID}-autoflush-parse-quiet`;
+
+    try {
+      await touchPendingFlag(sessionId);
+
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await flushCurrentSession(
+          sessionId,
+          sessionPath,
+          sharedTestConfig,
+          mockClient,
+          ctx,
+          undefined,
+          { autoFlush: true }
+        );
+
+        expect(mockClient.retain).toHaveBeenCalled();
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(messages.some((m: string) => m.includes("Parsed and upserted"))).toBe(false);
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("shows session parse success notification on autoFlush when debug is true", async () => {
+    const sessionId = `${TEST_SESSION_ID}-autoflush-parse-debug`;
+    const debugConfig = { ...sharedTestConfig, debug: true };
+
+    try {
+      await touchPendingFlag(sessionId);
+
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = writeSessionFile(tmpDir, sessionId);
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await flushCurrentSession(sessionId, sessionPath, debugConfig, mockClient, ctx, undefined, {
+          autoFlush: true,
+        });
+
+        expect(mockClient.retain).toHaveBeenCalled();
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(messages.some((m: string) => m.includes("Parsed and upserted"))).toBe(true);
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("suppresses tool queue success notification on autoFlush when debug is false", async () => {
+    const sessionId = `${TEST_SESSION_ID}-autoflush-tool-quiet`;
+
+    try {
+      await enqueueToolMessage(sessionId, {
+        content: "tool fact",
+        timestamp: "2024-01-01T00:00:00Z",
+        store_method: "tool",
+        sessionId: sessionId,
+      });
+
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = join(tmpDir, "nonexistent.jsonl");
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await flushCurrentSession(
+          sessionId,
+          sessionPath,
+          sharedTestConfig,
+          mockClient,
+          ctx,
+          undefined,
+          { autoFlush: true }
+        );
+
+        expect(mockClient.retainBatch).toHaveBeenCalled();
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(
+          messages.some((m: string) => m.includes("Flushed") && m.includes("tool entries"))
+        ).toBe(false);
+      });
+    } finally {
+      removePendingFlag(sessionId);
+      clearSessionQueueState(sessionId);
+      cleanupSessionCache(sessionId);
+    }
+  });
+
+  it("shows tool queue success notification on autoFlush when debug is true", async () => {
+    const sessionId = `${TEST_SESSION_ID}-autoflush-tool-debug`;
+    const debugConfig = { ...sharedTestConfig, debug: true };
+
+    try {
+      await enqueueToolMessage(sessionId, {
+        content: "tool fact",
+        timestamp: "2024-01-01T00:00:00Z",
+        store_method: "tool",
+        sessionId: sessionId,
+      });
+
+      await withTempDir(async (tmpDir) => {
+        const sessionPath = join(tmpDir, "nonexistent.jsonl");
+        const ctx = makeNotifyCtx();
+
+        const mockClient = createMockClient();
+        await flushCurrentSession(sessionId, sessionPath, debugConfig, mockClient, ctx, undefined, {
+          autoFlush: true,
+        });
+
+        expect(mockClient.retainBatch).toHaveBeenCalled();
+        const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+        const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+        expect(
+          messages.some((m: string) => m.includes("Flushed") && m.includes("tool entries"))
+        ).toBe(true);
       });
     } finally {
       removePendingFlag(sessionId);

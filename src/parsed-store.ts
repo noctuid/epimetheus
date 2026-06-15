@@ -18,6 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { HindsightConfig } from "./config";
 import {
@@ -200,6 +201,9 @@ export function parseCurrentSession(
   // No guard checks here — parse-session is a non-upsert operation.
   // Retention and extra-context guards only apply at upsert time.
 
+  const debug = config.debug;
+  const t0 = debug ? performance.now() : 0;
+
   try {
     // Parse the session file — session file is the authority after parsing.
     const { header, entries } = parseSessionFile(sessionPath);
@@ -208,11 +212,11 @@ export function parseCurrentSession(
     // Compute retention state for the result, but don't block on it.
     const isRetained = shouldSessionBeRetained(entries, config);
 
-    const { messages, sessionId: parsedSessionId, warning } = buildMessageArrayFromParsedSession(
-      header,
-      entries,
-      config
-    );
+    const {
+      messages,
+      sessionId: parsedSessionId,
+      warning,
+    } = buildMessageArrayFromParsedSession(header, entries, config);
 
     if (messages.length === 0) {
       if (warning) {
@@ -237,7 +241,7 @@ export function parseCurrentSession(
       sessionTimestamp,
     } = resolveParsedSessionMetadata(header, entries, hindsightMeta, config);
 
-    return {
+    const result: ParsedSessionResult = {
       formattedMessageStrs,
       sessionName,
       extraContext,
@@ -250,6 +254,15 @@ export function parseCurrentSession(
       messageCount: formattedMessageStrs.length,
       retained: isRetained,
     };
+
+    if (debug) {
+      const elapsed = performance.now() - t0;
+      console.log(
+        `pi-hindsight debug: parseCurrentSession(${sessionId}) took ${elapsed.toFixed(2)}ms, ${result.messageCount} messages`
+      );
+    }
+
+    return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     ctx.ui.notify(msg, "error");
