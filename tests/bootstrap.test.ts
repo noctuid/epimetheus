@@ -545,7 +545,7 @@ describe("real entrypoint bootstrap", () => {
         .ui.notify.mock.calls;
       const lastCall = parseNotification[parseNotification.length - 1]!;
       expect(lastCall[0]).toContain("does not allow retention");
-      expect(lastCall[1]).toBe("info");
+      expect(lastCall[1]).toBe("warning");
     });
 
     removePendingFlag(sessionId);
@@ -705,7 +705,7 @@ describe("real entrypoint bootstrap", () => {
         .ui.notify.mock.calls;
       const lastCall = parseNotification[parseNotification.length - 1]!;
       expect(lastCall[0]).toContain("does not allow retention");
-      expect(lastCall[1]).toBe("info");
+      expect(lastCall[1]).toBe("warning");
     });
 
     removePendingFlag(sessionId);
@@ -924,6 +924,52 @@ describe("real entrypoint bootstrap", () => {
     removePendingFlag(BOOTSTRAP_SESSION);
   });
 
+  it("session_shutdown reload does not notify No pending changes when debug is false", async () => {
+    activeConfig = { ...testConfig, debug: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_shutdown")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+
+    await handler({ type: "session_shutdown", reason: "reload" }, ctx);
+
+    const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+    const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+    expect(messages).not.toContain("No pending changes");
+  });
+
+  it("session_shutdown reload notifies No pending changes when debug is true", async () => {
+    activeConfig = { ...testConfig, debug: true };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_shutdown")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+
+    await handler({ type: "session_shutdown", reason: "reload" }, ctx);
+
+    const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+    const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+    expect(messages).toContain("No pending changes");
+  });
+
   it("session_before_switch handler flushes queued messages", async () => {
     const pi = createMockPi();
     const extension = await import("../src/index");
@@ -965,13 +1011,7 @@ describe("real entrypoint bootstrap", () => {
 
     // Queue should still be intact — flush was skipped due to invalid config
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
-    // Should have notified about Hindsight not being configured
-    const notifications = (ctx as unknown as { ui: { notify: ReturnType<typeof mock> } }).ui.notify
-      .mock.calls;
-    const configNotification = notifications.find((call: unknown[]) =>
-      (call[0] as string).includes("Hindsight not configured")
-    );
-    expect(configNotification).toBeDefined();
+    // Auto-flushes suppress notifications for invalid config (transient, not useful)
 
     removePendingFlag(BOOTSTRAP_SESSION);
   });
@@ -998,13 +1038,7 @@ describe("real entrypoint bootstrap", () => {
 
     // Queue should still be intact — flush was skipped due to invalid config
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
-    // Should have notified about Hindsight not being configured
-    const notifications = (ctx as unknown as { ui: { notify: ReturnType<typeof mock> } }).ui.notify
-      .mock.calls;
-    const configNotification = notifications.find((call: unknown[]) =>
-      (call[0] as string).includes("Hindsight not configured")
-    );
-    expect(configNotification).toBeDefined();
+    // Auto-flushes suppress notifications for invalid config (transient, not useful)
 
     removePendingFlag(BOOTSTRAP_SESSION);
   });
@@ -2257,6 +2291,58 @@ describe("real entrypoint bootstrap", () => {
 
     // setActiveTools should NOT have been called — retain tool isn't registered
     expect(pi.setActiveToolsCalls.length).toBe(0);
+  });
+
+  it("toggle-retain on restores hindsight_retain tool visibility after session_start hid it", async () => {
+    activeConfig = { ...testConfig, retainSessionsByDefault: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    // Fire session_start — tool should be hidden because retained=false
+    const ctxStart = createMockContext({
+      _retained: false,
+      _sessionId: BOOTSTRAP_SESSION,
+      sessionManager: {
+        ...createMockContext({ _retained: false, _sessionId: BOOTSTRAP_SESSION }).sessionManager,
+        getEntries: mock(() => []), // no meta → auto-create with retained=false
+      },
+      ui: {
+        ...createMockContext().ui,
+        confirm: mock(() => Promise.resolve(false)), // decline immediate upsert
+      },
+    });
+    const sessionStartHandler = pi.handlers.get("session_start")!;
+    await sessionStartHandler({ type: "session_start" }, ctxStart);
+
+    // Verify tool was hidden
+    expect(pi.getActiveTools()).not.toContain("hindsight_retain");
+
+    // Now toggle-retain on
+    const commandHandler = pi.commands.get("hindsight") as
+      | { handler: (args: string, ctx: ExtensionContext) => Promise<void> }
+      | undefined;
+    expect(commandHandler).toBeDefined();
+
+    const ctxToggle = createMockContext({
+      _retained: false,
+      _sessionId: BOOTSTRAP_SESSION,
+      sessionManager: {
+        ...createMockContext({ _retained: false, _sessionId: BOOTSTRAP_SESSION }).sessionManager,
+        getEntries: mock(() => [
+          { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+        ]),
+      },
+      ui: {
+        ...createMockContext().ui,
+        confirm: mock(() => Promise.resolve(false)), // decline immediate upsert
+      },
+    });
+    await commandHandler!.handler("toggle-retain", ctxToggle);
+
+    // Verify tool was restored
+    expect(pi.getActiveTools()).toContain("hindsight_retain");
   });
 
   // ============================================

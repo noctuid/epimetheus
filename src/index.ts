@@ -343,47 +343,51 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  /** Flush current session using the shared implementation */
-  const doFlush = async (ctx: ExtensionContext): Promise<void> => {
-    if (!client) {
-      ctx.ui.notify("Hindsight not configured", "warning");
-      return;
-    }
+  /** Auto-flush: suppresses transient block notifications unless debug mode is on. */
+  const autoFlush = async (ctx: ExtensionContext): Promise<void> => {
+    if (!client) return;
     const sessionId = ctx.sessionManager.getSessionId();
     const sessionPath = ctx.sessionManager.getSessionFile();
-    if (!sessionId || !sessionPath) {
-      ctx.ui.notify("No active session to flush", "warning");
-      return;
-    }
-    await flushCurrentSession(sessionId, sessionPath, config, client, ctx, ctx.signal);
+    if (!sessionId || !sessionPath) return;
+    await flushCurrentSession(sessionId, sessionPath, config, client, ctx, ctx.signal, {
+      autoFlush: true,
+    });
   };
 
   // Flush queues and reset recall cache on session switch
   pi.on("session_before_switch", async (_event, ctx: ExtensionContext) => {
     lastRecallMessage = null;
     lastRecallDetails = null;
-    await doFlush(ctx);
+    await autoFlush(ctx);
   });
 
   // Flush queues and reset recall cache before forking
   pi.on("session_before_fork", async (_event, ctx: ExtensionContext) => {
     lastRecallMessage = null;
     lastRecallDetails = null;
-    await doFlush(ctx);
+    await autoFlush(ctx);
   });
 
   // Flush queues before compaction (if enabled)
   pi.on("session_before_compact", async (_event, ctx: ExtensionContext) => {
     if (config.flushOnCompact) {
-      await doFlush(ctx);
+      await autoFlush(ctx);
     }
   });
 
   // Flush queues on session shutdown (quit/reload only)
   // For new/resume/fork, session_before_switch or session_before_fork already flushed
+  // quit: manual-like flush, show block/success/no-work notifications regardless of debug
+  // reload: automatic flush; notifications are suppressed unless debug: true
   pi.on("session_shutdown", async (event, ctx: ExtensionContext) => {
     if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") return;
-    await doFlush(ctx);
+    if (!client) return;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const sessionPath = ctx.sessionManager.getSessionFile();
+    if (!sessionId || !sessionPath) return;
+    await flushCurrentSession(sessionId, sessionPath, config, client, ctx, ctx.signal, {
+      autoFlush: event.reason === "reload",
+    });
   });
 
   /**

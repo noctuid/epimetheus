@@ -54,6 +54,7 @@ interface RegisteredCmd {
 
 describe("registerCommands", () => {
   let registeredCommands: Map<string, RegisteredCmd>;
+  let mockActiveTools: string[];
   let mockPi: {
     registerCommand: ReturnType<typeof mock>;
     appendEntry: ReturnType<typeof mock>;
@@ -79,6 +80,20 @@ describe("registerCommands", () => {
     confirmResult = true;
     mockClient = createMockClient();
 
+    // Mutable active tool state so getActiveTools reflects setActiveTools calls
+    mockActiveTools = [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "grep",
+      "find",
+      "ls",
+      "hindsight_retain",
+      "hindsight_recall",
+      "hindsight_reflect",
+    ];
+
     mockPi = {
       registerCommand: mock((name: string, options: RegisteredCmd) => {
         registeredCommands.set(name, options);
@@ -86,19 +101,11 @@ describe("registerCommands", () => {
       appendEntry: mock((customType: string, data?: unknown) => {
         appendedEntries.push({ customType, data });
       }),
-      getActiveTools: mock(() => [
-        "read",
-        "bash",
-        "edit",
-        "write",
-        "grep",
-        "find",
-        "ls",
-        "hindsight_retain",
-        "hindsight_recall",
-        "hindsight_reflect",
-      ]),
-      setActiveTools: mock(() => {}),
+      getActiveTools: mock(() => [...mockActiveTools]),
+      setActiveTools: mock((names: string[]) => {
+        mockActiveTools.length = 0;
+        mockActiveTools.push(...names);
+      }),
     } as unknown as typeof mockPi;
   });
 
@@ -591,6 +598,8 @@ describe("registerCommands", () => {
 
         // Override setActiveTools to capture ordering at tool-hiding time
         mockPi.setActiveTools = mock((names: string[]) => {
+          mockActiveTools.length = 0;
+          mockActiveTools.push(...names);
           if (!names.includes("hindsight_retain")) {
             orderingLog.push({
               event: "setActiveTools(hide_retain)",
@@ -760,6 +769,36 @@ describe("registerCommands", () => {
       register();
       await getHandler()("toggle-retain", makeCtx());
       expect(appendedEntries[0]?.data).toEqual({ retained: true, tags: ["topic:ai"] });
+    });
+
+    it("restore hindsight_retain tool visibility when toggling on", async () => {
+      // Start with retained=false — tool should be hidden
+      sessionEntries = [
+        { type: "custom", customType: "hindsight-meta", data: { retained: false } },
+      ];
+      register({ ...statusTestConfig, retainSessionsByDefault: false });
+
+      // Simulate session_start hiding the tool
+      mockActiveTools.length = 0;
+      mockActiveTools.push(
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "grep",
+        "find",
+        "ls",
+        "hindsight_recall",
+        "hindsight_reflect"
+      );
+      expect(mockPi.getActiveTools()).not.toContain("hindsight_retain");
+
+      // Toggle retain on
+      confirmResult = false;
+      await getHandler()("toggle-retain", makeCtx());
+
+      // Tool should be restored
+      expect(mockPi.getActiveTools()).toContain("hindsight_retain");
     });
 
     it("uses retainSessionsByDefault=false as starting state", async () => {

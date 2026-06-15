@@ -92,6 +92,7 @@ export const testConfig: HindsightConfig = {
   retainSessionsByDefault: true,
   requireExtraContextBeforeFlush: false,
   statusUnhealthy: "🤯",
+  debug: false,
 };
 
 /** Config with all retainContent types enabled (assistant: text+thinking+toolCall, user: text, toolResult: text). */
@@ -366,6 +367,7 @@ export const HINDSIGHT_ENV_KEYS = [
   "PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT",
   "PI_HINDSIGHT_REQUIRE_EXTRA_CONTEXT_BEFORE_FLUSH",
   "PI_HINDSIGHT_TOOL_FILTER",
+  "PI_HINDSIGHT_DEBUG",
   "PI_HINDSIGHT_PROJECT_NAME",
 ];
 

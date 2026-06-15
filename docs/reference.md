@@ -49,6 +49,7 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
 | `constantTags` | `["harness:pi"]` | Tags included on every retained document (useful for filtering in Hindsight) |
 | `flushOnCompact` | `false` | Flush queued messages to Hindsight before a compaction event |
 | `requireExtraContextBeforeFlush` | `false` | Block automatic flush until extra context is set via `/hindsight set-extra-context` or the `hindsight_set_extra_context` tool. Helps prevent incorrect extraction for sessions involving satire, fiction, external blog posts, or other content that could be misclassified. See [Extra Context & Flush Guard](#extra-context--flush-guard). |
+| `debug` | `false` | Enable debug mode. Logs parse pipeline timing to console and shows auto-flush block notifications that are otherwise suppressed. See [Debug Mode](#debug-mode). |
 
 ### Disabled Mode
 When `enabled: false`, pi-hindsight runs in a lightweight disabled mode. No tools, commands, API client, auto-recall, auto-retain, or status indicator are registered. However, two things are still handled:
@@ -68,6 +69,14 @@ This ensures that disabling the extension does not leave stale data in your sess
 2. Uninstall pi-hindsight and manually remove all `hindsight-recall` entries from your session files — without the extension, `custom_message` entries would otherwise be sent to the LLM as regular user messages (`hindsight-meta` entries are safe to leave since they are `custom` entries, not messages, and won't appear in the LLM context)
 
 > **Pi limitation:** The core issue is that pi has no way to render `custom_message` entries as UI-only (without sending them to the LLM), nor does it support rendering `custom` entries at all. If either were supported, the `autoRecallPersist` tradeoff would disappear — recall could be stored as display-only data that never enters the LLM context. Pi sessions are supposed to be append-only, so while you could technically delete or update these old entries, I won't support that as part of this extension directly.
+
+### Debug Mode
+
+When `debug: true` (or `PI_HINDSIGHT_DEBUG=true`), pi-hindsight enables additional diagnostic output:
+
+- **Parse pipeline timing**: Logs `performance.now()` timing for `parseSessionFile` and `buildMessageArrayFromParsedSession` to the console
+- **Auto-flush block notifications**: Block notifications ("Session does not allow retention", "extra context not set") are suppressed during auto-flushes (session switch, fork, reload, compact) since they are transient and not useful. In debug mode, these are always shown. Note: `/quit` always shows block notifications regardless of debug mode, so when you finally exit there will be persistent warnings if anything wasn't flushed due to missing extra context.
+- **`/hindsight active-tools`**: Only available in debug mode. Shows currently active tool names for debugging tool visibility.
 
 ## Auto-Recall Settings
 
@@ -538,6 +547,7 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_OBSERVATION_SCOPES` | `observationScopes` | ObservationScopes (JSON or preset string) | `null` (required) |
 | `PI_HINDSIGHT_STATUS_HEALTHY` | `statusHealthy` | string | `"🧠"` |
 | `PI_HINDSIGHT_STATUS_UNHEALTHY` | `statusUnhealthy` | string | `"🤯"` |
+| `PI_HINDSIGHT_DEBUG` | `debug` | boolean | `false` |
 </details>
 
 > **Note:** `PI_HINDSIGHT_PROJECT_NAME` is a special environment variable that controls the `project:` auto-tag and `{project}` observation scope placeholder. Unlike other env vars, it does not correspond to a config file key — it is read at tag-build time and falls back to the cwd basename if not set. This makes it ideal for setting per-directory in `.env` (with direnv or mise) to disambiguate directories that share the same basename or to give separate worktree directories the same project name so they share observations.
@@ -598,6 +608,7 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 | `popup` | Pop up last recalled messages in overlay |
 | `status` | Show operational status (connection, session, recall info, queue count) |
 | `config` | Show configuration (file path, env vars, masked config) |
+| `active-tools` | Show currently active tool names (for debugging tool visibility). Only available in [debug mode](#debug-mode). |
 | `parse-session` | Parse current session to local files for review (no upsert) |
 | `parse-and-upsert-session` | Parse and upsert the full current session to Hindsight (forced full re-parse, ignoring cache) |
 | `upsert-all-parsed` | Upsert all parsed sessions to Hindsight |

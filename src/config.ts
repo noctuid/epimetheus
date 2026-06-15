@@ -112,6 +112,8 @@ export interface HindsightConfig {
   retainSessionsByDefault: boolean;
   /** When true, auto-flush events are blocked (warn instead) until extra context is set via /hindsight set-extra-context or the hindsight_set_extra_context tool. Default: false. */
   requireExtraContextBeforeFlush: boolean;
+  /** When true, enable debug logging: active tool visibility checks, parse timing, etc. Default: false. */
+  debug: boolean;
   entities: EntityInput[];
   observationScopes: ObservationScopes;
   statusHealthy: string;
@@ -175,6 +177,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
   observationScopes: null,
   statusHealthy: "🧠",
   statusUnhealthy: "🤯",
+  debug: false,
 };
 
 // Config keys that can be set via env vars or config file
@@ -207,6 +210,7 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "flushOnCompact",
   "retainSessionsByDefault",
   "requireExtraContextBeforeFlush",
+  "debug",
   "entities",
   "observationScopes",
   "statusHealthy",
@@ -513,7 +517,8 @@ function setConfigValue(
     case "autoRecallPersist":
     case "retainSessionsByDefault":
     case "requireExtraContextBeforeFlush":
-    case "flushOnCompact": {
+    case "flushOnCompact":
+    case "debug": {
       if (typeof value === "boolean") {
         config[key] = value;
         return;
@@ -1118,6 +1123,7 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_OBSERVATION_SCOPES: "observationScopes",
     PI_HINDSIGHT_STATUS_HEALTHY: "statusHealthy",
     PI_HINDSIGHT_STATUS_UNHEALTHY: "statusUnhealthy",
+    PI_HINDSIGHT_DEBUG: "debug",
   };
 
   const envVars: string[] = [];

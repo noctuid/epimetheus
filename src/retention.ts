@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
+import { performance } from "node:perf_hooks";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MemoryItemInput } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "./client";
@@ -130,7 +131,8 @@ export async function flushToolQueue(
   sessionId: string,
   client: HindsightClientWrapper,
   ctx: ExtensionContext,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { notifySuccess?: boolean }
 ): Promise<{ success: boolean; error?: string; count: number }> {
   const fail = (error: unknown): { success: false; error: string; count: 0 } => {
     const msg = error instanceof Error ? error.message : String(error);
@@ -178,7 +180,9 @@ export async function flushToolQueue(
     if (result.success) {
       completeClaim(claim);
       claimCompleted = true;
-      ctx.ui.notify(`Flushed ${entries.length} tool entries`, "info");
+      if (options?.notifySuccess !== false) {
+        ctx.ui.notify(`Flushed ${entries.length} tool entries`, "info");
+      }
       return { success: true, count: entries.length };
     }
 
@@ -222,7 +226,7 @@ export async function flushCurrentSession(
   client: HindsightClientWrapper,
   ctx: ExtensionContext,
   signal?: AbortSignal,
-  options?: { notifyNoWork?: boolean }
+  options?: { notifyNoWork?: boolean; autoFlush?: boolean }
 ): Promise<void> {
   try {
     recoverStaleInflightClaims(sessionId);
@@ -237,6 +241,7 @@ export async function flushCurrentSession(
     if (sessionPath && existsSync(sessionPath)) {
       await parseAndUpsertSession(sessionPath, sessionId, config, client, ctx, signal, {
         requirePending: true,
+        autoFlush: options?.autoFlush,
       });
       sessionHadPendingWork = true;
     } else {
@@ -248,10 +253,13 @@ export async function flushCurrentSession(
     }
   }
 
-  const toolResult = await flushToolQueue(sessionId, client, ctx, signal);
+  const toolResult = await flushToolQueue(sessionId, client, ctx, signal, {
+    notifySuccess: !options?.autoFlush || config.debug,
+  });
   const toolDidWork = toolResult.count > 0 || !toolResult.success;
 
-  if (!sessionHadPendingWork && !toolDidWork && options?.notifyNoWork) {
+  const shouldNotifyNoWork = options?.notifyNoWork || (!!options?.autoFlush && config.debug);
+  if (!sessionHadPendingWork && !toolDidWork && shouldNotifyNoWork) {
     ctx.ui.notify("No pending changes", "info");
   }
 }
@@ -339,7 +347,7 @@ function preFlushCheck(
   if (!liveState.retained) {
     return {
       blocked: true,
-      result: { message: "Session does not allow retention", level: "info" },
+      result: { message: "Session does not allow retention", level: "warning" },
       liveState,
     };
   }
@@ -360,21 +368,27 @@ function preFlushCheck(
 // ============================================
 
 /**
- * Handle the retention-disabled fast-block: clear pending markers and notify.
+ * Handle the retention-disabled fast-block: clear pending markers and optionally notify.
  * Extra-context guard blocks leave pending markers — setting context later
  * should allow flushing the same work.
+ *
+ * Side effects (pending marker cleanup) always run. The UI notification is
+ * gated by the `notify` parameter — auto-flushes suppress transient notifications.
  */
-function notifyPreFlushBlocked(
+function handlePreFlushBlocked(
   sessionId: string,
   retained: boolean,
   result: { message: string; level: "info" | "warning" },
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  notify: boolean
 ): void {
   if (!retained) {
     const claim = claimPendingFlag(sessionId);
     if (claim) completeClaim(claim);
   }
-  ctx.ui.notify(result.message, result.level);
+  if (notify) {
+    ctx.ui.notify(result.message, result.level);
+  }
 }
 
 /**
@@ -522,29 +536,41 @@ export async function parseAndUpsertSession(
   client: HindsightClientWrapper,
   ctx: ExtensionContext,
   signal?: AbortSignal,
-  options?: { requirePending?: boolean }
+  options?: { requirePending?: boolean; autoFlush?: boolean }
 ): Promise<void> {
   // Fast-path blocking checks using live state
   const preCheck = preFlushCheck(sessionId, config);
   if (preCheck.blocked) {
-    notifyPreFlushBlocked(
+    // Side effects (pending marker cleanup) always run.
+    // UI notification is suppressed for auto-flushes unless debug mode is on.
+    const notify = !options?.autoFlush || config.debug;
+    handlePreFlushBlocked(
       sessionId,
       preCheck.liveState?.retained ?? true,
       preCheck.result as { message: string; level: "info" | "warning" },
-      ctx
+      ctx,
+      notify
     );
     return;
   }
 
   let claim: QueueClaim | null = null;
+  const debug = config.debug;
   try {
     claim = claimPendingFlag(sessionId);
     if (options?.requirePending && !claim) {
-      ctx.ui.notify("No pending changes", "info");
+      // In auto-flush mode, this notification is transient and not useful.
+      // Only show it for manual flushes or in debug mode. This can happen if
+      // another flusher claimed/cleared the marker between hasPendingFlag and
+      // claimPendingFlag — a benign race.
+      if (!options?.autoFlush || config.debug) {
+        ctx.ui.notify("No pending changes", "info");
+      }
       return;
     }
 
     // Always reparse the session file for conversation messages.
+    const t0 = debug ? performance.now() : 0;
     const { header, entries } = parseSessionFile(sessionPath);
     // Defensive invariant: the caller-supplied sessionId must match the parsed
     // session file header id. This should never happen in normal operation —
@@ -572,7 +598,11 @@ export async function parseAndUpsertSession(
           : null;
       updateLiveStateFromParsed(sessionId, false, parsedExtraContext, liveState);
       if (claim) completeClaim(claim);
-      ctx.ui.notify("Session does not allow retention", "info");
+      // In auto-flush mode, block notifications are transient and not useful.
+      // Only show them for manual flushes or in debug mode.
+      if (!options?.autoFlush || debug) {
+        ctx.ui.notify("Session does not allow retention", "warning");
+      }
       return;
     }
 
@@ -584,7 +614,11 @@ export async function parseAndUpsertSession(
       // Write/update live state so future flushes can fast-block without reparsing
       updateLiveStateFromParsed(sessionId, true, parsedExtraContext, liveState);
       if (claim) restoreClaim(claim);
-      ctx.ui.notify(FLUSH_BLOCKED_NO_EXTRA_CONTEXT, "warning");
+      // In auto-flush mode, block notifications are transient and not useful.
+      // Only show them for manual flushes or in debug mode.
+      if (!options?.autoFlush || debug) {
+        ctx.ui.notify(FLUSH_BLOCKED_NO_EXTRA_CONTEXT, "warning");
+      }
       return;
     }
 
@@ -593,6 +627,13 @@ export async function parseAndUpsertSession(
       sessionId: parsedSessionId,
       warning,
     } = buildMessageArrayFromParsedSession(header, entries, config);
+
+    if (debug) {
+      const elapsed = performance.now() - t0;
+      console.log(
+        `pi-hindsight debug: parsePipeline(${sessionId}) took ${elapsed.toFixed(2)}ms, ${messages.length} messages`
+      );
+    }
 
     if (messages.length === 0) {
       if (warning) {
@@ -654,7 +695,9 @@ export async function parseAndUpsertSession(
 
     claim = null;
 
-    ctx.ui.notify(`Parsed and upserted ${formattedStrs.length} messages`, "info");
+    if (!options?.autoFlush || debug) {
+      ctx.ui.notify(`Parsed and upserted ${formattedStrs.length} messages`, "info");
+    }
   } catch (e) {
     if (claim) {
       const combinedMsg = restoreClaimAfterFailure(claim, e);

@@ -57,6 +57,7 @@ const validConfig: HindsightConfig = {
   retainSessionsByDefault: true,
   requireExtraContextBeforeFlush: false,
   statusUnhealthy: "🤯",
+  debug: false,
 };
 
 // Temp directory for file loading tests
@@ -1899,6 +1900,51 @@ describe("loadConfig", () => {
 
     const { config } = loadConfig(TEST_DIR);
     expect(config.requireExtraContextBeforeFlush).toBe(true);
+  });
+
+  // debug tests
+  it("debug defaults to false", () => {
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.debug).toBe(false);
+  });
+
+  it("debug can be set via config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        debug: true,
+      })
+    );
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.debug).toBe(true);
+  });
+
+  it("debug can be set via PI_HINDSIGHT_DEBUG env var", () => {
+    process.env.PI_HINDSIGHT_DEBUG = "true";
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.debug).toBe(true);
+  });
+
+  it("does not warn on valid boolean false for PI_HINDSIGHT_DEBUG env var", () => {
+    process.env.PI_HINDSIGHT_DEBUG = "false";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.debug).toBe(false);
+    expect(warning).toBeUndefined();
+  });
+
+  it("warns on invalid boolean value for PI_HINDSIGHT_DEBUG env var", () => {
+    process.env.PI_HINDSIGHT_DEBUG = "yes";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.debug).toBe(false); // Falls back to default
+    expect(warning).toBeDefined();
+    expect(warning).toContain("Invalid boolean value");
+    expect(warning).toContain('expected "true" or "false"');
   });
 
   // toolFilter tests
