@@ -2,6 +2,10 @@
 
 ## Pending
 
+### Documentation
+
+- Recommend 50/72 commit message wrapping in `AGENTS.md`; commitlint config enforces 72/72 (subject and body line length).
+
 ## 0.4.0
 
 ### Features
