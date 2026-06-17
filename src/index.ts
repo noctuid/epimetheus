@@ -144,7 +144,6 @@ export default function (pi: ExtensionAPI) {
     }
   } else {
     client = new HindsightClientWrapper(config);
-    console.log("pi-hindsight initialized");
   }
 
   // Set status bar indicator based on health
