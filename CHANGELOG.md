@@ -2,6 +2,10 @@
 
 ## Pending
 
+### Changes
+
+- Removed the noisy `pi-hindsight initialized` startup log from `src/index.ts`. Warning, error, and disabled-mode messages are still emitted. Reduces console noise on successful startup.
+
 ### Documentation
 
 - Recommend 50/72 commit message wrapping in `AGENTS.md`; commitlint config enforces 72/72 (subject and body line length).
