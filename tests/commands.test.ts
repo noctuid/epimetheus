@@ -1331,6 +1331,270 @@ describe("registerCommands", () => {
         clearSessionQueueState(sessionId);
       }
     });
+
+    it("prefixes successful per-session flush with `[<id> - <name>]`", async () => {
+      // Regression: per-session notifications emitted while running
+      // /hindsight flush-pending are prefixed with a `[<sessionid> - <name>]`
+      // header line, then the existing message on the following line.
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+
+      const sessionName = "Refactor retention flow";
+      const sessionId = `test-flp-prefix-success-${Date.now()}`;
+      // SessionManager.listAll() enumerates <agentDir>/sessions/<dir>/*.jsonl
+      // and derives the name from `session_info` entries.
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: sessionName }),
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: true },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: "hello" },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+              lastNotification = { message, type };
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
+          success: true,
+        }));
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", ctx);
+
+        // The per-session success message is prefixed with the session header
+        const perSession = notifyHistory.find((n) => n.message.includes("Parsed and upserted"));
+        expect(perSession).toBeDefined();
+        expect(perSession!.message.startsWith(`[${sessionId} - ${sessionName}]\n`)).toBe(true);
+        expect(perSession!.message).toContain("Parsed and upserted 1 messages");
+        expect(perSession!.type).toBe("info");
+        // Aggregate messages are NOT prefixed
+        const aggregate = notifyHistory.find((n) => n.message.includes("Flushing"));
+        expect(aggregate?.message.startsWith("[")).toBe(false);
+        expect(mockClient!.retain).toHaveBeenCalled();
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          // best-effort cleanup of the real session file we wrote
+          const { rmSync } = await import("node:fs");
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("derives the per-session prefix name from the first user message when no session_info name", async () => {
+      // Regression: the flush-pending per-session prefix must use the same name
+      // derivation as every other flush path (explicit session_info name → first
+      // user message → Untitled). A session with NO `session_info` name but a
+      // first user message must show that message as the name, not Untitled.
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+
+      const firstMessage = "How do I configure auto-recall?";
+      const sessionId = `test-flp-prefix-firstmsg-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        // NOTE: no `session_info` entry — name must be derived from the first
+        // user message via getSessionNameFromEntries, mirroring normal flush.
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: true },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: firstMessage },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+              lastNotification = { message, type };
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        (mockClient!.retain as ReturnType<typeof mock>).mockImplementation(async () => ({
+          success: true,
+        }));
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", ctx);
+
+        const perSession = notifyHistory.find((n) => n.message.includes("Parsed and upserted"));
+        expect(perSession).toBeDefined();
+        // Prefix uses the first user message as the session name (not Untitled)
+        expect(perSession!.message.startsWith(`[${sessionId} - ${firstMessage}]\n`)).toBe(true);
+        expect(perSession!.message).not.toContain(`[${sessionId} - Untitled]`);
+        expect(perSession!.message).toContain("Parsed and upserted 1 messages");
+        expect(mockClient!.retain).toHaveBeenCalled();
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("prefixes warning per-session notifications (retention disabled) with `[<id> - <name>]`", async () => {
+      // Regression warning path: a non-retained session still gets the
+      // `[<id> - <name>]` prefix ahead of the "Session does not allow retention"
+      // message emitted by the low-level parser/upserter during flush-pending.
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+
+      const sessionName = "Scratch session";
+      const sessionId = `test-flp-prefix-warn-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: sessionName }),
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: false },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: "hello" },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+              lastNotification = { message, type };
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        mockClient = createMockClient();
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", ctx);
+
+        const warned = notifyHistory.find((n) => n.message.includes("does not allow retention"));
+        expect(warned).toBeDefined();
+        expect(warned!.message.startsWith(`[${sessionId} - ${sessionName}]\n`)).toBe(true);
+        expect(warned!.message).toContain("does not allow retention");
+        expect(warned!.type).toBe("warning");
+        // No upsert should have happened for a non-retained session
+        expect(mockClient!.retain).not.toHaveBeenCalled();
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("falls back to 'Untitled' in the per-session prefix when name is missing", async () => {
+      // Missing session (no session file in the map): the prefix still carries
+      // the session id and uses 'Untitled', with the error body on the next line.
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const sessionId = `test-flp-prefix-untitled-${Date.now()}`;
+      try {
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+              lastNotification = { message, type };
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        mockClient = createMockClient();
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", ctx);
+
+        const errored = notifyHistory.find((n) => n.message.includes("session file not found"));
+        expect(errored).toBeDefined();
+        expect(errored!.message.startsWith(`[${sessionId} - Untitled]\n`)).toBe(true);
+        expect(errored!.message).toContain("session file not found");
+        expect(errored!.type).toBe("error");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+      }
+    });
   });
 
   describe("parse-session subcommand", () => {

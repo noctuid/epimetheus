@@ -8,7 +8,7 @@ import type { ExtensionContext, SessionInfo } from "@earendil-works/pi-coding-ag
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
-import { buildContextFromSessionName, buildDocumentTags } from "../document";
+import { buildContextFromSessionName, buildDocumentTags, parseSessionFile } from "../document";
 import { buildMetaFile, readMetaFileByPath, writeMetaFile } from "../meta";
 import {
   buildContentFromJsonl,
@@ -32,11 +32,60 @@ import {
   parseAndUpsertSession,
   upsertToHindsight,
 } from "../retention";
+import { getContextNameMaxLength, getSessionNameFromEntries } from "../utils";
 import type { Subcommand } from "./types";
 
 // ============================================
 // Private helpers for flush-pending
 // ============================================
+
+/**
+ * Build a one-line per-session notification prefix for `/hindsight flush-pending`.
+ *
+ * Format: `[<sessionId> - <sessionName>]`. The name is derived the same way as
+ * everywhere else (explicit `session_info` name, otherwise first user message,
+ * only `Untitled` if neither exists) — see `resolveSessionDisplayName`.
+ * Per-session outcomes from `parseAndUpsertSession` / `flushToolQueue` are
+ * emitted on the following line(s) after this prefix.
+ */
+function formatSessionPrefix(sessionId: string, sessionName: string): string {
+  return `[${sessionId} - ${sessionName}]`;
+}
+
+/**
+ * Return an {@link ExtensionContext} whose `ui.notify` calls are prefixed with
+ * a per-session header line, used to scope `/hindsight flush-pending`
+ * per-session notifications. All other `ui` members (and all other `ctx`
+ * members) pass through unchanged, so out-of-scope notifications
+ * (aggregate messages from the flush-pending handler) are unaffected.
+ *
+ * Uses a Proxy rather than cloning so prototype-backed members/methods on the
+ * real ExtensionContext are preserved.
+ */
+function withSessionNotifyPrefix(ctx: ExtensionContext, prefix: string): ExtensionContext {
+  const prefixedUi = new Proxy(ctx.ui as object, {
+    get(target, prop, receiver) {
+      if (prop === "notify") {
+        // Bind to the real ui.notify; receiver (the proxy) would re-enter the trap.
+        const notify = Reflect.get(target, "notify", target) as (
+          message: string,
+          level?: "info" | "warning" | "error"
+        ) => void;
+        return (message: string, level?: "info" | "warning" | "error") =>
+          notify(`${prefix}\n${message}`, level);
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  return new Proxy(ctx as object, {
+    get(target, prop, receiver) {
+      if (prop === "ui") {
+        return prefixedUi;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as ExtensionContext;
+}
 
 /**
  * Build a map of session IDs to SessionInfo by listing all sessions.
@@ -48,11 +97,45 @@ async function buildSessionMap(): Promise<Map<string, SessionInfo>> {
 }
 
 /**
+ * Derive the per-session display name for `/hindsight flush-pending` prefixes
+ * using the same name derivation as every other flush path (so the prefix
+ * matches the name Hindsight itself records).
+ *
+ * Resolution order:
+ * 1. If the session file is resolvable, parse it and derive the name via
+ *    `getSessionNameFromEntries` (explicit `session_info` name → first user
+ *    message → `Untitled`). This is the canonical derivation, consistent with
+ *    `resolveParsedSessionMetadata`.
+ * 2. If parsing fails (or there is no file), fall back to the cheap
+ *    `SessionInfo.name` recorded by `SessionManager.listAll()` (which is only
+ *    the explicit `session_info` name, not the first-user-message fallback).
+ * 3. If neither yields a name, `getSessionNameFromEntries`/`SessionInfo.name`
+ *    already returns `Untitled`/undefined respectively; `Untitled` is used.
+ */
+function resolveSessionDisplayName(
+  sessionInfo: SessionInfo | undefined,
+  config: HindsightConfig
+): string {
+  if (sessionInfo?.path) {
+    try {
+      const { entries } = parseSessionFile(sessionInfo.path);
+      return getSessionNameFromEntries(entries, getContextNameMaxLength(config));
+    } catch {
+      // Fall through to SessionInfo.name below if the file is unreadable/invalid.
+    }
+  }
+  const name = sessionInfo?.name?.trim();
+  return name ? name : "Untitled";
+}
+
+/**
  * Flush a single pending session: re-parse and upsert if it has a pending marker,
  * then flush any tool queue entries.
  *
- * Notifies per-session errors for missing session files.
- * parseAndUpsertSession and flushToolQueue notify their own outcomes.
+ * Per-session notifications (from `parseAndUpsertSession`, `flushToolQueue`, and
+ * the missing-session error below) are prefixed with a `[<id> - <name>]` header
+ * so the user can tell which session each outcome belongs to. Aggregate
+ * flush-pending messages are emitted on the un-wrapped ctx elsewhere.
  */
 async function flushPendingSession(
   sessionId: string,
@@ -61,21 +144,34 @@ async function flushPendingSession(
   client: HindsightClientWrapper,
   ctx: ExtensionContext
 ): Promise<void> {
+  // Derive the display name the same way as the normal flush path (explicit
+  // name → first user message → Untitled), so the per-session prefix matches
+  // the session name Hindsight records. Falls back to SessionInfo.name (and
+  // finally Untitled) only when the session file can't be parsed.
+  const sessionInfo = sessionMap.get(sessionId);
+  const sessionName = resolveSessionDisplayName(sessionInfo, config);
+  const prefixedCtx = withSessionNotifyPrefix(ctx, formatSessionPrefix(sessionId, sessionName));
+
   // Re-parse and upsert if this session has a pending marker
   if (hasPendingFlag(sessionId)) {
-    const sessionInfo = sessionMap.get(sessionId);
     if (!sessionInfo) {
-      ctx.ui.notify(`${sessionId}: session file not found`, "error");
+      prefixedCtx.ui.notify("session file not found", "error");
     } else {
-      await parseAndUpsertSession(sessionInfo.path, sessionId, config, client, ctx, ctx.signal, {
-        requirePending: true,
-      });
+      await parseAndUpsertSession(
+        sessionInfo.path,
+        sessionId,
+        config,
+        client,
+        prefixedCtx,
+        ctx.signal,
+        { requirePending: true }
+      );
     }
   }
 
   // Tool queue flushing is independent of session ingestion.
   if (toolQueueExists(sessionId)) {
-    await flushToolQueue(sessionId, client, ctx, ctx.signal);
+    await flushToolQueue(sessionId, client, prefixedCtx, ctx.signal);
   }
 }
 
