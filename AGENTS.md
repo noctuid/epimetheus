@@ -1,5 +1,6 @@
 # Agent Instructions for pi-hindsight
 - Use conventional commit messages, always include a scope
+- Prefer keeping commit subjects under ~50 chars and body lines at ~72 chars; commitlint enforces 72/72
 - Update CHANGELOG.md under the Pending section for any user-facing or internal changes
 - Do not use import aliases unless there is genuine naming conflict
 - The function that has enough context to produce the most accurate, non-duplicated user message should notify. Lower layers should return enough information to make that possible.
