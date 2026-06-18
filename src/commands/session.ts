@@ -124,7 +124,7 @@ function resolveSessionDisplayName(
       // Fall through to SessionInfo.name below if the file is unreadable/invalid.
     }
   }
-  const name = sessionInfo?.name?.trim();
+  const name = typeof sessionInfo?.name === "string" ? sessionInfo.name.trim() : "";
   return name ? name : "Untitled";
 }
 

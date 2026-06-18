@@ -1807,6 +1807,32 @@ describe("getSessionNameFromEntries", () => {
     expect(getSessionNameFromEntries(entries)).toBe("hello");
   });
 
+  it("skips a session_info with a non-string name and keeps scanning", () => {
+    // Session files are unvalidated JSON; `name` may be a non-string (number/object/
+    // boolean). Optional chaining only guards null/undefined, so `(123).trim()` or
+    // `({}).trim()` would throw and abort the flush. The guard skips the malformed
+    // entry and returns the earlier valid session_info name.
+    const entries = [
+      { type: "session_info", name: "earlier valid" },
+      { type: "message", message: { role: "user", content: "hello" } },
+      { type: "session_info", name: 123 } as any,
+    ];
+    expect(getSessionNameFromEntries(entries)).toBe("earlier valid");
+  });
+
+  it("falls back to first user message when session_info name is a non-string object", () => {
+    const entries = [
+      { type: "message", message: { role: "user", content: "hello" } },
+      { type: "session_info", name: { unexpected: true } } as any,
+    ];
+    expect(getSessionNameFromEntries(entries)).toBe("hello");
+  });
+
+  it("falls back to Untitled when session_info name is a boolean and there are no user messages", () => {
+    const entries = [{ type: "session_info", name: true } as any];
+    expect(getSessionNameFromEntries(entries)).toBe("Untitled");
+  });
+
   it("does not truncate session_info name", () => {
     const entries = [{ type: "session_info", name: "a".repeat(200) }];
     expect(getSessionNameFromEntries(entries, 50)).toBe("a".repeat(200));

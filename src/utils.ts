@@ -163,11 +163,15 @@ export function getSessionNameFromEntries(
   entries: Array<{ type: string; name?: string; message?: { role?: string; content?: unknown } }>,
   maxLength: number = 100
 ): string {
-  // Walk in reverse to find the latest session_info entry (same as SessionManager)
+  // Walk in reverse to find the latest session_info entry (same as SessionManager).
+  // Session files are unvalidated JSON, so `name` may be a non-string (number, object,
+  // boolean); guard `typeof` before `.trim()` since optional chaining only guards
+  // null/undefined. A non-string name is skipped (treated like an absent name);
+  // an empty string name explicitly clears the title (break -> first-user fallback).
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    if (entry?.type === "session_info") {
-      const name = entry.name?.trim();
+    if (entry?.type === "session_info" && typeof entry.name === "string") {
+      const name = entry.name.trim();
       if (name) return name;
       // Empty name explicitly clears the title — stop looking for session_info
       break;
