@@ -1281,6 +1281,144 @@ describe("registerCommands", () => {
       }
     });
 
+    it("prefixes tool-queue-only flush with `[<id> - <name>]` using SessionInfo.name (no JSONL parse)", async () => {
+      // Regression (perf): a tool-queue-only session (no pending marker) must
+      // derive its per-session prefix from SessionInfo.name (collected by
+      // SessionManager.listAll()) WITHOUT re-parsing the session JSONL. With an
+      // explicit session_info name, the prefix is `[<id> - <name>]`.
+      const { enqueueToolMessage, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+
+      const sessionName = "Tool queue only session";
+      const sessionId = `test-flp-tool-only-name-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: sessionName }),
+        JSON.stringify({ type: "message", message: { role: "user", content: "hello" } }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        // NO touchPendingFlag — tool-queue-only.
+        await enqueueToolMessage(sessionId, {
+          content: "tool fact",
+          timestamp: "2024-01-01T00:00:00Z",
+          store_method: "tool",
+          sessionId: "test-session",
+        });
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+              lastNotification = { message, type };
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", ctx);
+
+        const perSession = notifyHistory.find((n) => n.message.includes("Flushed"));
+        expect(perSession).toBeDefined();
+        expect(perSession!.message.startsWith(`[${sessionId} - ${sessionName}]\n`)).toBe(true);
+        expect(perSession!.message).toContain("Flushed 1 tool entries");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("prefixes tool-queue-only flush with `[<id>]` when SessionInfo has no explicit name (no JSONL parse)", async () => {
+      // Regression (perf + behavior): a tool-queue-only session whose file has
+      // NO session_info name (only a first user message) must NOT parse the
+      // JSONL to derive a name for the prefix. SessionInfo.name is undefined
+      // (listAll only records the explicit session_info name), so the cheap
+      // prefix is `[<id>]` — NOT `[<id> - <first message>]` (which would require
+      // a parse). This is the observable proof that the JSONL is not parsed.
+      const { enqueueToolMessage, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+
+      const firstMessage = "How do I configure auto-recall?";
+      const sessionId = `test-flp-tool-only-noid-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        // NOTE: no `session_info` entry — SessionInfo.name will be undefined.
+        JSON.stringify({ type: "message", message: { role: "user", content: firstMessage } }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        // NO touchPendingFlag — tool-queue-only.
+        await enqueueToolMessage(sessionId, {
+          content: "tool fact",
+          timestamp: "2024-01-01T00:00:00Z",
+          store_method: "tool",
+          sessionId: "test-session",
+        });
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+              lastNotification = { message, type };
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        confirmResult = true;
+        register();
+        await getHandler()("flush-pending", ctx);
+
+        const perSession = notifyHistory.find((n) => n.message.includes("Flushed"));
+        expect(perSession).toBeDefined();
+        // Cheap prefix is just the id — the first user message is NOT used
+        // (that would require parsing the JSONL, which we deliberately skip).
+        expect(perSession!.message.startsWith(`[${sessionId}]\n`)).toBe(true);
+        expect(perSession!.message).not.toContain(firstMessage);
+        expect(perSession!.message).not.toContain(`[${sessionId} - ${firstMessage}]`);
+        expect(perSession!.message).toContain("Flushed 1 tool entries");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
     it("reports error when pending session not found", async () => {
       const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
         "../src/queue"
