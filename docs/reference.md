@@ -6,6 +6,9 @@ Detailed configuration, tools, commands, and operational details for pi-hindsigh
 - [Configuration](#configuration)
   - [General Settings](#general-settings)
     - [Disabled Mode](#disabled-mode)
+    - [Debug Mode](#debug-mode)
+  - [Auto-Flush Events](#auto-flush-events)
+    - [Overlap: `quit` in both lists](#overlap-quit-in-both-lists)
   - [Auto-Recall Settings](#auto-recall-settings)
     - [autoRecallPersist Tradeoffs](#autorecallpersist-tradeoffs)
   - [Status Bar Indicator](#status-bar-indicator)
@@ -47,7 +50,8 @@ Configuration is stored in `<getAgentDir()>/extensions/pi-hindsight/config.json`
 | `recallMaxQueryChars` | `800` | Maximum characters from the user's message to use as the recall query |
 | `recallPromptPreamble` | *(see defaults)* | The system note text inside `<hindsight_memories>` fences that instructs the LLM how to use recalled memories |
 | `constantTags` | `["harness:pi"]` | Tags included on every retained document (useful for filtering in Hindsight) |
-| `flushOnCompact` | `false` | Flush queued messages to Hindsight before a compaction event |
+| `autoFlushSessionOn` | `["switch", "fork", "reload"]` | Auto-flush the current session when these lifecycle events occur. Options: `"switch"` (`/new`, `/resume`), `"fork"` (`/fork`, `/clone`), `"reload"`, `"compact"`, `"quit"` (active-session only; skipped if `"quit"` is also in `autoFlushPendingOn`), `"tree"`. See [Auto-Flush Events](#auto-flush-events). |
+| `autoFlushPendingOn` | `["quit"]` | Run the `/hindsight flush-pending`-equivalent flow on these events. Options: `"quit"`, `"startup"`. See [Auto-Flush Events](#auto-flush-events). |
 | `requireExtraContextBeforeFlush` | `false` | Block automatic flush until extra context is set via `/hindsight set-extra-context` or the `hindsight_set_extra_context` tool. Helps prevent incorrect extraction for sessions involving satire, fiction, external blog posts, or other content that could be misclassified. See [Extra Context & Flush Guard](#extra-context--flush-guard). |
 | `debug` | `false` | Enable debug mode. Logs parse pipeline timing to console and shows auto-flush block notifications that are otherwise suppressed. See [Debug Mode](#debug-mode). |
 
@@ -75,8 +79,28 @@ This ensures that disabling the extension does not leave stale data in your sess
 When `debug: true` (or `PI_HINDSIGHT_DEBUG=true`), pi-hindsight enables additional diagnostic output:
 
 - **Parse pipeline timing**: Logs `performance.now()` timing for `parseSessionFile` and `buildMessageArrayFromParsedSession` to the console
-- **Auto-flush block notifications**: Block notifications ("Session does not allow retention", "extra context not set") are suppressed during auto-flushes (session switch, fork, reload, compact) since they are transient and not useful. In debug mode, these are always shown. Note: `/quit` always shows block notifications regardless of debug mode, so when you finally exit there will be persistent warnings if anything wasn't flushed due to missing extra context.
+- **Auto-flush block notifications**: Block notifications ("Session does not allow retention", "extra context not set") are suppressed during most auto-flushes since they are transient and not useful. In debug mode, these are always shown. The one exception is `/quit` (the final chance before exit):
+  - **`/quit`** always shows block notifications regardless of debug mode, so when you finally exit there will be persistent warnings if anything wasn't flushed due to missing extra context. For the default `autoFlushPendingOn: ["quit"]`, these are also mirrored to `console.warn`/`console.error` because the TUI is already gone (see [Auto-Flush Events](#auto-flush-events)).
 - **`/hindsight active-tools`**: Only available in debug mode. Shows currently active tool names for debugging tool visibility.
+
+## Auto-Flush Events
+
+Two settings control which session lifecycle events automatically flush pending work:
+
+- **`autoFlushSessionOn`** (default `["switch", "fork", "reload"]`): auto-flush the *current active session* when these events fire.
+  - `"switch"` — `session_before_switch`, triggered by `/new` and `/resume`.
+  - `"fork"` — `session_before_fork`, triggered by `/fork` and `/clone`.
+  - `"reload"` — `session_shutdown` triggered by `/reload`.
+  - `"compact"` — `session_compact` triggered by compaction.
+  - `"tree"` — `session_before_tree` triggered by `/tree`.
+  - `"quit"` — `session_shutdown` with reason `quit`.
+- **`autoFlushPendingOn`** (default `["quit"]`): run the `/hindsight flush-pending`-equivalent flow (flush all sessions with pending markers and/or tool queues) when these events fire.
+  - `"quit"` — `session_shutdown` with reason `quit`.
+  - `"startup"` — `session_start` with reason `startup`. Runs after the client is ready and the health check.
+
+### Overlap: `"quit"` in both lists
+
+`"quit"` may appear in either or both lists. If it is in **both**, the pending flush (`autoFlushPendingOn`) takes precedence and the active-session quit flush is skipped to avoid duplicate work. `validateConfig` emits a warning in that case. The recommended default (`autoFlushPendingOn: ["quit"]`, `"quit"` absent from `autoFlushSessionOn`) flushes all pending sessions on `/quit`.
 
 ## Auto-Recall Settings
 
@@ -193,7 +217,7 @@ The flush guard distinguishes between three states:
 
 This is particularly useful for sessions involving prose to prevent Hindsight from treating fictional characters as real people, fictional events as factual, or even real people as the user.
 
-The guard is checked at every session flush point: session switch, shutdown, compact (if `flushOnCompact: true`), manual `/hindsight flush`, `/hindsight flush-pending`, `/hindsight parse-and-upsert-session`, and `/hindsight upsert-all-parsed`. Tool queue flushes (from `hindsight_retain` tool calls) are not guarded.
+The guard is checked at every session flush point in `autoFlushSessionOn`, `autoFlushPendingOn`, and for the manual manual slash commands (`/hindsight flush`, `/hindsight flush-pending`, `/hindsight parse-and-upsert-session`, and `/hindsight upsert-all-parsed`). Tool queue flushes (from `hindsight_retain` tool calls) are not guarded.
 
 ## Content Retention & Stripping Settings
 ### `retainContent`
@@ -470,7 +494,7 @@ Supports the same placeholder expansion as `observationScopes`, expanded at reca
 }
 ```
 
-> **Caveat:** Excluding the current session's memories with `not` means you won't recall memories from *the current session*. This is usually fine because the LLM already has the current conversation in context. However, after a session compaction (when old messages are removed from the context window), you *might* want those memories — they just won't be added to Hindsight until the session switches, ends, is compacted (depending on your `flushOnCompact` setting), or manually flushed. In practice, `not: ... {session}` is useful when you want to avoid wasting recall tokens on information the LLM already knows from the current conversation.
+> **Caveat:** Excluding the current session's memories with `not` means you won't recall memories from *the current session*. This is usually fine because the LLM already has the current conversation in context. However, after a session compaction (when old messages are removed from the context window), you *might* want those memories — they just won't be added to Hindsight until the session switches, ends, is compacted (if `autoFlushSessionOn` includes `"compact"`), or manually flushed. In practice, `not: ... {session}` is useful when you want to avoid wasting recall tokens on information the LLM already knows from the current conversation.
 
 **Recall types and tag matching:**
 
@@ -536,7 +560,8 @@ Configuration options can also be set via environment variables (override config
 | `PI_HINDSIGHT_AUTO_RECALL_TAGS_MATCH` | `autoRecallTagsMatch` | string | `"any"` |
 | `PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS` | `autoRecallTagGroups` | TagGroupInput[] (JSON) | `null` |
 | `PI_HINDSIGHT_CONSTANT_TAGS` | `constantTags` | string[] (JSON) | `["harness:pi"]` |
-| `PI_HINDSIGHT_FLUSH_ON_COMPACT` | `flushOnCompact` | boolean | `false` |
+| `PI_HINDSIGHT_AUTO_FLUSH_SESSION_ON` | `autoFlushSessionOn` | string[] (JSON) | `["switch", "fork", "reload"]` |
+| `PI_HINDSIGHT_AUTO_FLUSH_PENDING_ON` | `autoFlushPendingOn` | string[] (JSON) | `["quit"]` |
 | `PI_HINDSIGHT_REQUIRE_EXTRA_CONTEXT_BEFORE_FLUSH` | `requireExtraContextBeforeFlush` | boolean | `false` |
 | `PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT` | `retainSessionsByDefault` | boolean | `true` |
 | `PI_HINDSIGHT_RETAIN_CONTENT` | `retainContent` | RetainContent (JSON) | *(see retainContent default)* |

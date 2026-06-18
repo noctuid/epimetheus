@@ -173,7 +173,7 @@ Example - For the retain mission, you may want to experiment with including some
 # Caveats
 - While breaking changes are unlikely, this plugin is still in flux and the config API may evolve
 - Depending on your workflow with `/tree` and what you expect to be retained, this package may not play well (all new messages and session file content will be retained, not just the current tree branch). Also see [rewind/rollback information in Known Package Interactions](docs/reference.md#rewindrollback).
-- Flush options are manual, or automatic on session switch, shutdown, compact (see `flushOnCompact` in [Reference](docs/reference.md)), etc.
+- Flush options are manual, or automatic on session lifecycle events (`switch`, `fork`, `reload`, `compact`, `quit`); see [Reference](docs/reference.md#auto-flush-events) for `autoFlushSessionOn` and `autoFlushPendingOn`.
 
 # FAQ
 ## Why did you make this when there is already a pi-hindsight?

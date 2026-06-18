@@ -140,7 +140,7 @@ describe("real entrypoint bootstrap", () => {
       "before_agent_start",
       "session_before_switch",
       "session_before_fork",
-      "session_before_compact",
+      "session_compact",
       "session_shutdown",
     ];
 
@@ -254,6 +254,26 @@ describe("real entrypoint bootstrap", () => {
     expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-hindsight", "🧠");
   });
 
+  it("session_start runs flush-pending on startup when autoFlushPendingOn includes startup (no-work stays silent)", async () => {
+    // Regression: with "startup" in autoFlushPendingOn, the session_start
+    // handler runs the flush-pending flow. With no pending work it stays silent
+    // (notifyNoWork: false for lifecycle flushes) and does not throw.
+    activeConfig = { ...testConfig, autoFlushPendingOn: ["startup"] };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const ctx = createMockContext();
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start", reason: "startup" }, ctx);
+
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-hindsight", "🧠");
+    // No notifications: no "No pending changes", no errors.
+    const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+    expect(notifyCalls.length).toBe(0);
+  });
+
   it("session_start auto-creates metadata with retained=true when retainSessionsByDefault=true and no existing metadata", async () => {
     const pi = createMockPi();
     const extension = await import("../src/index");
@@ -345,7 +365,7 @@ describe("real entrypoint bootstrap", () => {
     // Shutdown should flush the tool queue even though autoRetainEnabled=false
     const shutdownHandler = pi.handlers.get("session_shutdown")!;
     const ctx = createMockContext({ _sessionId: sessionId });
-    await shutdownHandler({ type: "session_shutdown" }, ctx);
+    await shutdownHandler({ type: "session_shutdown", reason: "reload" }, ctx);
 
     expect(readToolQueueFromDisk(sessionId)).toHaveLength(0);
     removePendingFlag(sessionId);
@@ -918,7 +938,7 @@ describe("real entrypoint bootstrap", () => {
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
-    await handler({ type: "session_shutdown" }, ctx);
+    await handler({ type: "session_shutdown", reason: "reload" }, ctx);
 
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
     removePendingFlag(BOOTSTRAP_SESSION);
@@ -970,6 +990,210 @@ describe("real entrypoint bootstrap", () => {
     expect(messages).toContain("No pending changes");
   });
 
+  it("session_shutdown quit echoes blocking warnings to console (extra-context guard)", async () => {
+    // Regression: pi stops the TUI before emitting shutdown handlers, so on
+    // `reason: "quit"` ctx.ui.notify warnings aren't visible. Warning/error
+    // notifications must also be mirrored to console.warn/console.error so the
+    // user sees why the quit flush was blocked.
+    activeConfig = {
+      ...testConfig,
+      requireExtraContextBeforeFlush: true,
+      debug: false,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "quit"],
+      autoFlushPendingOn: [],
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_shutdown")!;
+    // createMockContext writes a session file with hindsight-meta {retained:true}
+    // and no extraContext — so the extra-context guard must block the flush.
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    // Capture console.warn/console.error output (TUI is shut down on quit)
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    const warnCalls: string[] = [];
+    const errorCalls: string[] = [];
+    console.warn = (msg: unknown) => {
+      warnCalls.push(String(msg));
+    };
+    console.error = (msg: unknown) => {
+      errorCalls.push(String(msg));
+    };
+    try {
+      await handler({ type: "session_shutdown", reason: "quit" }, ctx);
+
+      // The warning is still emitted through ctx.ui.notify ...
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m) => m.includes("extra context not set"))).toBe(true);
+      // ... AND it is mirrored to console.warn (visible after TUI shutdown)
+      expect(warnCalls.some((m) => m.includes("extra context not set"))).toBe(true);
+      expect(warnCalls.some((m) => m.startsWith("pi-hindsight:"))).toBe(true);
+      // Pending marker stays (guard blocks, setting context later allows flush)
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_shutdown quit echoes retention-disabled warning to console", async () => {
+    // Regression: a non-retained session on quit must surface the retention
+    // warning via console (not only ctx.ui.notify), since the TUI is gone.
+    activeConfig = {
+      ...testConfig,
+      debug: false,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "quit"],
+      autoFlushPendingOn: [],
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_shutdown")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION, _retained: false });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    // Pretend-persist a non-retained live state so the fast pre-parse guard
+    // blocks without re-parsing the (retained=false) session file.
+    const { writeSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
+    writeSessionState(BOOTSTRAP_SESSION, {
+      retained: false,
+      extraContext: null,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const originalWarn = console.warn;
+    const warnCalls: string[] = [];
+    console.warn = (msg: unknown) => {
+      warnCalls.push(String(msg));
+    };
+    try {
+      await handler({ type: "session_shutdown", reason: "quit" }, ctx);
+
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m) => m.includes("does not allow retention"))).toBe(true);
+      expect(warnCalls.some((m) => m.includes("does not allow retention"))).toBe(true);
+      // Pending marker cleared by the retention-disabled block path
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    } finally {
+      console.warn = originalWarn;
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_shutdown quit stays quiet on console for info/no-work", async () => {
+    // Regression: quit console-echo mirrors only warning/error notifications.
+    // A retained session with no pending work ("No pending changes" info / no
+    // success) must NOT be echoed to console, so quit stays non-noisy.
+    activeConfig = {
+      ...testConfig,
+      debug: false,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "quit"],
+      autoFlushPendingOn: [],
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_shutdown")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    const warnCalls: string[] = [];
+    const errorCalls: string[] = [];
+    console.warn = (msg: unknown) => {
+      warnCalls.push(String(msg));
+    };
+    console.error = (msg: unknown) => {
+      errorCalls.push(String(msg));
+    };
+    try {
+      await handler({ type: "session_shutdown", reason: "quit" }, ctx);
+
+      // No warning/error notifications should be mirrored to console for this
+      // clean no-work quit.
+      expect(warnCalls.length).toBe(0);
+      expect(errorCalls.length).toBe(0);
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_shutdown quit runs flush-pending and stays silent on no-work (default config)", async () => {
+    // Regression: with the default autoFlushPendingOn: ["quit"], quit triggers
+    // the flush-pending flow across all sessions. With no pending work anywhere,
+    // it stays silent (notifyNoWork: false for lifecycle flushes) and does not
+    // throw even though the mock session is not registered with SessionManager.
+    activeConfig = { ...testConfig, debug: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_shutdown")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+
+    try {
+      await handler({ type: "session_shutdown", reason: "quit" }, ctx);
+
+      // No notifications at all: no "No pending changes", no errors.
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      expect(notifyCalls.length).toBe(0);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
   it("session_before_switch handler flushes queued messages", async () => {
     const pi = createMockPi();
     const extension = await import("../src/index");
@@ -1007,7 +1231,7 @@ describe("real entrypoint bootstrap", () => {
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
     // Should not throw
-    await handler({ type: "session_shutdown" }, ctx);
+    await handler({ type: "session_shutdown", reason: "quit" }, ctx);
 
     // Queue should still be intact — flush was skipped due to invalid config
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
@@ -1133,14 +1357,21 @@ describe("real entrypoint bootstrap", () => {
     removePendingFlag(BOOTSTRAP_SESSION);
   });
 
-  it("session_before_compact handler skips flush when flushOnCompact is false", async () => {
-    activeConfig = { ...testConfig, flushOnCompact: false };
+  it("session_before_tree handler flushes when tree is in autoFlushSessionOn", async () => {
+    // Regression: with "tree" enabled, the session_before_tree handler flushes
+    // the current active session (auto-flush semantics), clearing the pending
+    // marker. Exercise the real bootstrap handler; do not reimplement flush
+    // logic.
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "tree"],
+    };
 
     const pi = createMockPi();
     const extension = await import("../src/index");
     extension.default(pi);
 
-    const handler = pi.handlers.get("session_before_compact")!;
+    const handler = pi.handlers.get("session_before_tree")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
     const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
@@ -1148,21 +1379,43 @@ describe("real entrypoint bootstrap", () => {
     removePendingFlag(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
 
-    await handler({ type: "session_before_compact" }, ctx);
+    await handler({ type: "session_before_tree", preparation: {}, signal: undefined }, ctx);
 
-    // Queue should still be intact — flushOnCompact is false
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    removePendingFlag(BOOTSTRAP_SESSION);
+  });
+
+  it("session_before_tree handler skips flush when tree is not in autoFlushSessionOn", async () => {
+    // Regression: "tree" is off by default, so the handler must not flush and
+    // the pending marker stays intact.
+    activeConfig = { ...testConfig };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_before_tree")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+
+    await handler({ type: "session_before_tree", preparation: {}, signal: undefined }, ctx);
+
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
     removePendingFlag(BOOTSTRAP_SESSION);
   });
 
-  it("session_before_compact handler flushes when flushOnCompact is true", async () => {
-    activeConfig = { ...testConfig, flushOnCompact: true };
+  it("session_compact handler skips flush when compact is not in autoFlushSessionOn", async () => {
+    activeConfig = { ...testConfig };
 
     const pi = createMockPi();
     const extension = await import("../src/index");
     extension.default(pi);
 
-    const handler = pi.handlers.get("session_before_compact")!;
+    const handler = pi.handlers.get("session_compact")!;
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
 
     const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
@@ -1170,10 +1423,466 @@ describe("real entrypoint bootstrap", () => {
     removePendingFlag(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
 
-    await handler({ type: "session_before_compact" }, ctx);
+    await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+    // Queue should still be intact — compact is not in autoFlushSessionOn
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+    removePendingFlag(BOOTSTRAP_SESSION);
+  });
+
+  it("session_compact handler flushes when compact is in autoFlushSessionOn", async () => {
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+
+    await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+    // Drain the deferred notify replay (setTimeout(0)) scheduled by the handler
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
 
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
     removePendingFlag(BOOTSTRAP_SESSION);
+  });
+
+  it("session_compact suppresses blocking warnings in non-debug mode (extra-context guard)", async () => {
+    // Regression: compact uses auto-flush notification semantics, so routine
+    // block/not-retained warnings are suppressed unless debug: true. In non-debug
+    // mode the extra-context guard blocks the compact flush without surfacing a
+    // warning. The deferred notify replay still applies (so any captured
+    // notifications reach the TUI next tick), but no block warning is emitted.
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      requireExtraContextBeforeFlush: true,
+      debug: false,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    // createMockContext writes a session file with hindsight-meta {retained:true}
+    // and no extraContext — so the extra-context guard blocks the compact flush.
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+      // Synchronously (mid-compact) nothing is replayed yet
+      let notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      let messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m) => m.includes("extra context not set"))).toBe(false);
+
+      // After the next tick, the deferred replay reaches the real ctx.ui.notify —
+      // but the block warning was suppressed (auto-flush, non-debug), so it is NOT
+      // replayed.
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m: string) => m.includes("extra context not set"))).toBe(false);
+      // Pending marker stays (guard blocks, setting context later allows flush)
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact replays blocking warnings in debug mode (extra-context guard)", async () => {
+    // In debug mode the compact flush surfaces the block warning via deferred
+    // notify replay, consistent with other auto-flushes in debug.
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      requireExtraContextBeforeFlush: true,
+      debug: true,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+      // Synchronously (mid-compact) the warning is captured, not yet replayed
+      let notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      let messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m) => m.includes("extra context not set"))).toBe(false);
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m: string) => m.includes("extra context not set"))).toBe(true);
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact suppresses retention-disabled warning in non-debug mode", async () => {
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      debug: false,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION, _retained: false });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    // Pretend-persist a non-retained live state so the fast pre-parse guard
+    // blocks without re-parsing the (retained=false) session file.
+    const { writeSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
+    writeSessionState(BOOTSTRAP_SESSION, {
+      retained: false,
+      extraContext: null,
+      updatedAt: new Date().toISOString(),
+    });
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+      // Synchronously the warning is captured, not yet replayed
+      expect(
+        (ctx.ui.notify as ReturnType<typeof mock>).mock.calls.some((c: unknown[]) =>
+          String(c[0]).includes("does not allow retention")
+        )
+      ).toBe(false);
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      // Suppressed in non-debug: the retention-disabled warning is NOT replayed.
+      expect(messages.some((m: string) => m.includes("does not allow retention"))).toBe(false);
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact replays retention-disabled warning in debug mode", async () => {
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      debug: true,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION, _retained: false });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    const { writeSessionState } =
+      require("../src/session-state") as typeof import("../src/session-state");
+    writeSessionState(BOOTSTRAP_SESSION, {
+      retained: false,
+      extraContext: null,
+      updatedAt: new Date().toISOString(),
+    });
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+      expect(
+        (ctx.ui.notify as ReturnType<typeof mock>).mock.calls.some((c: unknown[]) =>
+          String(c[0]).includes("does not allow retention")
+        )
+      ).toBe(false);
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m: string) => m.includes("does not allow retention"))).toBe(true);
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact replays tool queue success after the handler", async () => {
+    // Regression: the user's scenario may be tool-queue-only (no session
+    // pending marker). In debug mode the tool queue success message "Flushed N
+    // tool entries" is captured during the flush and replayed via ctx.ui.notify
+    // next tick.
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      debug: true,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, enqueueToolMessage } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+
+    await enqueueToolMessage(BOOTSTRAP_SESSION, {
+      content: "Important fact",
+      tags: ["harness:pi", `session:${BOOTSTRAP_SESSION}`],
+      timestamp: new Date().toISOString(),
+      store_method: "tool",
+      sessionId: BOOTSTRAP_SESSION,
+    });
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+      // Synchronously (mid-compact) the success info is captured, not replayed
+      expect(
+        (ctx.ui.notify as ReturnType<typeof mock>).mock.calls.some((c: unknown[]) =>
+          String(c[0]).includes("Flushed")
+        )
+      ).toBe(false);
+
+      // After the next tick the deferred replay reaches the real ctx.ui.notify
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m: string) => m.includes("Flushed 1 tool entries"))).toBe(true);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact stays quiet for a successful flush (non-debug)", async () => {
+    // Regression: compact uses auto-flush notification semantics, so a
+    // successful flush ("Parsed and upserted …") is suppressed in non-debug
+    // mode (compaction is not a final-chance event like /quit). Block warnings
+    // are also absent. The flush still runs and clears the pending marker.
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      debug: false,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+      // Drain the deferred notify replay scheduled by the compact handler.
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      // Success is suppressed in non-debug.
+      expect(messages.some((m: string) => m.includes("Parsed and upserted"))).toBe(false);
+      expect(messages.every((m: string) => !m.includes("does not allow retention"))).toBe(true);
+      // The flush still ran and cleared the pending marker.
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact shows successful flush info in debug mode", async () => {
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      debug: true,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag, touchPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    await touchPendingFlag(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+      // In debug mode the success info is emitted (captured) and replayed next tick
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m: string) => m.includes("Parsed and upserted"))).toBe(true);
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact stays quiet when there is no pending work", async () => {
+    // Regression: compact should not emit a "No pending changes" info when
+    // there is nothing to flush. The flush still runs so stale inflight claims
+    // can be recovered, but with autoFlush no notifications are emitted/replayed.
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      debug: false,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+
+      // No notifications should be captured/replayed (no work, and autoFlush
+      // suppresses "No pending changes"), but the flush path still ran.
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      expect(notifyCalls.length).toBe(0);
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
+  });
+
+  it("session_compact shows No pending changes on no-work compaction when debug is true", async () => {
+    // Regression: compact should follow the same auto-flush no-work semantics
+    // as other auto-flush paths: "No pending changes" is suppressed unless
+    // debug is enabled, in which case it is captured and replayed next tick.
+    activeConfig = {
+      ...testConfig,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+      debug: true,
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const handler = pi.handlers.get("session_compact")!;
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+
+    const { removePendingFlag, clearSessionQueueState, hasPendingFlag } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupSessionCache(BOOTSTRAP_SESSION);
+    expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+
+      // Synchronously (mid-compact) the no-work info is captured, not replayed
+      expect(
+        (ctx.ui.notify as ReturnType<typeof mock>).mock.calls.some((c: unknown[]) =>
+          String(c[0]).includes("No pending changes")
+        )
+      ).toBe(false);
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
+      const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
+      expect(messages.some((m: string) => m.includes("No pending changes"))).toBe(true);
+      expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
+    } finally {
+      removePendingFlag(BOOTSTRAP_SESSION);
+      clearSessionQueueState(BOOTSTRAP_SESSION);
+      cleanupSessionCache(BOOTSTRAP_SESSION);
+    }
   });
 
   it("session_start handler sets unhealthy status when server is unreachable", async () => {
@@ -2380,7 +3089,12 @@ describe("real entrypoint bootstrap", () => {
   });
 
   it("requireExtraContextBeforeFlush: session_shutdown blocks flush when extra context is not set", async () => {
-    activeConfig = { ...testConfig, requireExtraContextBeforeFlush: true };
+    activeConfig = {
+      ...testConfig,
+      requireExtraContextBeforeFlush: true,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "quit"],
+      autoFlushPendingOn: [],
+    };
 
     const pi = createMockPi();
     const extension = await import("../src/index");
@@ -2401,7 +3115,7 @@ describe("real entrypoint bootstrap", () => {
       },
     });
 
-    await handler({ type: "session_shutdown" }, ctx);
+    await handler({ type: "session_shutdown", reason: "quit" }, ctx);
 
     // Queue should still be intact — flush was blocked
     expect(hasPendingFlag(sessionId)).toBe(true);
@@ -2741,8 +3455,12 @@ describe("real entrypoint bootstrap", () => {
     removePendingFlag(sessionId);
   });
 
-  it("requireExtraContextBeforeFlush: session_before_compact blocks flush when extra context is not set and flushOnCompact is true", async () => {
-    activeConfig = { ...testConfig, requireExtraContextBeforeFlush: true, flushOnCompact: true };
+  it("requireExtraContextBeforeFlush: session_compact blocks flush when extra context is not set and compact is in autoFlushSessionOn", async () => {
+    activeConfig = {
+      ...testConfig,
+      requireExtraContextBeforeFlush: true,
+      autoFlushSessionOn: [...testConfig.autoFlushSessionOn, "compact"],
+    };
 
     const pi = createMockPi();
     const extension = await import("../src/index");
@@ -2754,7 +3472,7 @@ describe("real entrypoint bootstrap", () => {
     removePendingFlag(sessionId);
     await touchPendingFlag(sessionId);
 
-    const handler = pi.handlers.get("session_before_compact")!;
+    const handler = pi.handlers.get("session_compact")!;
     const ctx = createMockContext({
       _sessionId: sessionId,
       sessionManager: {
@@ -2763,10 +3481,15 @@ describe("real entrypoint bootstrap", () => {
       },
     });
 
-    await handler({ type: "session_before_compact" }, ctx);
+    try {
+      await handler({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+      // Drain the deferred notify replay scheduled by the compact handler
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
 
-    // Queue should still be intact — flush was blocked
-    expect(hasPendingFlag(sessionId)).toBe(true);
-    removePendingFlag(sessionId);
+      // Queue should still be intact — flush was blocked
+      expect(hasPendingFlag(sessionId)).toBe(true);
+    } finally {
+      removePendingFlag(sessionId);
+    }
   });
 });

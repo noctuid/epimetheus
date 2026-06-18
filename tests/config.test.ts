@@ -50,7 +50,6 @@ const validConfig: HindsightConfig = {
     message: ["api"],
   },
   toolFilter: {},
-  flushOnCompact: false,
   entities: [],
   observationScopes: [["{session}"]] as string[][],
   statusHealthy: "🧠",
@@ -58,6 +57,8 @@ const validConfig: HindsightConfig = {
   requireExtraContextBeforeFlush: false,
   statusUnhealthy: "🤯",
   debug: false,
+  autoFlushSessionOn: ["switch", "fork", "reload"],
+  autoFlushPendingOn: ["quit"],
 };
 
 // Temp directory for file loading tests
@@ -87,6 +88,42 @@ describe("validateConfig", () => {
     const result = validateConfig(validConfig);
     expect(result.valid).toBe(true);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it("warns when quit is in both autoFlushSessionOn and autoFlushPendingOn", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      autoFlushSessionOn: ["switch", "fork", "reload", "quit"],
+      autoFlushPendingOn: ["quit"],
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(
+      result.warnings.some((w) =>
+        w.includes('"quit" is present in both autoFlushSessionOn and autoFlushPendingOn')
+      )
+    ).toBe(true);
+  });
+
+  it("accepts tree in autoFlushSessionOn without warning", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      autoFlushSessionOn: ["switch", "fork", "reload", "tree"],
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("autoFlushSessionOn"))).toBe(false);
+  });
+
+  it("deduplicates tree in autoFlushSessionOn", () => {
+    const config: HindsightConfig = {
+      ...validConfig,
+      autoFlushSessionOn: ["switch", "tree", "tree"],
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("duplicate values"))).toBe(true);
+    expect(config.autoFlushSessionOn.filter((e) => e === "tree").length).toBe(1);
   });
 
   it("errors when apiUrl is missing", () => {
