@@ -53,6 +53,17 @@ function formatSessionPrefix(sessionId: string, sessionName: string): string {
 }
 
 /**
+ * Cheap per-session prefix for tool-queue-only sessions (no pending marker).
+ * Avoids parsing the session JSONL just to derive a name: uses the explicit
+ * `SessionInfo.name` already collected by `SessionManager.listAll()` when it's
+ * a non-empty string, otherwise falls back to just the session id.
+ */
+function formatSessionPrefixOptional(sessionId: string, name: string | undefined): string {
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  return trimmed ? `[${sessionId} - ${trimmed}]` : `[${sessionId}]`;
+}
+
+/**
  * Return an {@link ExtensionContext} whose `ui.notify` calls are prefixed with
  * a per-session header line, used to scope `/hindsight flush-pending`
  * per-session notifications. All other `ui` members (and all other `ctx`
@@ -145,13 +156,19 @@ async function flushPendingSession(
   ctx: ExtensionContext,
   options?: { autoFlush?: boolean }
 ): Promise<void> {
-  // Derive the display name the same way as the normal flush path (explicit
-  // name → first user message → Untitled), so the per-session prefix matches
-  // the session name Hindsight records. Falls back to SessionInfo.name (and
-  // finally Untitled) only when the session file can't be parsed.
   const sessionInfo = sessionMap.get(sessionId);
-  const sessionName = resolveSessionDisplayName(sessionInfo, config);
-  const prefixedCtx = withSessionNotifyPrefix(ctx, formatSessionPrefix(sessionId, sessionName));
+  // Derive the per-session prefix. Only pending-marker sessions need the full
+  // display-name derivation (`resolveSessionDisplayName` parses the session
+  // JSONL to find the latest `session_info` name / first user message). Tool-
+  // queue-only sessions have no pending marker, so avoid that parse and derive
+  // a cheap prefix from `SessionInfo.name` (already collected by
+  // `SessionManager.listAll()`) when it's a non-empty string, else use just the
+  // session id. The prefix still scopes tool-queue notifications to the session.
+  const hasPending = hasPendingFlag(sessionId);
+  const prefix = hasPending
+    ? formatSessionPrefix(sessionId, resolveSessionDisplayName(sessionInfo, config))
+    : formatSessionPrefixOptional(sessionId, sessionInfo?.name);
+  const prefixedCtx = withSessionNotifyPrefix(ctx, prefix);
 
   // Auto-flush-style notification suppression (e.g. startup pending flush):
   // block/not-retained warnings and success/no-work are suppressed unless debug.
@@ -160,7 +177,7 @@ async function flushPendingSession(
   const notifySuccess = !autoFlush || config.debug;
 
   // Re-parse and upsert if this session has a pending marker
-  if (hasPendingFlag(sessionId)) {
+  if (hasPending) {
     if (!sessionInfo) {
       prefixedCtx.ui.notify("session file not found", "error");
     } else {
