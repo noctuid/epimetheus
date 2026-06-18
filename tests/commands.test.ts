@@ -191,7 +191,7 @@ describe("registerCommands", () => {
   it("falls back to status when called with no subcommand", async () => {
     register();
     await getHandler()("", makeCtx());
-    expect(lastNotification?.message).toContain("Server: reachable");
+    expect(lastNotification?.message).toContain("Server: https://test.vectorize.io (reachable)");
   });
 
   it("shows error for unknown subcommand", async () => {
@@ -204,7 +204,7 @@ describe("registerCommands", () => {
     it("shows connection status when server is reachable", async () => {
       register();
       await getHandler()("status", makeCtx());
-      expect(lastNotification?.message).toContain("Server: reachable");
+      expect(lastNotification?.message).toContain("Server: https://test.vectorize.io (reachable)");
       expect(lastNotification?.message).toContain("Bank ID: test-bank");
       expect(lastNotification?.message).toContain("Session ID: test-session-123");
       expect(lastNotification?.message).toContain("Auto-recall: enabled");
@@ -217,14 +217,17 @@ describe("registerCommands", () => {
       });
       register();
       await getHandler()("status", makeCtx());
-      expect(lastNotification?.message).toContain("Server: unreachable");
-      expect(lastNotification?.message).toContain("Connection refused");
+      expect(lastNotification?.message).toContain(
+        "Server: https://test.vectorize.io (unreachable: Connection refused)"
+      );
     });
 
-    it("shows 'Server: not configured' when client is null", async () => {
+    it("shows 'Server: ... (not configured)' when client is null", async () => {
       register(statusTestConfig, null);
       await getHandler()("status", makeCtx());
-      expect(lastNotification?.message).toContain("Server: not configured");
+      expect(lastNotification?.message).toContain(
+        "Server: https://test.vectorize.io (not configured)"
+      );
     });
 
     it("shows 'Session ID: none' when getSessionId() returns null", async () => {
@@ -312,10 +315,8 @@ describe("registerCommands", () => {
     it("shows server version and compatibility when reachable", async () => {
       register();
       await getHandler()("status", makeCtx());
-      expect(lastNotification?.message).toContain("Server: reachable");
-      expect(lastNotification?.message).toContain("Server version: 0.9.0");
-      expect(lastNotification?.message).toContain("Required version: >=0.8.3");
-      expect(lastNotification?.message).toContain("Compatibility: compatible");
+      expect(lastNotification?.message).toContain("Server: https://test.vectorize.io (reachable)");
+      expect(lastNotification?.message).toContain("Version: 0.9.0 (>=0.8.3, compatible)");
     });
 
     it("shows incompatible server version when server is too old", async () => {
@@ -324,9 +325,8 @@ describe("registerCommands", () => {
       });
       register(statusTestConfig, mockClient);
       await getHandler()("status", makeCtx());
-      expect(lastNotification?.message).toContain("Server: reachable");
-      expect(lastNotification?.message).toContain("Server version: 0.7.0");
-      expect(lastNotification?.message).toContain("Compatibility: incompatible");
+      expect(lastNotification?.message).toContain("Server: https://test.vectorize.io (reachable)");
+      expect(lastNotification?.message).toContain("Version: 0.7.0 (<0.8.3, incompatible)");
     });
 
     it("shows unavailable version when version query fails", async () => {
@@ -335,9 +335,8 @@ describe("registerCommands", () => {
       });
       register(statusTestConfig, mockClient);
       await getHandler()("status", makeCtx());
-      expect(lastNotification?.message).toContain("Server: reachable");
-      expect(lastNotification?.message).toContain("Server version: unavailable");
-      expect(lastNotification?.message).toContain("Compatibility: unknown");
+      expect(lastNotification?.message).toContain("Server: https://test.vectorize.io (reachable)");
+      expect(lastNotification?.message).toContain("Version: unavailable (HTTP 500)");
     });
   });
 

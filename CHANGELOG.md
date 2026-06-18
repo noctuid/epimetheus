@@ -9,6 +9,7 @@
 ### Changes
 
 - Removed the noisy `pi-hindsight initialized` startup log from `src/index.ts`. Warning, error, and disabled-mode messages are still emitted. Reduces console noise on successful startup.
+- **`/hindsight status` layout tweaks** — `Bank ID` moved from the Session section into the Connection section, the `Server:` line now shows the configured API URL before the status (e.g. `Server: https://api.example.com (reachable)` / `(unreachable: …)` / `(not configured)`), and the version/compatibility block is compressed from three lines (`Required version` / `Server version` / `Compatibility`) into a single `Version:` line (e.g. `Version: 0.9.0 (>=0.8.3, compatible)`).
 
 ### Documentation
 

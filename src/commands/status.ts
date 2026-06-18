@@ -29,35 +29,33 @@ export function createStatusSubcommand(
 
       // Connection status
       lines.push("== Connection ==");
+      lines.push(`  Bank ID: ${config.bankId}`);
       if (client) {
         const healthResult = await client.healthCheck(ctx.signal);
         if (healthResult.success) {
-          lines.push("  Server: reachable");
+          lines.push(`  Server: ${config.apiUrl} (reachable)`);
 
           const versionResult = await client.getServerVersion(ctx.signal);
-          lines.push(`  Required version: >=${MIN_HINDSIGHT_VERSION}`);
           if (versionResult.success && versionResult.version) {
-            lines.push(`  Server version: ${versionResult.version}`);
             const compatibilityError = getHindsightCompatibilityError(versionResult.version);
-            if (compatibilityError) {
-              lines.push(`  Compatibility: incompatible (${compatibilityError})`);
-            } else {
-              lines.push("  Compatibility: compatible");
-            }
+            const state = compatibilityError ? "incompatible" : "compatible";
+            // `<` / `>=` reflects the server version vs. the required minimum.
+            const rel = compatibilityError ? "<" : ">=";
+            lines.push(
+              `  Version: ${versionResult.version} (${rel}${MIN_HINDSIGHT_VERSION}, ${state})`
+            );
           } else {
-            lines.push(`  Server version: unavailable (${versionResult.error ?? "unknown error"})`);
-            lines.push("  Compatibility: unknown");
+            lines.push(`  Version: unavailable (${versionResult.error ?? "unknown error"})`);
           }
         } else {
-          lines.push(`  Server: unreachable (${healthResult.error})`);
+          lines.push(`  Server: ${config.apiUrl} (unreachable: ${healthResult.error})`);
         }
       } else {
-        lines.push("  Server: not configured");
+        lines.push(`  Server: ${config.apiUrl} (not configured)`);
       }
 
       // Session and queue info
       lines.push("\n== Session ==");
-      lines.push(`  Bank ID: ${config.bankId}`);
       const sessionId = ctx.sessionManager.getSessionId();
       lines.push(`  Session ID: ${sessionId ?? "none"}`);
 
