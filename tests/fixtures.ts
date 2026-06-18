@@ -85,7 +85,6 @@ export const testConfig: HindsightConfig = {
   retainContent: { assistant: ["text"], user: ["text"], toolResult: [] },
   strip: { topLevel: ["type"], message: ["api"] },
   toolFilter: {},
-  flushOnCompact: false,
   entities: [],
   observationScopes: [["{session}"]] as string[][],
   statusHealthy: "🧠",
@@ -93,6 +92,8 @@ export const testConfig: HindsightConfig = {
   requireExtraContextBeforeFlush: false,
   statusUnhealthy: "🤯",
   debug: false,
+  autoFlushSessionOn: ["switch", "fork", "reload"],
+  autoFlushPendingOn: ["quit"],
 };
 
 /** Config with all retainContent types enabled (assistant: text+thinking+toolCall, user: text, toolResult: text). */
@@ -357,7 +358,8 @@ export const HINDSIGHT_ENV_KEYS = [
   "PI_HINDSIGHT_AUTO_RECALL_TAGS_MATCH",
   "PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS",
   "PI_HINDSIGHT_CONSTANT_TAGS",
-  "PI_HINDSIGHT_FLUSH_ON_COMPACT",
+  "PI_HINDSIGHT_AUTO_FLUSH_SESSION_ON",
+  "PI_HINDSIGHT_AUTO_FLUSH_PENDING_ON",
   "PI_HINDSIGHT_RETAIN_CONTENT",
   "PI_HINDSIGHT_STRIP",
   "PI_HINDSIGHT_ENTITIES",

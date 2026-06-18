@@ -1595,6 +1595,337 @@ describe("registerCommands", () => {
         clearSessionQueueState(sessionId);
       }
     });
+
+    it("flushAllPending autoFlush suppresses not-retained block warnings in normal mode", async () => {
+      // Regression: the `startup` lifecycle pending flush passes autoFlush: true,
+      // so a not-retained pending session must NOT emit "Session does not allow
+      // retention" outside debug mode (quiet auto-flush semantics).
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { flushAllPending } = await import("../src/commands/session");
+
+      const sessionId = `test-flp-autoflush-notretained-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: "Not retained" }),
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: false },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: "hello" },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        const client = createMockClient();
+        await flushAllPending({ ...statusTestConfig, debug: false }, client, ctx, {
+          autoFlush: true,
+          notifyNoWork: false,
+        });
+
+        // No block warning, no success, no aggregate "Flushing" in normal mode.
+        expect(notifyHistory.some((n) => n.message.includes("does not allow retention"))).toBe(
+          false
+        );
+        expect(notifyHistory.some((n) => n.message.includes("Parsed and upserted"))).toBe(false);
+        expect(notifyHistory.some((n) => n.message.includes("Flushing"))).toBe(false);
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("flushAllPending autoFlush shows not-retained block warnings in debug mode", async () => {
+      // In debug mode the startup pending flush surfaces the diagnostic block
+      // warning (consistent with other auto-flushes) and the aggregate "Flushing"
+      // info, but still no success (the not-retained session is blocked).
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { flushAllPending } = await import("../src/commands/session");
+
+      const sessionId = `test-flp-autoflush-debug-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: "Not retained" }),
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: false },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "user", content: "hello" },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        const client = createMockClient();
+        await flushAllPending({ ...statusTestConfig, debug: true }, client, ctx, {
+          autoFlush: true,
+          notifyNoWork: false,
+        });
+
+        const warned = notifyHistory.find((n) => n.message.includes("does not allow retention"));
+        expect(warned).toBeDefined();
+        expect(warned!.message.startsWith(`[${sessionId} - Not retained]\n`)).toBe(true);
+        expect(warned!.type).toBe("warning");
+        // Aggregate "Flushing" is shown in debug.
+        expect(notifyHistory.some((n) => n.message.includes("Flushing"))).toBe(true);
+        // Still no success (blocked).
+        expect(notifyHistory.some((n) => n.message.includes("Parsed and upserted"))).toBe(false);
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("flushAllPending autoFlush suppresses No messages to parse for an empty pending session in normal mode", async () => {
+      // Regression: a retained pending session with zero retainable messages hits
+      // the messages.length === 0 path in parseAndUpsertSession. In auto-flush mode
+      // (startup), the routine "No messages to parse" info must be suppressed
+      // outside debug mode (quiet startup semantics).
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { flushAllPending } = await import("../src/commands/session");
+
+      const sessionId = `test-flp-autoflush-nomessages-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      // Retained session with NO messages -> messages.length === 0 path.
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: "Empty retained" }),
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: true },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        const client = createMockClient();
+        await flushAllPending({ ...statusTestConfig, debug: false }, client, ctx, {
+          autoFlush: true,
+          notifyNoWork: false,
+        });
+
+        expect(notifyHistory.some((n) => n.message.includes("No messages to parse"))).toBe(false);
+        // Aggregate "Flushing" is also suppressed in normal auto-flush mode.
+        expect(notifyHistory.some((n) => n.message.includes("Flushing"))).toBe(false);
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("flushAllPending autoFlush shows No messages to parse in debug mode", async () => {
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { flushAllPending } = await import("../src/commands/session");
+
+      const sessionId = `test-flp-autoflush-nomessages-debug-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: "Empty retained" }),
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: true },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+            }),
+          },
+        } as unknown as ExtensionContext;
+
+        const client = createMockClient();
+        await flushAllPending({ ...statusTestConfig, debug: true }, client, ctx, {
+          autoFlush: true,
+          notifyNoWork: false,
+        });
+
+        const noMessages = notifyHistory.find((n) => n.message.includes("No messages to parse"));
+        expect(noMessages).toBeDefined();
+        expect(noMessages!.type).toBe("info");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
+
+    it("flushAllPending manual (autoFlush false) still shows No messages to parse", async () => {
+      // Regression: the explicit /hindsight flush-pending flow (autoFlush false)
+      // must still surface the "No messages to parse" info for an empty retained
+      // pending session, preserving manual behavior.
+      const { touchPendingFlag, removePendingFlag, clearSessionQueueState } = await import(
+        "../src/queue"
+      );
+      const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { flushAllPending } = await import("../src/commands/session");
+
+      const sessionId = `test-flp-manual-nomessages-${Date.now()}`;
+      const sessionDir = join(getAgentDir(), "sessions", "--test--");
+      const sessionPath = join(sessionDir, `${sessionId}.jsonl`);
+      const lines = [
+        JSON.stringify({
+          type: "session",
+          id: sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: "/test",
+        }),
+        JSON.stringify({ type: "session_info", name: "Empty retained" }),
+        JSON.stringify({
+          type: "custom",
+          customType: "hindsight-meta",
+          data: { retained: true },
+        }),
+      ];
+      try {
+        mkdirSync(sessionDir, { recursive: true });
+        writeFileSync(sessionPath, `${lines.join("\n")}\n`, "utf8");
+        await touchPendingFlag(sessionId);
+
+        const notifyHistory: { message: string; type: string }[] = [];
+        const ctx = {
+          ...makeCtx(),
+          ui: {
+            ...makeCtx().ui,
+            notify: mock((message: string, type: string) => {
+              notifyHistory.push({ message, type });
+            }),
+            confirm: mock(async () => true),
+          },
+        } as unknown as ExtensionContext;
+
+        const client = createMockClient();
+        await flushAllPending({ ...statusTestConfig, debug: false }, client, ctx, {
+          confirm: false,
+          notifyNoWork: true,
+        });
+
+        const noMessages = notifyHistory.find((n) => n.message.includes("No messages to parse"));
+        expect(noMessages).toBeDefined();
+        expect(noMessages!.type).toBe("info");
+      } finally {
+        removePendingFlag(sessionId);
+        clearSessionQueueState(sessionId);
+        try {
+          rmSync(sessionPath, { force: true });
+        } catch {}
+      }
+    });
   });
 
   describe("parse-session subcommand", () => {

@@ -142,7 +142,8 @@ async function flushPendingSession(
   sessionMap: Map<string, SessionInfo>,
   config: HindsightConfig,
   client: HindsightClientWrapper,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  options?: { autoFlush?: boolean }
 ): Promise<void> {
   // Derive the display name the same way as the normal flush path (explicit
   // name → first user message → Untitled), so the per-session prefix matches
@@ -151,6 +152,12 @@ async function flushPendingSession(
   const sessionInfo = sessionMap.get(sessionId);
   const sessionName = resolveSessionDisplayName(sessionInfo, config);
   const prefixedCtx = withSessionNotifyPrefix(ctx, formatSessionPrefix(sessionId, sessionName));
+
+  // Auto-flush-style notification suppression (e.g. startup pending flush):
+  // block/not-retained warnings and success/no-work are suppressed unless debug.
+  // Manual flushes (command) and `quit` (autoFlush=false) surface them.
+  const autoFlush = options?.autoFlush ?? false;
+  const notifySuccess = !autoFlush || config.debug;
 
   // Re-parse and upsert if this session has a pending marker
   if (hasPendingFlag(sessionId)) {
@@ -164,14 +171,14 @@ async function flushPendingSession(
         client,
         prefixedCtx,
         ctx.signal,
-        { requirePending: true }
+        { requirePending: true, autoFlush, notifySuccess }
       );
     }
   }
 
   // Tool queue flushing is independent of session ingestion.
   if (toolQueueExists(sessionId)) {
-    await flushToolQueue(sessionId, client, prefixedCtx, ctx.signal);
+    await flushToolQueue(sessionId, client, prefixedCtx, ctx.signal, { notifySuccess });
   }
 }
 
@@ -318,6 +325,110 @@ export function createFlushSubcommand(
 }
 
 /**
+ * Run the core flush-pending flow for all sessions with pending markers or tool
+ * queues. Reused by the `/hindsight flush-pending` command and by the
+ * `autoFlushPendingOn` lifecycle flushes (`quit`, `startup`).
+ *
+ * Options:
+ * - `confirm`: when true, prompt the user before flushing (command use). When
+ *   false (lifecycle use), proceed without prompting.
+ * - `notifyNoWork`: when true (and not `autoFlush`), emit a "No pending changes" info
+ *   when there is nothing to flush (command use). Under `autoFlush`, no-work is only
+ *   shown when `debug: true` (diagnostic consistency with auto-flushes).
+ * - `ctxWrapper`: optional wrapper applied to `ctx` before flushing, used to
+ *   mirror warning/error notifications to the console for `/quit` (the TUI is
+ *   already gone by shutdown).
+ * - `autoFlush`: when true, run in auto-flush mode (used by `startup`). Suppresses
+ *   the aggregate "Flushing N session(s)..." info, per-session block/not-retained
+ *   warnings, and per-session success/no-work notifications unless `debug: true`.
+ *   Errors still surface. Manual (`/hindsight flush-pending`) and `quit` use the
+ *   default (`autoFlush: false`) and surface warnings/success.
+ */
+export async function flushAllPending(
+  config: HindsightConfig,
+  client: HindsightClientWrapper,
+  ctx: ExtensionContext,
+  options?: {
+    confirm?: boolean;
+    notifyNoWork?: boolean;
+    ctxWrapper?: (ctx: ExtensionContext) => ExtensionContext;
+    autoFlush?: boolean;
+  }
+): Promise<void> {
+  const flushCtx = options?.ctxWrapper ? options.ctxWrapper(ctx) : ctx;
+  const confirm = options?.confirm ?? false;
+  const notifyNoWork = options?.notifyNoWork ?? false;
+  const autoFlush = options?.autoFlush ?? false;
+  const debug = config.debug;
+
+  try {
+    recoverAllStaleInflightClaims();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    flushCtx.ui.notify(`In-flight recovery failed: ${msg}`, "error");
+  }
+
+  // getPendingSessionIds is lock-free / best-effort: a session may disappear or be
+  // flushed concurrently. Per-session flush steps safely handle empty/no-work cases.
+  const allSessionIds = getPendingSessionIds();
+  if (allSessionIds.length === 0) {
+    // Manual: show when notifyNoWork. Auto-flush (startup): show only in debug.
+    if ((!autoFlush && notifyNoWork) || (autoFlush && debug)) {
+      flushCtx.ui.notify("No pending changes", "info");
+    }
+    return;
+  }
+
+  // Count sessions with pending markers and tool queues for accurate messaging.
+  const sessionsWithPending = allSessionIds.filter((id) => hasPendingFlag(id));
+  const sessionsWithToolQueue = allSessionIds.filter((id) => toolQueueExists(id));
+
+  const parts: string[] = [];
+  if (sessionsWithPending.length > 0) {
+    parts.push(`${sessionsWithPending.length} session(s) to re-parse and upsert`);
+  }
+  if (sessionsWithToolQueue.length > 0) {
+    parts.push(`${sessionsWithToolQueue.length} tool queue(s) to flush`);
+  }
+  const description = parts.join(" + ");
+
+  if (confirm) {
+    const answer = await ctx.ui.confirm(
+      "Flush pending sessions?",
+      `This will flush ${description}. Continue?`
+    );
+    if (!answer) {
+      ctx.ui.notify("Flush cancelled", "info");
+      return;
+    }
+  }
+
+  // Build session map via SessionManager.listAll(). This is expected to be reliable
+  // in normal pi operation, and pending session upserts require it to resolve IDs
+  // to session files; abort the flush if session discovery itself fails.
+  let sessionMap: Map<string, SessionInfo>;
+  try {
+    sessionMap = await buildSessionMap();
+  } catch (e) {
+    flushCtx.ui.notify(
+      `Failed to list sessions: ${e instanceof Error ? e.message : String(e)}`,
+      "error"
+    );
+    return;
+  }
+
+  // Aggregate "Flushing N..." info: shown for manual/quit, suppressed for auto-flush
+  // (startup) unless debug.
+  if (!autoFlush || debug) {
+    flushCtx.ui.notify(`Flushing ${allSessionIds.length} session(s)...`, "info");
+  }
+
+  for (const sessionId of allSessionIds) {
+    await flushPendingSession(sessionId, sessionMap, config, client, flushCtx, { autoFlush });
+  }
+}
+
+/**
  * Create the flush-pending subcommand — flush all sessions with pending changes.
  *
  * Iterates sessions that have pending markers or tool queues, re-parses their
@@ -337,62 +448,7 @@ export function createFlushPendingSubcommand(
         return;
       }
 
-      try {
-        recoverAllStaleInflightClaims();
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        ctx.ui.notify(`In-flight recovery failed: ${msg}`, "error");
-      }
-
-      // getPendingSessionIds is lock-free / best-effort: a session may disappear or be
-      // flushed concurrently. Per-session flush steps safely handle empty/no-work cases.
-      const allSessionIds = getPendingSessionIds();
-      if (allSessionIds.length === 0) {
-        ctx.ui.notify("No pending changes", "info");
-        return;
-      }
-
-      // Count sessions with pending markers and tool queues for accurate messaging.
-      const sessionsWithPending = allSessionIds.filter((id) => hasPendingFlag(id));
-      const sessionsWithToolQueue = allSessionIds.filter((id) => toolQueueExists(id));
-
-      const parts: string[] = [];
-      if (sessionsWithPending.length > 0) {
-        parts.push(`${sessionsWithPending.length} session(s) to re-parse and upsert`);
-      }
-      if (sessionsWithToolQueue.length > 0) {
-        parts.push(`${sessionsWithToolQueue.length} tool queue(s) to flush`);
-      }
-      const description = parts.join(" + ");
-
-      const answer = await ctx.ui.confirm(
-        "Flush pending sessions?",
-        `This will flush ${description}. Continue?`
-      );
-      if (!answer) {
-        ctx.ui.notify("Flush cancelled", "info");
-        return;
-      }
-
-      // Build session map via SessionManager.listAll(). This is expected to be reliable
-      // in normal pi operation, and pending session upserts require it to resolve IDs
-      // to session files; abort the flush if session discovery itself fails.
-      let sessionMap: Map<string, SessionInfo>;
-      try {
-        sessionMap = await buildSessionMap();
-      } catch (e) {
-        ctx.ui.notify(
-          `Failed to list sessions: ${e instanceof Error ? e.message : String(e)}`,
-          "error"
-        );
-        return;
-      }
-
-      ctx.ui.notify(`Flushing ${allSessionIds.length} session(s)...`, "info");
-
-      for (const sessionId of allSessionIds) {
-        await flushPendingSession(sessionId, sessionMap, config, client, ctx);
-      }
+      await flushAllPending(config, client, ctx, { confirm: true, notifyNoWork: true });
     },
   };
 }

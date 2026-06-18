@@ -82,7 +82,8 @@ export function createStatusSubcommand(
       lines.push("\n== Features ==");
       lines.push(`  Auto-recall: ${config.autoRecallEnabled ? "enabled" : "disabled"}`);
       lines.push(`  Auto-retain: ${config.autoRetainEnabled ? "enabled" : "disabled"}`);
-      lines.push(`  Flush on compact: ${config.flushOnCompact ? "enabled" : "disabled"}`);
+      lines.push(`  Auto-flush session on: ${config.autoFlushSessionOn.join(", ") || "(none)"}`);
+      lines.push(`  Auto-flush pending on: ${config.autoFlushPendingOn.join(", ") || "(none)"}`);
       lines.push(
         `  Require extra context: ${config.requireExtraContextBeforeFlush ? "enabled" : "disabled"}`
       );

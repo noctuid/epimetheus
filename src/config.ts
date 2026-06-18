@@ -108,7 +108,6 @@ export interface HindsightConfig {
   retainContent: RetainContent;
   strip: StripConfig;
   toolFilter: ToolFilter;
-  flushOnCompact: boolean;
   retainSessionsByDefault: boolean;
   /** When true, auto-flush events are blocked (warn instead) until extra context is set via /hindsight set-extra-context or the hindsight_set_extra_context tool. Default: false. */
   requireExtraContextBeforeFlush: boolean;
@@ -118,9 +117,25 @@ export interface HindsightConfig {
   observationScopes: ObservationScopes;
   statusHealthy: string;
   statusUnhealthy: string;
+  /** Auto-flush the current session when these lifecycle events occur. */
+  autoFlushSessionOn: Array<"switch" | "fork" | "reload" | "compact" | "quit" | "tree">;
+  /** Auto-flush pending work beyond the current active session when these events occur. Currently supports "quit" and "startup". */
+  autoFlushPendingOn: Array<"quit" | "startup">;
 }
 
 const VALID_MEMORY_TYPES = ["world", "experience", "observation"] as const;
+const VALID_AUTO_FLUSH_SESSION_EVENTS = [
+  "switch",
+  "fork",
+  "reload",
+  "compact",
+  "quit",
+  "tree",
+] as const;
+const VALID_AUTO_FLUSH_PENDING_EVENTS = ["quit", "startup"] as const;
+
+type AutoFlushSessionEvent = (typeof VALID_AUTO_FLUSH_SESSION_EVENTS)[number];
+type AutoFlushPendingEvent = (typeof VALID_AUTO_FLUSH_PENDING_EVENTS)[number];
 
 const DEFAULT_CONFIG: HindsightConfig = {
   enabled: true,
@@ -170,7 +185,8 @@ const DEFAULT_CONFIG: HindsightConfig = {
       ],
     },
   },
-  flushOnCompact: false,
+  autoFlushSessionOn: ["switch", "fork", "reload"],
+  autoFlushPendingOn: ["quit"],
   retainSessionsByDefault: true,
   requireExtraContextBeforeFlush: false,
   entities: [],
@@ -207,7 +223,6 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "retainContent",
   "strip",
   "toolFilter",
-  "flushOnCompact",
   "retainSessionsByDefault",
   "requireExtraContextBeforeFlush",
   "debug",
@@ -215,6 +230,8 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "observationScopes",
   "statusHealthy",
   "statusUnhealthy",
+  "autoFlushSessionOn",
+  "autoFlushPendingOn",
 ]);
 
 function parseBoolean(
@@ -318,6 +335,56 @@ function parseJsonArray(
       warning: `${fieldName} contains invalid JSON. Using default.`,
     };
   }
+}
+
+function parseEventList<T extends string>(
+  value: unknown,
+  defaultValue: readonly T[],
+  validEvents: readonly T[],
+  fieldName: string
+): { value: T[]; warning?: string } {
+  if (Array.isArray(value)) {
+    const invalid = value.filter(
+      (item) => typeof item !== "string" || !validEvents.includes(item as T)
+    );
+    if (invalid.length > 0) {
+      return {
+        value: [...defaultValue],
+        warning: `${fieldName} contains invalid values: ${invalid.map((v) => JSON.stringify(v)).join(", ")}. Valid: ${validEvents.join(", ")}. Using default.`,
+      };
+    }
+    return { value: [...new Set(value)] as T[] };
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (!Array.isArray(parsed)) {
+        return {
+          value: [...defaultValue],
+          warning: `${fieldName} must be a JSON array. Using default.`,
+        };
+      }
+      const invalid = parsed.filter(
+        (item: unknown) => typeof item !== "string" || !validEvents.includes(item as T)
+      );
+      if (invalid.length > 0) {
+        return {
+          value: [...defaultValue],
+          warning: `${fieldName} contains invalid values: ${invalid.map((v: unknown) => JSON.stringify(v)).join(", ")}. Valid: ${validEvents.join(", ")}. Using default.`,
+        };
+      }
+      return { value: [...new Set(parsed)] as T[] };
+    } catch {
+      return {
+        value: [...defaultValue],
+        warning: `${fieldName} contains invalid JSON. Using default.`,
+      };
+    }
+  }
+  return {
+    value: [...defaultValue],
+    warning: `${fieldName} must be an array. Using default.`,
+  };
 }
 
 function parseBudget(
@@ -517,7 +584,6 @@ function setConfigValue(
     case "autoRecallPersist":
     case "retainSessionsByDefault":
     case "requireExtraContextBeforeFlush":
-    case "flushOnCompact":
     case "debug": {
       if (typeof value === "boolean") {
         config[key] = value;
@@ -526,6 +592,26 @@ function setConfigValue(
       const result = parseBoolean(String(value), DEFAULT_CONFIG[key] as boolean);
       config[key] = result.value;
       return result.warning;
+    }
+    case "autoFlushSessionOn": {
+      const parsed = parseEventList<AutoFlushSessionEvent>(
+        value,
+        DEFAULT_CONFIG[key],
+        VALID_AUTO_FLUSH_SESSION_EVENTS as unknown as readonly AutoFlushSessionEvent[],
+        "autoFlushSessionOn"
+      );
+      config[key] = parsed.value;
+      return parsed.warning;
+    }
+    case "autoFlushPendingOn": {
+      const parsed = parseEventList<AutoFlushPendingEvent>(
+        value,
+        DEFAULT_CONFIG[key],
+        VALID_AUTO_FLUSH_PENDING_EVENTS as unknown as readonly AutoFlushPendingEvent[],
+        "autoFlushPendingOn"
+      );
+      config[key] = parsed.value;
+      return parsed.warning;
     }
     case "autoRecallBudget": {
       if (typeof value === "string") {
@@ -1113,7 +1199,6 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_AUTO_RECALL_TAGS_MATCH: "autoRecallTagsMatch",
     PI_HINDSIGHT_AUTO_RECALL_TAG_GROUPS: "autoRecallTagGroups",
     PI_HINDSIGHT_CONSTANT_TAGS: "constantTags",
-    PI_HINDSIGHT_FLUSH_ON_COMPACT: "flushOnCompact",
     PI_HINDSIGHT_RETAIN_SESSIONS_BY_DEFAULT: "retainSessionsByDefault",
     PI_HINDSIGHT_REQUIRE_EXTRA_CONTEXT_BEFORE_FLUSH: "requireExtraContextBeforeFlush",
     PI_HINDSIGHT_RETAIN_CONTENT: "retainContent",
@@ -1123,6 +1208,8 @@ export function loadConfig(extensionsDir?: string): {
     PI_HINDSIGHT_OBSERVATION_SCOPES: "observationScopes",
     PI_HINDSIGHT_STATUS_HEALTHY: "statusHealthy",
     PI_HINDSIGHT_STATUS_UNHEALTHY: "statusUnhealthy",
+    PI_HINDSIGHT_AUTO_FLUSH_SESSION_ON: "autoFlushSessionOn",
+    PI_HINDSIGHT_AUTO_FLUSH_PENDING_ON: "autoFlushPendingOn",
     PI_HINDSIGHT_DEBUG: "debug",
   };
 
@@ -1509,6 +1596,57 @@ export function validateConfig(config: HindsightConfig): {
     if (config.autoRecallTags !== null) {
       warnings.push(
         "Both autoRecallTags and autoRecallTagGroups are set. Both will be sent to the recall API — tags/tagsMatch and tag_groups are combined. Consider using only autoRecallTagGroups if you want all tag logic in one place."
+      );
+    }
+  }
+
+  // Validate autoFlushSessionOn / autoFlushPendingOn
+  {
+    const validateEventList = <T extends string>(
+      fieldName: keyof HindsightConfig,
+      value: T[],
+      validEvents: readonly T[],
+      defaultValue: readonly T[]
+    ): void => {
+      if (!Array.isArray(value)) {
+        warnings.push(
+          `${fieldName} must be an array. Using default: ${JSON.stringify(defaultValue)}.`
+        );
+        (config as unknown as Record<string, T[]>)[fieldName] = [...defaultValue];
+        return;
+      }
+      const invalid = value.filter((item) => !validEvents.includes(item));
+      if (invalid.length > 0) {
+        warnings.push(
+          `${fieldName} contains invalid values: ${invalid.join(", ")}. Valid: ${validEvents.join(", ")}. Using default: ${JSON.stringify(defaultValue)}.`
+        );
+        (config as unknown as Record<string, T[]>)[fieldName] = [...defaultValue];
+      } else {
+        const unique = new Set(value);
+        if (unique.size !== value.length) {
+          (config as unknown as Record<string, T[]>)[fieldName] = [...unique] as T[];
+          warnings.push(`${fieldName} contains duplicate values. Using deduplicated value.`);
+        }
+      }
+    };
+    validateEventList(
+      "autoFlushSessionOn",
+      config.autoFlushSessionOn,
+      VALID_AUTO_FLUSH_SESSION_EVENTS as unknown as AutoFlushSessionEvent[],
+      DEFAULT_CONFIG.autoFlushSessionOn
+    );
+    validateEventList(
+      "autoFlushPendingOn",
+      config.autoFlushPendingOn,
+      VALID_AUTO_FLUSH_PENDING_EVENTS as unknown as AutoFlushPendingEvent[],
+      DEFAULT_CONFIG.autoFlushPendingOn
+    );
+
+    // Overlap: "quit" may appear in both. Pending flush takes precedence to
+    // avoid double-flushing; the active-session quit flush is skipped.
+    if (config.autoFlushSessionOn.includes("quit") && config.autoFlushPendingOn.includes("quit")) {
+      warnings.push(
+        '"quit" is present in both autoFlushSessionOn and autoFlushPendingOn; the pending flush takes precedence and the active-session quit flush is skipped to avoid duplicate work.'
       );
     }
   }

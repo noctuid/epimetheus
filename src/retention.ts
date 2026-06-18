@@ -226,7 +226,12 @@ export async function flushCurrentSession(
   client: HindsightClientWrapper,
   ctx: ExtensionContext,
   signal?: AbortSignal,
-  options?: { notifyNoWork?: boolean; autoFlush?: boolean }
+  options?: {
+    notifyNoWork?: boolean;
+    autoFlush?: boolean;
+    surfaceBlocks?: boolean;
+    notifySuccess?: boolean;
+  }
 ): Promise<void> {
   try {
     recoverStaleInflightClaims(sessionId);
@@ -242,6 +247,8 @@ export async function flushCurrentSession(
       await parseAndUpsertSession(sessionPath, sessionId, config, client, ctx, signal, {
         requirePending: true,
         autoFlush: options?.autoFlush,
+        surfaceBlocks: options?.surfaceBlocks,
+        notifySuccess: options?.notifySuccess,
       });
       sessionHadPendingWork = true;
     } else {
@@ -254,11 +261,11 @@ export async function flushCurrentSession(
   }
 
   const toolResult = await flushToolQueue(sessionId, client, ctx, signal, {
-    notifySuccess: !options?.autoFlush || config.debug,
+    notifySuccess: options?.notifySuccess ?? (!options?.autoFlush || config.debug),
   });
   const toolDidWork = toolResult.count > 0 || !toolResult.success;
 
-  const shouldNotifyNoWork = options?.notifyNoWork || (!!options?.autoFlush && config.debug);
+  const shouldNotifyNoWork = options?.notifyNoWork ?? (!!options?.autoFlush && config.debug);
   if (!sessionHadPendingWork && !toolDidWork && shouldNotifyNoWork) {
     ctx.ui.notify("No pending changes", "info");
   }
@@ -536,14 +543,22 @@ export async function parseAndUpsertSession(
   client: HindsightClientWrapper,
   ctx: ExtensionContext,
   signal?: AbortSignal,
-  options?: { requirePending?: boolean; autoFlush?: boolean }
+  options?: {
+    requirePending?: boolean;
+    autoFlush?: boolean;
+    surfaceBlocks?: boolean;
+    notifySuccess?: boolean;
+  }
 ): Promise<void> {
   // Fast-path blocking checks using live state
   const preCheck = preFlushCheck(sessionId, config);
   if (preCheck.blocked) {
     // Side effects (pending marker cleanup) always run.
-    // UI notification is suppressed for auto-flushes unless debug mode is on.
-    const notify = !options?.autoFlush || config.debug;
+    // UI notification is suppressed for auto-flushes unless debug mode is on —
+    // but `surfaceBlocks` (the active-session /quit console-echo path)
+    // forces block/failure notifications through so the user can see why the
+    // flush was blocked.
+    const notify = Boolean(!options?.autoFlush || config.debug || options?.surfaceBlocks);
     handlePreFlushBlocked(
       sessionId,
       preCheck.liveState?.retained ?? true,
@@ -599,8 +614,10 @@ export async function parseAndUpsertSession(
       updateLiveStateFromParsed(sessionId, false, parsedExtraContext, liveState);
       if (claim) completeClaim(claim);
       // In auto-flush mode, block notifications are transient and not useful.
-      // Only show them for manual flushes or in debug mode.
-      if (!options?.autoFlush || debug) {
+      // Only show them for manual flushes or in debug mode — unless
+      // `surfaceBlocks` (the active-session /quit console-echo path)
+      // asks for them.
+      if (!options?.autoFlush || debug || options?.surfaceBlocks) {
         ctx.ui.notify("Session does not allow retention", "warning");
       }
       return;
@@ -615,8 +632,10 @@ export async function parseAndUpsertSession(
       updateLiveStateFromParsed(sessionId, true, parsedExtraContext, liveState);
       if (claim) restoreClaim(claim);
       // In auto-flush mode, block notifications are transient and not useful.
-      // Only show them for manual flushes or in debug mode.
-      if (!options?.autoFlush || debug) {
+      // Only show them for manual flushes or in debug mode — unless
+      // `surfaceBlocks` (the active-session /quit console-echo path)
+      // asks for them.
+      if (!options?.autoFlush || debug || options?.surfaceBlocks) {
         ctx.ui.notify(FLUSH_BLOCKED_NO_EXTRA_CONTEXT, "warning");
       }
       return;
@@ -638,11 +657,19 @@ export async function parseAndUpsertSession(
     if (messages.length === 0) {
       if (warning) {
         if (claim) restoreClaim(claim);
-        ctx.ui.notify(warning, "warning");
+        // In auto-flush mode, routine parse warnings are transient and not useful.
+        // Only show them for manual flushes or in debug mode.
+        if (!options?.autoFlush || debug) {
+          ctx.ui.notify(warning, "warning");
+        }
         return;
       }
       if (claim) completeClaim(claim);
-      ctx.ui.notify("No messages to parse", "info");
+      // In auto-flush mode, this no-work info is transient and not useful.
+      // Only show it for manual flushes or in debug mode.
+      if (!options?.autoFlush || debug) {
+        ctx.ui.notify("No messages to parse", "info");
+      }
       return;
     }
 
@@ -695,7 +722,7 @@ export async function parseAndUpsertSession(
 
     claim = null;
 
-    if (!options?.autoFlush || debug) {
+    if (options?.notifySuccess ?? (!options?.autoFlush || debug)) {
       ctx.ui.notify(`Parsed and upserted ${formattedStrs.length} messages`, "info");
     }
   } catch (e) {

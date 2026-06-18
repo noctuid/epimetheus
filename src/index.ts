@@ -10,6 +10,7 @@ import { Box, type Component, Text } from "@earendil-works/pi-tui";
 import type { RecallResponse } from "@vectorize-io/hindsight-client";
 import { HindsightClientWrapper } from "./client";
 import { registerCommands } from "./commands";
+import { flushAllPending } from "./commands/session";
 import {
   expandAutoRecallTagGroups,
   expandAutoRecallTags,
@@ -145,7 +146,7 @@ export default function (pi: ExtensionAPI) {
   // Validation warnings (e.g. autoRecallDisplay with autoRecallPersist) are cosmetic
   // and should not override a successful connectivity check.
   const hasUsableConfig = validation.valid;
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     // Auto-create session metadata if none exists, using retainSessionsByDefault
     // as the default retained state. This ensures every session has explicit
     // metadata, so toggle-retain and other commands work predictably.
@@ -180,6 +181,13 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus("pi-hindsight", config.statusHealthy);
     } else {
       ctx.ui.setStatus("pi-hindsight", config.statusUnhealthy);
+    }
+
+    // On startup, optionally flush pending work across all sessions. Runs after
+    // the client is ready and avoids noisy no-work output (no "No pending changes"
+    // unless the flush-pending command path).
+    if (event.reason === "startup" && config.autoFlushPendingOn.includes("startup") && client) {
+      await flushAllPending(config, client, ctx, { notifyNoWork: false, autoFlush: true });
     }
   });
 
@@ -354,40 +362,190 @@ export default function (pi: ExtensionAPI) {
     });
   };
 
-  // Flush queues and reset recall cache on session switch
+  /**
+   * Return an {@link ExtensionContext} whose `ui.notify` calls for `warning`
+   * and `error` levels are also echoed to the console (via `console.warn` /
+   * `console.error`). Used for `session_shutdown` with `reason: "quit"`, where
+   * pi stops the TUI before running shutdown handlers — so `ctx.ui.notify`
+   * warnings (extra-context guard, retention disabled, parse warnings, upsert/
+   * queue failures) are no longer visible. `info`-level notifications are not
+   * echoed, so quit stays quiet for success/no-work unless `debug: true` already
+   * surfaces them through the normal notify path.
+   *
+   * All other `ctx`/`ui` members pass through unchanged. Uses a Proxy, not a
+   * clone, so prototype-backed members on the real ExtensionContext are kept.
+   */
+  const withWarningErrorConsoleEcho = (ctx: ExtensionContext): ExtensionContext => {
+    const echoUi = new Proxy(ctx.ui as object, {
+      get(target, prop, receiver) {
+        if (prop === "notify") {
+          const notify = Reflect.get(target, "notify", target) as (
+            message: string,
+            level?: "info" | "warning" | "error"
+          ) => void;
+          return (message: string, level?: "info" | "warning" | "error") => {
+            notify(message, level);
+            if (level === "warning") {
+              console.warn(`pi-hindsight: ${message}`);
+            } else if (level === "error") {
+              console.error(`pi-hindsight: ${message}`);
+            }
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    return new Proxy(ctx as object, {
+      get(target, prop, receiver) {
+        if (prop === "ui") {
+          return echoUi;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as ExtensionContext;
+  };
+
+  /**
+   * Return a wrapped {@link ExtensionContext} plus a `replay()` function. The
+   * wrapped ctx buffers `ui.notify` calls instead of emitting them immediately.
+   * Used for `session_compact`, where synchronous `ctx.ui.notify` feedback can
+   * be swallowed by the compact transition — calling `replay()` on the next
+   * tick (once the TUI has settled) re-emits the buffered notifications through
+   * the real `ctx.ui.notify`.
+   *
+   * Only `notify` is intercepted; every other `ui`/`ctx` member passes through
+   * unchanged (Proxy-based, so prototype-backed members are preserved). The
+   * flush itself still runs synchronously and performs its real work (upsert /
+   * queue drain) — only the notifications are deferred.
+   */
+  const withNotifyCapture = (
+    ctx: ExtensionContext
+  ): { ctx: ExtensionContext; replay: () => void } => {
+    const captured: Array<{ message: string; level?: "info" | "warning" | "error" }> = [];
+    const captureUi = new Proxy(ctx.ui as object, {
+      get(target, prop, receiver) {
+        if (prop === "notify") {
+          return (message: string, level?: "info" | "warning" | "error") => {
+            captured.push({ message, level });
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const captureCtx = new Proxy(ctx as object, {
+      get(target, prop, receiver) {
+        if (prop === "ui") {
+          return captureUi;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as ExtensionContext;
+    return {
+      ctx: captureCtx,
+      replay: () => {
+        for (const { message, level } of captured) {
+          ctx.ui.notify(message, level);
+        }
+      },
+    };
+  };
+
+  // Flush queues and reset recall cache on session switch (/new, /resume)
   pi.on("session_before_switch", async (_event, ctx: ExtensionContext) => {
     lastRecallMessage = null;
     lastRecallDetails = null;
-    await autoFlush(ctx);
-  });
-
-  // Flush queues and reset recall cache before forking
-  pi.on("session_before_fork", async (_event, ctx: ExtensionContext) => {
-    lastRecallMessage = null;
-    lastRecallDetails = null;
-    await autoFlush(ctx);
-  });
-
-  // Flush queues before compaction (if enabled)
-  pi.on("session_before_compact", async (_event, ctx: ExtensionContext) => {
-    if (config.flushOnCompact) {
+    if (config.autoFlushSessionOn.includes("switch")) {
       await autoFlush(ctx);
     }
   });
 
-  // Flush queues on session shutdown (quit/reload only)
-  // For new/resume/fork, session_before_switch or session_before_fork already flushed
-  // quit: manual-like flush, show block/success/no-work notifications regardless of debug
-  // reload: automatic flush; notifications are suppressed unless debug: true
-  pi.on("session_shutdown", async (event, ctx: ExtensionContext) => {
-    if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") return;
-    if (!client) return;
+  // Flush queues and reset recall cache before forking (/fork, /clone)
+  pi.on("session_before_fork", async (_event, ctx: ExtensionContext) => {
+    lastRecallMessage = null;
+    lastRecallDetails = null;
+    if (config.autoFlushSessionOn.includes("fork")) {
+      await autoFlush(ctx);
+    }
+  });
+
+  // Flush queues and reset recall cache before navigating in the session tree
+  // (/navigate-tree). Like switch/fork, the active session is about to change,
+  // so pending work is flushed first. Off by default; enabled via
+  // autoFlushSessionOn including "tree". Uses auto-flush semantics: routine
+  // block/not-retained warnings and success/no-work are suppressed unless
+  // debug; true errors still surface.
+  pi.on("session_before_tree", async (_event, ctx: ExtensionContext) => {
+    lastRecallMessage = null;
+    lastRecallDetails = null;
+    if (config.autoFlushSessionOn.includes("tree")) {
+      await autoFlush(ctx);
+    }
+  });
+
+  // Flush queues after compaction. The compact transition can swallow
+  // synchronous `ctx.ui.notify` feedback, so notifications emitted during the
+  // flush are captured and replayed via the real `ctx.ui.notify` on the next
+  // tick, once the TUI has settled. Compact uses auto-flush notification
+  // semantics: success, no-work, and block/not-retained warnings are suppressed
+  // unless `debug: true` (compaction is not a final-chance event like `/quit`).
+  pi.on("session_compact", async (_event, ctx: ExtensionContext) => {
+    if (!config.autoFlushSessionOn.includes("compact") || !client) return;
     const sessionId = ctx.sessionManager.getSessionId();
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (!sessionId || !sessionPath) return;
-    await flushCurrentSession(sessionId, sessionPath, config, client, ctx, ctx.signal, {
-      autoFlush: event.reason === "reload",
+    const { ctx: captureCtx, replay } = withNotifyCapture(ctx);
+    await flushCurrentSession(sessionId, sessionPath, config, client, captureCtx, ctx.signal, {
+      autoFlush: true,
     });
+    // Replay captured notifications after the handler unwinds so they reach a
+    // settled TUI instead of being swallowed mid-compact.
+    setTimeout(replay, 0);
+  });
+
+  // Flush queues on session shutdown (reload/quit only).
+  // For new/resume/fork, session_before_switch or session_before_fork already flushed.
+  //
+  // reload: auto-flush the current active session (notifications suppressed unless debug).
+  // quit: two configurable modes —
+  //   - `autoFlushPendingOn` includes "quit" (default): run the flush-pending flow
+  //     across all sessions. pi stops the TUI before shutdown handlers, so warning/error
+  //     notifications are mirrored to the console so blocking/failure feedback is visible.
+  //   - else if `autoFlushSessionOn` includes "quit": flush only the current active
+  //     session with console-mirrored warnings/errors.
+  //   If "quit" is in both, pending takes precedence and the active-session flush is
+  //     skipped to avoid duplicate work (see config validation warning).
+  pi.on("session_shutdown", async (event, ctx: ExtensionContext) => {
+    if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") return;
+    if (!client) return;
+    if (event.reason === "reload") {
+      if (!config.autoFlushSessionOn.includes("reload")) return;
+      const sessionId = ctx.sessionManager.getSessionId();
+      const sessionPath = ctx.sessionManager.getSessionFile();
+      if (!sessionId || !sessionPath) return;
+      await flushCurrentSession(sessionId, sessionPath, config, client, ctx, ctx.signal, {
+        autoFlush: true,
+      });
+      return;
+    }
+    if (event.reason === "quit") {
+      if (config.autoFlushPendingOn.includes("quit")) {
+        await flushAllPending(config, client, ctx, {
+          notifyNoWork: false,
+          ctxWrapper: withWarningErrorConsoleEcho,
+        });
+        return;
+      }
+      if (config.autoFlushSessionOn.includes("quit")) {
+        const sessionId = ctx.sessionManager.getSessionId();
+        const sessionPath = ctx.sessionManager.getSessionFile();
+        if (!sessionId || !sessionPath) return;
+        const flushCtx = withWarningErrorConsoleEcho(ctx);
+        await flushCurrentSession(sessionId, sessionPath, config, client, flushCtx, ctx.signal, {
+          autoFlush: false,
+          surfaceBlocks: true,
+        });
+      }
+    }
   });
 
   /**
