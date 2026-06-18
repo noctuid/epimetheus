@@ -3,7 +3,7 @@
  *
  * A small operational state file used for fast pre-checks during normal flush.
  * This is separate from parsed-session artifacts (.meta.json), which are
- * review/export snapshots used by /hindsight upsert-all-parsed.
+ * review/export snapshots used by /hindsight parse-session and review.
  *
  * File layout:
  *   session-state/<session-id>.json

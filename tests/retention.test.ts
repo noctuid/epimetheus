@@ -22,7 +22,7 @@ import {
   queueToolRetain,
 } from "../src/retention";
 import {
-  cleanupSessionCache,
+  cleanupParsedArtifacts,
   createMockClient,
   HINDSIGHT_ENV_KEYS,
   makeNotifyCtx,
@@ -509,7 +509,7 @@ describe("parseAndUpsertSession claim lifecycle", () => {
       } finally {
         removePendingFlag(sessionId);
         clearSessionQueueState(sessionId);
-        cleanupSessionCache(sessionId);
+        cleanupParsedArtifacts(sessionId);
       }
     });
   });
@@ -548,7 +548,7 @@ describe("parseAndUpsertSession claim lifecycle", () => {
       } finally {
         removePendingFlag(sessionId);
         clearSessionQueueState(sessionId);
-        cleanupSessionCache(sessionId);
+        cleanupParsedArtifacts(sessionId);
       }
     });
   });
@@ -594,7 +594,7 @@ describe("parseAndUpsertSession claim lifecycle", () => {
       } finally {
         removePendingFlag(sessionId);
         clearSessionQueueState(sessionId);
-        cleanupSessionCache(sessionId);
+        cleanupParsedArtifacts(sessionId);
       }
     });
   });
@@ -788,13 +788,13 @@ describe("concurrent new work during flush", () => {
 
         // The new pending marker (touched during retain) should remain
         expect(hasPendingFlag(sessionId)).toBe(true);
-        // Cache should have been written for the completed flush
+        // Parsed artifacts should have been written for the completed flush
         const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages.some((m: string) => m.includes("Parsed and upserted"))).toBe(true);
       } finally {
         removePendingFlag(sessionId);
-        cleanupSessionCache(sessionId);
+        cleanupParsedArtifacts(sessionId);
       }
     });
   });
@@ -877,12 +877,16 @@ describe("concurrent new work during flush", () => {
 });
 
 describe("always-reparse flush", () => {
-  it("re-parses session file even when cache exists with stale messages", async () => {
-    const sessionId = `${TEST_SESSION_ID}-stale-cache`;
+  it("re-parses session file even when parsed artifacts exist with stale messages", async () => {
+    const sessionId = `${TEST_SESSION_ID}-stale-artifact`;
     const { withTempDir, writeSessionFile } = await import("./fixtures");
-    const { cacheExists, writeMessagesJsonl, getMessagesPath, ensureParsedSessionDir } =
-      await import("../src/parsed-store");
-    const { readFileSync } = await import("node:fs");
+    const { writeMessagesJsonl, getMessagesPath, ensureParsedSessionDir } = await import(
+      "../src/parsed-store"
+    );
+    const { readFileSync, existsSync } = await import("node:fs");
+    const { getMetaPath } = await import("../src/parsed-store");
+    const parsedArtifactsExist = (id: string) =>
+      existsSync(getMessagesPath(id)) && existsSync(getMetaPath(id));
 
     try {
       await touchPendingFlag(sessionId);
@@ -893,30 +897,29 @@ describe("always-reparse flush", () => {
         });
         const ctx = makeNotifyCtx();
 
-        // First flush: creates cache from session file
+        // First flush: creates parsed artifacts from the session file
         const mockClient1 = createMockClient();
         await parseAndUpsertSession(sessionPath, sessionId, sharedTestConfig, mockClient1, ctx);
         const notifyCalls1 = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         expect(
           notifyCalls1.some((c: unknown[]) => String(c[0]).includes("Parsed and upserted"))
         ).toBe(true);
-        expect(cacheExists(sessionId)).toBe(true);
-
-        // Overwrite .messages.jsonl with stale content to simulate a cache
+        expect(parsedArtifactsExist(sessionId)).toBe(true);
+        // Overwrite .messages.jsonl with stale content to simulate an artifact
         // that doesn't match the session file
         ensureParsedSessionDir();
         writeMessagesJsonl(sessionId, [
-          JSON.stringify({ role: "user", content: "stale cached message" }),
+          JSON.stringify({ role: "user", content: "stale artifact message" }),
         ]);
 
-        // Verify stale cache is on disk
+        // Verify the stale artifact is on disk
         const staleContent = readFileSync(getMessagesPath(sessionId), "utf-8");
-        expect(staleContent).toContain("stale cached message");
+        expect(staleContent).toContain("stale artifact message");
 
         // Create new pending marker
         await touchPendingFlag(sessionId);
 
-        // Second flush: should re-parse session file, not use stale cache
+        // Second flush: should re-parse the session file, not reuse the stale artifact
         let capturedContent: string | undefined;
         const mockClient2 = {
           retain: async (opts: { content: string }) => {
@@ -928,18 +931,18 @@ describe("always-reparse flush", () => {
 
         await parseAndUpsertSession(sessionPath, sessionId, sharedTestConfig, mockClient2, ctx);
 
-        // Should have parsed the session file, not used the stale cache
+        // Should have parsed the session file, not reused the stale artifact
         const notifyCalls2 = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         expect(
           notifyCalls2.some((c: unknown[]) => String(c[0]).includes("Parsed and upserted"))
         ).toBe(true);
         expect(capturedContent).toContain("original message");
-        expect(capturedContent).not.toContain("stale cached message");
+        expect(capturedContent).not.toContain("stale artifact message");
       });
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -981,14 +984,17 @@ describe("always-reparse flush", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
   it("derives metadata from session entries when .meta.json is missing", async () => {
     const sessionId = `${TEST_SESSION_ID}-meta-fallback`;
     const { withTempDir, writeSessionFile } = await import("./fixtures");
-    const { cacheExists } = await import("../src/parsed-store");
+    const { getMessagesPath, getMetaPath } = await import("../src/parsed-store");
+    const { existsSync } = await import("node:fs");
+    const parsedArtifactsExist = (id: string) =>
+      existsSync(getMessagesPath(id)) && existsSync(getMetaPath(id));
 
     try {
       await touchPendingFlag(sessionId);
@@ -998,7 +1004,7 @@ describe("always-reparse flush", () => {
         const ctx = makeNotifyCtx();
 
         // No .meta.json exists
-        expect(cacheExists(sessionId)).toBe(false);
+        expect(parsedArtifactsExist(sessionId)).toBe(false);
 
         const mockClient = createMockClient();
         await parseAndUpsertSession(sessionPath, sessionId, sharedTestConfig, mockClient, ctx);
@@ -1007,21 +1013,21 @@ describe("always-reparse flush", () => {
         const notifyCalls = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls;
         const messages = notifyCalls.map((c: unknown[]) => String(c[0]));
         expect(messages.some((m: string) => m.includes("Parsed and upserted"))).toBe(true);
-        // Cache should now exist (written after successful parse/upsert)
-        expect(cacheExists(sessionId)).toBe(true);
+        // Parsed artifacts should now exist (written after successful parse/upsert)
+        expect(parsedArtifactsExist(sessionId)).toBe(true);
       });
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
   it("always writes .meta.json after successful parse/upsert", async () => {
     const sessionId = `${TEST_SESSION_ID}-meta-write`;
     const { withTempDir, writeSessionFile } = await import("./fixtures");
-    const { cacheExists, getMessagesPath, getMetaPath } = await import("../src/parsed-store");
-    const { readFileSync } = await import("node:fs");
+    const { getMessagesPath, getMetaPath } = await import("../src/parsed-store");
+    const { readFileSync, existsSync } = await import("node:fs");
 
     try {
       await touchPendingFlag(sessionId);
@@ -1033,7 +1039,9 @@ describe("always-reparse flush", () => {
         const mockClient = createMockClient();
         await parseAndUpsertSession(sessionPath, sessionId, sharedTestConfig, mockClient, ctx);
 
-        expect(cacheExists(sessionId)).toBe(true);
+        expect(existsSync(getMessagesPath(sessionId)) && existsSync(getMetaPath(sessionId))).toBe(
+          true
+        );
         // Verify .messages.jsonl is a review artifact (not empty)
         const messagesContent = readFileSync(getMessagesPath(sessionId), "utf-8");
         expect(messagesContent.length).toBeGreaterThan(0);
@@ -1046,7 +1054,7 @@ describe("always-reparse flush", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });
@@ -1092,7 +1100,7 @@ describe("flush rebuilds config-derived metadata", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });
@@ -1159,7 +1167,7 @@ describe("meta.json as primary metadata source", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1179,11 +1187,11 @@ describe("meta.json as primary metadata source", () => {
         const ctx = makeNotifyCtx();
 
         // Pre-create .meta.json with a sessionName — but context should
-        // be derived from the parsed session file, not from stale cached data
+        // be derived from the parsed session file, not from the stale artifact
         ensureDir();
         writeMetaFile(sessionId, {
           sessionId: sessionId,
-          sessionName: "stale cached name",
+          sessionName: "stale artifact name",
           sessionCwd: "/test",
           sessionTimestamp: new Date().toISOString(),
           messageCount: 1,
@@ -1206,12 +1214,12 @@ describe("meta.json as primary metadata source", () => {
         // Context should be derived from parsed session + config prefix
         // The session file's first user message is "test", so context is "pi: test"
         expect(capturedContext).toBe("pi: test");
-        expect(capturedContext).not.toBe("stale cached name");
+        expect(capturedContext).not.toBe("stale artifact name");
       });
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1265,7 +1273,7 @@ describe("meta.json as primary metadata source", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1337,7 +1345,7 @@ describe("meta.json as primary metadata source", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1379,7 +1387,7 @@ describe("meta.json as primary metadata source", () => {
         const metaContent = readFileSync(getMetaPath(sessionId), "utf-8");
         const writtenMeta = JSON.parse(metaContent);
 
-        // sessionName should be derived from parsed session (not from stale cache)
+        // sessionName should be derived from the parsed session (not from the stale artifact)
         expect(writtenMeta.sessionName).toBeDefined();
         // sessionUserTags comes from parsed session entries (no hindsight-meta tags in session file)
         expect(writtenMeta.sessionUserTags).toEqual([]);
@@ -1402,7 +1410,7 @@ describe("meta.json as primary metadata source", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1484,7 +1492,7 @@ describe("meta.json as primary metadata source", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });
@@ -1554,7 +1562,7 @@ describe("extra context updates live state", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1592,7 +1600,7 @@ describe("extra context updates live state", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });
@@ -1633,7 +1641,7 @@ describe("live state written on parsed block conditions", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1690,7 +1698,7 @@ describe("live state written on parsed block conditions", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1730,7 +1738,7 @@ describe("live state written on parsed block conditions", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });
@@ -1784,7 +1792,7 @@ describe("structural tags from session header", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1843,7 +1851,7 @@ describe("structural tags from session header", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1893,7 +1901,7 @@ describe("structural tags from session header", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1943,7 +1951,7 @@ describe("structural tags from session header", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -1994,7 +2002,7 @@ describe("structural tags from session header", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2047,7 +2055,7 @@ describe("structural tags from session header", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2103,7 +2111,7 @@ describe("structural tags from session header", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });
@@ -2153,7 +2161,7 @@ describe("retention-disabled fast block clears pending markers", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2205,7 +2213,7 @@ describe("retention-disabled fast block clears pending markers", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });
@@ -2239,7 +2247,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2271,7 +2279,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2302,7 +2310,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2324,7 +2332,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2349,7 +2357,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2381,7 +2389,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2411,7 +2419,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2445,7 +2453,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2476,7 +2484,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2507,7 +2515,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2538,7 +2546,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2571,7 +2579,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2599,7 +2607,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2639,7 +2647,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 
@@ -2674,7 +2682,7 @@ describe("flushCurrentSession", () => {
     } finally {
       removePendingFlag(sessionId);
       clearSessionQueueState(sessionId);
-      cleanupSessionCache(sessionId);
+      cleanupParsedArtifacts(sessionId);
     }
   });
 });

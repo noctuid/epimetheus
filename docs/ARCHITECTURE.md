@@ -10,7 +10,7 @@ The ingestion system is designed around these constraints:
 - **Idempotent retries**: crash recovery and repeated flushes should converge on the same Hindsight documents instead of duplicating content.
 - **Portable filesystem coordination**: queue coordination should avoid OS-specific locks and avoid third-party lockfile libraries.
 - **Authoritative session files**: Pi session JSONL files remain the source of truth for conversation content and session metadata.
-- **Fast common checks**: live session state may be used for guard checks, and cached parsed-session metadata may be used for bulk upserts, but caches are derived data.
+- **Fast common checks**: live session state may be used for guard checks; parsed-session artifacts are derived data used for review/export, not as a flush authority.
 
 The design aims to handle unlikely edge cases (process crashes, concurrent flushers, partial writes) correctly without being completely overkill. Some tradeoffs accept rare duplicate work over complex coordination — for example, two flushers may both upsert the same session, but no work is ever silently lost.
 
@@ -22,7 +22,7 @@ pi-hindsight ingests two kinds of data.
 
 Normal conversation content is stored in Pi session JSONL files. pi-hindsight does not persist a second copy of every message in its queue. Instead, it records small pending markers saying that a session should be reparsed.
 
-On every session flush, pi-hindsight reparses the Pi session JSONL file for conversation messages and structural identity, then upserts with a stable session document ID. The on-disk `.messages.jsonl` file is not a normal flush cache; it is a review/export artifact used by `/hindsight upsert-all-parsed`.
+On every session flush, pi-hindsight reparses the Pi session JSONL file for conversation messages and structural identity, then upserts with a stable session document ID. The on-disk `.messages.jsonl` file is not a normal flush cache; it is a review/export artifact written by `/hindsight parse-session` and normal flushes.
 
 ### Explicit tool retains
 
@@ -233,9 +233,9 @@ Parsed metadata is stored in:
 parsed-sessions/<session-id>.meta.json
 ```
 
-`.messages.jsonl` is for user review/export and `/hindsight upsert-all-parsed`. Normal session flushes must not treat `.messages.jsonl` as a content cache. They must reparse the Pi session JSONL file for conversation messages, then rewrite `.messages.jsonl` after a successful parse/upsert. `/hindsight upsert-all-parsed` is the exception: it intentionally ingests the already-parsed review/export artifact.
+`.messages.jsonl` is for user review/export. Normal session flushes must not read `.messages.jsonl` as the conversation source; they must reparse the Pi session JSONL file for conversation messages, then rewrite `.messages.jsonl` after a successful parse/upsert.
 
-`.meta.json` is a parsed artifact manifest for `/hindsight upsert-all-parsed` and human review. It stores the raw parsed inputs needed to replay an upsert without reparsing the original session file. Metadata mutations such as `session_start`, `/hindsight toggle-retain`, tags, or extra-context updates do not patch `.meta.json`; the artifact may remain stale until the next parse/flush rewrites it together with `.messages.jsonl`.
+`.meta.json` is a parsed artifact manifest written alongside `.messages.jsonl` for human review/export and debugging. It snapshots the parsed inputs (session name, extra context, user tags, parent, cwd, timestamp, retention) but is not an upsert authority and is not used to replay upserts. Metadata mutations such as `session_start`, `/hindsight toggle-retain`, tags, or extra-context updates do not patch `.meta.json`; the artifact may remain stale until the next parse/flush rewrites it together with `.messages.jsonl`.
 
 It stores:
 
@@ -261,7 +261,7 @@ It should not store a baked full Hindsight `context` string. Context is derived 
 buildContextFromSessionName(config.hindsightContextPrefix, sessionName, extraContext ?? undefined)
 ```
 
-This means config prefix changes are reflected by both normal flushes and `/hindsight upsert-all-parsed`. For normal flushes, `sessionName` comes from the freshly parsed session file. For `/hindsight upsert-all-parsed`, `sessionName` comes from the last parsed artifact snapshot.
+This means config prefix changes are reflected by normal flushes. For normal flushes, `sessionName` comes from the freshly parsed session file.
 
 ### Metadata derived at upsert time
 
@@ -274,7 +274,7 @@ Config/env-derived ingestion metadata is rebuilt whenever an upsert happens inst
 - observation scopes from current config, with placeholders expanded using the session ID, parent session ID, session cwd, basedir, and project name;
 - entities from current config.
 
-Normal flush gets session-specific metadata from the freshly parsed session file, with the live state used only for fast guard checks. `/hindsight upsert-all-parsed` uses `.meta.json` and `.messages.jsonl` because it does not reparse session files. Tool queue entries are different: they are self-contained and snapshot the tags, observation scopes, document ID, and session context needed to flush later.
+Normal flush gets session-specific metadata from the freshly parsed session file, with the live state used only for fast guard checks. Tool queue entries are different: they are self-contained and snapshot the tags, observation scopes, document ID, and session context needed to flush later.
 
 ### Incremental parsed session building
 
@@ -303,7 +303,6 @@ Concurrent parsed-session file writes are treated as last-writer-wins. This is a
 - `.messages.jsonl` is a review/export artifact, not a normal flush cache.
 - Live session state is used only for fast guard checks; if it is missing or invalid, normal flush falls back to parsing the session file.
 - `.meta.json` is a parsed artifact manifest for review, not normal-flush live state.
-- `/hindsight upsert-all-parsed` uses parsed-session files as authority because it does not reparse session files.
 - Config/env-derived metadata is rebuilt at upsert time.
 - Sessions whose loaded metadata has retention disabled must not be ingested.
 - When `requireExtraContextBeforeFlush` is enabled, sessions without explicitly set extra context must not be ingested.

@@ -16,7 +16,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as realConfig from "../src/config";
 
 import {
-  cleanupSessionCache,
+  cleanupParsedArtifacts,
   createMockContext,
   createMockPi,
   HINDSIGHT_ENV_KEYS,
@@ -109,8 +109,8 @@ afterEach(async () => {
   removePendingFlag(BOOTSTRAP_SESSION);
   clearSessionQueueState(BOOTSTRAP_SESSION);
 
-  // Clean up parsed session cache to prevent stale cache from blocking flushes
-  cleanupSessionCache(BOOTSTRAP_SESSION);
+  // Clean up parsed-session artifacts to prevent stale artifacts from blocking flushes
+  cleanupParsedArtifacts(BOOTSTRAP_SESSION);
 
   // Reset module-level mutable state (autoRecallDisplayOverride, lastRecallMessage)
   // to prevent test order dependencies — toggle-display tests mutate this state
@@ -1176,7 +1176,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1208,7 +1208,7 @@ describe("real entrypoint bootstrap", () => {
       console.error = originalError;
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1233,7 +1233,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1265,7 +1265,7 @@ describe("real entrypoint bootstrap", () => {
       console.warn = originalWarn;
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1291,7 +1291,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
 
     const originalWarn = console.warn;
@@ -1316,7 +1316,7 @@ describe("real entrypoint bootstrap", () => {
       console.error = originalError;
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1338,7 +1338,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
 
     try {
@@ -1350,7 +1350,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1427,7 +1427,7 @@ describe("real entrypoint bootstrap", () => {
     removePendingFlag(BOOTSTRAP_SESSION);
   });
 
-  it("session_start creates default metadata without rewriting parsed .meta.json cache", async () => {
+  it("session_start creates default metadata without rewriting the parsed .meta.json artifact", async () => {
     const pi = createMockPi();
     const extension = await import("../src/index");
     extension.default(pi);
@@ -1441,8 +1441,8 @@ describe("real entrypoint bootstrap", () => {
     // Pre-create a parsed .meta.json artifact. Session-start metadata updates should
     // not patch parsed artifacts; they are refreshed by parse/flush paths.
     const { writeMetaFile, readMetaFile } = require("../src/meta") as typeof import("../src/meta");
-    const { cleanupSessionCache } = await import("./fixtures");
-    cleanupSessionCache(sessionId);
+    const { cleanupParsedArtifacts } = await import("./fixtures");
+    cleanupParsedArtifacts(sessionId);
 
     // Write an initial parsed artifact with retained=false. It should remain unchanged
     // until the session is parsed/flushed again.
@@ -1488,12 +1488,12 @@ describe("real entrypoint bootstrap", () => {
     expect(liveState).not.toBeNull();
     expect(liveState!.retained).toBe(true);
 
-    // Re-read .meta.json cache and verify session_start did not patch the parsed artifact.
+    // Re-read .meta.json artifact and verify session_start did not patch the parsed artifact.
     const afterMeta = readMetaFile(sessionId);
     expect(afterMeta).not.toBeNull();
     expect(afterMeta!.retained).toBe(false);
 
-    cleanupSessionCache(sessionId);
+    cleanupParsedArtifacts(sessionId);
     removePendingFlag(sessionId);
     clearSessionQueueState(sessionId);
   });
@@ -1642,7 +1642,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1666,7 +1666,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1691,7 +1691,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1711,7 +1711,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1733,7 +1733,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1766,7 +1766,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1788,7 +1788,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1817,7 +1817,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1843,7 +1843,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
 
     await enqueueToolMessage(BOOTSTRAP_SESSION, {
       content: "Important fact",
@@ -1872,7 +1872,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1898,7 +1898,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1917,7 +1917,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1939,7 +1939,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     await touchPendingFlag(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(true);
 
@@ -1955,7 +1955,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -1980,7 +1980,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
 
     try {
@@ -1995,7 +1995,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 
@@ -2020,7 +2020,7 @@ describe("real entrypoint bootstrap", () => {
       require("../src/queue") as typeof import("../src/queue");
     removePendingFlag(BOOTSTRAP_SESSION);
     clearSessionQueueState(BOOTSTRAP_SESSION);
-    cleanupSessionCache(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     expect(hasPendingFlag(BOOTSTRAP_SESSION)).toBe(false);
 
     try {
@@ -2041,7 +2041,7 @@ describe("real entrypoint bootstrap", () => {
     } finally {
       removePendingFlag(BOOTSTRAP_SESSION);
       clearSessionQueueState(BOOTSTRAP_SESSION);
-      cleanupSessionCache(BOOTSTRAP_SESSION);
+      cleanupParsedArtifacts(BOOTSTRAP_SESSION);
     }
   });
 

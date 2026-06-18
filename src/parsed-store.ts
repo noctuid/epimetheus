@@ -1,9 +1,10 @@
 /**
- * Structured parse results and parsed-session cache I/O.
+ * Structured parse results and parsed-session artifact I/O.
  *
  * Two concerns:
- * 1. Cache layer — reads/writes `.messages.jsonl` and `.meta.json` files in the
- *    parsed-sessions directory. Used by flush operations and upsert-all-parsed.
+ * 1. Parsed artifact I/O — reads/writes `.messages.jsonl` and `.meta.json`
+ *    files in the parsed-sessions directory. Used by flush operations and
+ *    `/hindsight parse-session` to produce review/export artifacts.
  * 2. Structured parsing — `parseCurrentSession()` wraps the low-level parser
  *    from document.ts into a `ParsedSessionResult` ready for downstream
  *    flush/upsert. It is a non-upsert operation: it performs no retention or
@@ -11,12 +12,12 @@
  *    disk or modify live session state (that is the caller's responsibility).
  *
  * File layout:
- *   parsed-sessions/{sessionId}.messages.jsonl  ← formatted messages
- *   parsed-sessions/{sessionId}.meta.json        ← parsed artifact manifest for upsert-all-parsed
+ *   parsed-sessions/{sessionId}.messages.jsonl  ← formatted messages (review/export artifact)
+ *   parsed-sessions/{sessionId}.meta.json        ← parsed artifact manifest (review/export/debug)
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -74,23 +75,6 @@ export function writeMessagesJsonl(sessionId: string, formattedStrs: string[]): 
   ensureParsedSessionDir();
   const content = formattedStrs.length > 0 ? `${formattedStrs.join("\n")}\n` : "";
   atomicWriteFile(getMessagesPath(sessionId), content);
-}
-
-/**
- * Read the stored messages JSONL file and return its content as a string,
- * trimmed of trailing whitespace. Used by upsert-all-parsed to re-send stored messages.
- */
-export function buildContentFromJsonl(sessionId: string): string {
-  return readFileSync(getMessagesPath(sessionId), "utf-8").trimEnd();
-}
-
-// ============================================
-// Cache existence / cleanup
-// ============================================
-
-/** Check whether parsed session files exist for a session. */
-export function cacheExists(sessionId: string): boolean {
-  return existsSync(getMessagesPath(sessionId)) && existsSync(getMetaPath(sessionId));
 }
 
 // ============================================

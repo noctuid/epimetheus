@@ -2,6 +2,10 @@
 
 ## Pending
 
+### Breaking Changes
+
+- **Removed `/hindsight upsert-all-parsed` subcommand** — It re-ingested previously parsed sessions exactly as-is, risking stale data and adding code/test surface for a workflow better served by a fresh re-parse. Use per-session `/hindsight parse-and-upsert-session` (which reparses the current session file) for now; a safer bulk re-parse-and-upsert flow may be added later. The parsed-session artifacts (`.messages.jsonl` / `.meta.json`) remain available via `/hindsight parse-session` and as review/export snapshots.
+
 ### Fixes
 
 - **Config parse errors now include location and code** — Warnings for malformed `config.jsonc`/`config.json` now list each parse error with its line, character, and `jsonc-parser` error code (e.g. `line 1, character 3: InvalidSymbol`).
@@ -10,6 +14,10 @@
 
 - Removed the noisy `pi-hindsight initialized` startup log from `src/index.ts`. Warning, error, and disabled-mode messages are still emitted. Reduces console noise on successful startup.
 - **`/hindsight status` layout tweaks** — `Bank ID` moved from the Session section into the Connection section, the `Server:` line now shows the configured API URL before the status (e.g. `Server: https://api.example.com (reachable)` / `(unreachable: …)` / `(not configured)`), and the version/compatibility block is compressed from three lines (`Required version` / `Server version` / `Compatibility`) into a single `Version:` line (e.g. `Version: 0.9.0 (>=0.8.3, compatible)`).
+
+### Internal
+
+- Removed dead production code left after dropping `/hindsight upsert-all-parsed`: the `buildContentFromJsonl` and `cacheExists` helpers in `src/parsed-store.ts` (now production-unused) and their dedicated tests. Tests that asserted artifact existence now check `existsSync(getMessagesPath(...)) && existsSync(getMetaPath(...))` directly. Renamed the `cleanupSessionCache` test fixture to `cleanupParsedArtifacts`, and cleaned up stale “cache”/“replay upsert”/“re-send stored messages” wording in comments and docs — parsed-session `.messages.jsonl`/`.meta.json` files are described as review/export/debug artifacts, not an upsert cache.
 
 ### Documentation
 

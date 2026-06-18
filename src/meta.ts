@@ -6,7 +6,7 @@
  *    for fast guard checks (retained, extraContext). Updated eagerly on metadata
  *    changes so fast-path checks work without re-parsing the session file.
  * 2. Parsed-session artifact (`parsed-sessions/<session-id>.meta.json`): manifest
- *    for /hindsight upsert-all-parsed and human review. Written on successful
+ *    for /hindsight parse-session and human review. Written on successful
  *    parse/upsert. Not used for normal-flush live state.
  * 3. In-session `hindsight-meta` entries: written to the session JSONL on every
  *    metadata change. Portable source of truth — if the user moves session files
@@ -36,7 +36,7 @@ export const FLUSH_BLOCKED_NO_EXTRA_CONTEXT =
 // Parsed artifact MetaFile types and operations
 // ============================================
 
-/** Parsed-session artifact metadata — used by /hindsight upsert-all-parsed and review. */
+/** Parsed-session artifact metadata — used by /hindsight parse-session and review. */
 export interface MetaFile {
   sessionId: string;
   /** Parsed session name (from session_info or first user message). */

@@ -29,7 +29,7 @@ async function enableRetention(
 ): Promise<void> {
   // No extra-context guard here: the user can enable retention and set
   // extra context later. The guard only blocks actual upserts (flush,
-  // parse-and-upsert, upsert-all-parsed).
+  // parse-and-upsert).
   const sessionId = ctx.sessionManager.getSessionId();
 
   await updateSessionMetadata(pi, sessionId, entries, { retained: true }, config);

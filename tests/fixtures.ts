@@ -41,8 +41,8 @@ export function cleanupSession(sessionId: string): void {
   removePendingFlag(sessionId);
 }
 
-/** Clean up parsed session cache files and live state for a session. Safe even if no cache exists. */
-export function cleanupSessionCache(sessionId: string): void {
+/** Clean up parsed-session artifact files and live state for a session. Safe even if no artifacts exist. */
+export function cleanupParsedArtifacts(sessionId: string): void {
   for (const p of [
     getMessagesPath(sessionId),
     getMetaPath(sessionId),

@@ -205,7 +205,7 @@ Call with no text (`/hindsight set-extra-context`) to indicate no extra context 
 
 When `requireExtraContextBeforeFlush: true`, session upserts are blocked until extra context is explicitly set. This prevents accidental retention of content that could be misclassified by Hindsight's extraction.
 
-The guard applies to all session upsert paths: automatic flush (session switch, shutdown, compact), manual `/hindsight flush`, `/hindsight flush-pending`, `/hindsight parse-and-upsert-session`, and `/hindsight upsert-all-parsed`. It does **not** apply to the tool queue (`hindsight_retain` tool calls) — those are explicit manual memories that already include the necessary context in their content.
+The guard applies to all session upsert paths: automatic flush (session switch, shutdown, compact), manual `/hindsight flush`, `/hindsight flush-pending`, and `/hindsight parse-and-upsert-session`. It does **not** apply to the tool queue (`hindsight_retain` tool calls) — those are explicit manual memories that already include the necessary context in their content.
 
 The flush guard distinguishes between three states:
 
@@ -217,7 +217,7 @@ The flush guard distinguishes between three states:
 
 This is particularly useful for sessions involving prose to prevent Hindsight from treating fictional characters as real people, fictional events as factual, or even real people as the user.
 
-The guard is checked at every session flush point in `autoFlushSessionOn`, `autoFlushPendingOn`, and for the manual manual slash commands (`/hindsight flush`, `/hindsight flush-pending`, `/hindsight parse-and-upsert-session`, and `/hindsight upsert-all-parsed`). Tool queue flushes (from `hindsight_retain` tool calls) are not guarded.
+The guard is checked at every session flush point in `autoFlushSessionOn`, `autoFlushPendingOn`, and for the manual manual slash commands (`/hindsight flush`, `/hindsight flush-pending`, and `/hindsight parse-and-upsert-session`). Tool queue flushes (from `hindsight_retain` tool calls) are not guarded.
 
 ## Content Retention & Stripping Settings
 ### `retainContent`
@@ -635,8 +635,7 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 | `config` | Show configuration (file path, env vars, masked config) |
 | `active-tools` | Show currently active tool names (for debugging tool visibility). Only available in [debug mode](#debug-mode). |
 | `parse-session` | Parse current session to local files for review (no upsert) |
-| `parse-and-upsert-session` | Parse and upsert the full current session to Hindsight (forced full re-parse, ignoring cache) |
-| `upsert-all-parsed` | Upsert all parsed sessions to Hindsight |
+| `parse-and-upsert-session` | Parse and upsert the full current session to Hindsight (forced full re-parse, bypasses pending-marker guard) |
 
 > **Note:** After `/resume`, a new user message is required before `/hindsight popup` will show content, since recall only happens when there's a user message to query against.
 

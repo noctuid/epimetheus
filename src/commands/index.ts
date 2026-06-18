@@ -24,7 +24,6 @@ import {
   createFlushSubcommand,
   createParseAndUpsertSessionSubcommand,
   createParseSessionSubcommand,
-  createUpsertAllParsedSubcommand,
 } from "./session";
 import { createConfigSubcommand, createStatusSubcommand } from "./status";
 import type { Subcommand } from "./types";
@@ -59,7 +58,6 @@ export function registerCommands(
     "flush-pending": createFlushPendingSubcommand(client, config),
     "parse-session": createParseSessionSubcommand(config),
     "parse-and-upsert-session": createParseAndUpsertSessionSubcommand(client, config),
-    "upsert-all-parsed": createUpsertAllParsedSubcommand(client, config),
     ...(config.debug
       ? {
           "active-tools": {

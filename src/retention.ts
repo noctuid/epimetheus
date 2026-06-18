@@ -399,7 +399,7 @@ function handlePreFlushBlocked(
 }
 
 /**
- * Write parsed-session cache files and complete the claim after a successful flush.
+ * Write parsed-session artifact files and complete the claim after a successful flush.
  */
 function finalizeSuccessfulFlush(
   sessionId: string,
@@ -529,11 +529,11 @@ function buildSessionUpsertParams(
  *
  * Uses live session state only for fast pre-checks. If state is missing or
  * malformed, falls back to parsing the session file. After parsing, derives
- * all metadata from the parsed entries + config (not from stale cached data).
+ * all metadata from the parsed entries + config (not from stale parsed artifacts).
  *
  * After a successful upsert:
  * - Writes `.messages.jsonl` (review/export artifact)
- * - Writes `.meta.json` (parsed artifact manifest for upsert-all-parsed)
+ * - Writes `.meta.json` (parsed artifact manifest for review/export)
  * - Updates live session state from parsed metadata
  */
 export async function parseAndUpsertSession(
@@ -592,7 +592,7 @@ export async function parseAndUpsertSession(
     // the caller derives sessionId from the same file path/source. But if a
     // wrong or corrupt session file is somehow passed, proceeding would write
     // parsed artifacts/live state/upserts under the wrong identity (tags,
-    // document id, cache paths all key off the caller sessionId). Hard-fail
+    // document id, artifact paths all key off the caller sessionId). Hard-fail
     // instead so the pending claim is restored (the catch below restores it)
     // and the user is notified of the mismatch for retry/fix.
     if (header.id !== sessionId) {

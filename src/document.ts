@@ -4,7 +4,7 @@
  * Reads raw session files, extracts header/entries, builds the message array
  * for upsert, and computes document tags/context. Produces in-memory data only —
  * does not write to disk. Higher-level orchestration (structured results,
- * cache I/O) lives in parsed-store.ts.
+ * parsed artifact I/O) lives in parsed-store.ts.
  */
 
 import { existsSync, readFileSync } from "node:fs";

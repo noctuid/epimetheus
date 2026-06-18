@@ -1,14 +1,11 @@
 /**
- * Unit tests for parsed-store.ts cache and JSONL operations.
+ * Unit tests for parsed-store.ts artifact and JSONL operations.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  buildContentFromJsonl,
-  cacheExists,
-  ensureParsedSessionDir,
   getMessagesPath,
   getMetaPath,
   parseCurrentSession,
@@ -52,52 +49,6 @@ describe("writeMessagesJsonl", () => {
     writeMessagesJsonl(TEST_SESSION, []);
     const raw = readFileSync(getMessagesPath(TEST_SESSION), "utf-8");
     expect(raw).toBe("");
-  });
-});
-
-describe("buildContentFromJsonl", () => {
-  it("returns JSONL from stored messages", () => {
-    const msgs = [
-      JSON.stringify({ role: "user", content: "hello" }),
-      JSON.stringify({ role: "assistant", content: "hi" }),
-    ];
-    writeMessagesJsonl(TEST_SESSION, msgs);
-
-    const content = buildContentFromJsonl(TEST_SESSION);
-    const lines = content.split("\n");
-    expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[0]!)).toEqual({ role: "user", content: "hello" });
-    expect(JSON.parse(lines[1]!)).toEqual({ role: "assistant", content: "hi" });
-  });
-
-  it("returns empty string for empty messages file", () => {
-    writeMessagesJsonl(TEST_SESSION, []);
-    const content = buildContentFromJsonl(TEST_SESSION);
-    expect(content).toBe("");
-  });
-});
-
-describe("cacheExists", () => {
-  it("returns false when neither file exists", () => {
-    expect(cacheExists(TEST_SESSION)).toBe(false);
-  });
-
-  it("returns false when only messages file exists", () => {
-    writeMessagesJsonl(TEST_SESSION, ["test"]);
-    expect(cacheExists(TEST_SESSION)).toBe(false);
-  });
-
-  it("returns false when only meta file exists", () => {
-    ensureParsedSessionDir();
-    writeFileSync(getMetaPath(TEST_SESSION), "{}", "utf8");
-    expect(cacheExists(TEST_SESSION)).toBe(false);
-  });
-
-  it("returns true when both files exist", () => {
-    ensureParsedSessionDir();
-    writeMessagesJsonl(TEST_SESSION, ["test"]);
-    writeFileSync(getMetaPath(TEST_SESSION), "{}", "utf8");
-    expect(cacheExists(TEST_SESSION)).toBe(true);
   });
 });
 
