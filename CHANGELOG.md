@@ -2,6 +2,8 @@
 
 ## Pending
 
+## 0.5.0
+
 ### Breaking Changes
 
 - **Removed `/hindsight upsert-all-parsed` subcommand** — It re-ingested previously parsed sessions exactly as-is, risking stale data and adding code/test surface for a workflow better served by a fresh re-parse. Use per-session `/hindsight parse-and-upsert-session` (which reparses the current session file) for now; a safer bulk re-parse-and-upsert flow may be added later. The parsed-session artifacts (`.messages.jsonl` / `.meta.json`) remain available via `/hindsight parse-session` and as review/export snapshots.
