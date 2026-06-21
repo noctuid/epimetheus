@@ -5,6 +5,11 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
+import {
+  findFlushConfigFile,
+  resolveFlushConfig,
+  resolveProjectNameForFlush,
+} from "../flush-config";
 import type { RecallMessageDetails } from "../index";
 import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
 import { getPendingWorkCount } from "../retention";
@@ -177,6 +182,66 @@ export function createConfigSubcommand(
       } else {
         lines.push("  None");
       }
+
+      // Session-specific flush config diagnostics. These are unrelated to the
+      // global config above: they describe how the *current* session's project
+      // name will be resolved during a flush (its cwd-local flush config,
+      // metadata flag, and derived name).
+      lines.push("\n== Session-Specific Flush Config ==");
+      const header = ctx.sessionManager?.getHeader?.();
+      const sessionCwd = header?.cwd ?? ctx.cwd;
+      lines.push(`  Session cwd: ${sessionCwd ?? "(none)"}`);
+
+      const entries = ctx.sessionManager?.getEntries?.() ?? [];
+      const meta = getHindsightMeta(entries);
+      const usesFlag = meta?.usesProjectFlushConfig;
+      const flagLabel =
+        usesFlag === undefined
+          ? "(unset)"
+          : usesFlag
+            ? "true (requires cwd-local flush config)"
+            : "false (detached)";
+      lines.push(`  usesProjectFlushConfig: ${flagLabel}`);
+
+      const configPath = findFlushConfigFile(sessionCwd ?? "");
+      lines.push(`  Config file: ${configPath ?? "(missing)"}`);
+      if (configPath) {
+        const loaded = resolveFlushConfig(sessionCwd ?? "");
+        if (loaded.ok) {
+          lines.push(`  Config projectName: ${loaded.config.projectName}`);
+          for (const w of loaded.warnings) lines.push(`  warning: ${w}`);
+        } else {
+          lines.push(`  Config status: invalid — ${loaded.error}`);
+          for (const w of loaded.warnings) lines.push(`  warning: ${w}`);
+        }
+      }
+
+      // "Would proceed" uses the session's actual flag (tristate: true / false /
+      // undefined) so an unmarked session with an invalid cwd-local config is
+      // reported as blocked (matching what parseAndUpsertSession would do).
+      const resolutionMarked = resolveProjectNameForFlush(sessionCwd ?? "", usesFlag);
+      if (resolutionMarked.ok) {
+        lines.push(
+          `  Resolved project name: ${resolutionMarked.projectName} (source: ${resolutionMarked.source})`
+        );
+      } else {
+        lines.push(`  Resolved project name: (blocked) ${resolutionMarked.error}`);
+      }
+
+      // Default (detached) derivation, for comparison with the marked case.
+      const defaultResolution = resolveProjectNameForFlush(sessionCwd ?? "", false);
+      if (defaultResolution.ok) {
+        lines.push(
+          `  Default project name: ${defaultResolution.projectName} (source: ${defaultResolution.source})`
+        );
+      } else {
+        lines.push(`  Default project name: (blocked) ${defaultResolution.error}`);
+      }
+
+      const wouldProceed = resolutionMarked.ok;
+      lines.push(
+        `  Flush would proceed: ${wouldProceed ? "yes" : "no (blocked — pending left queued)"}`
+      );
 
       ctx.ui.notify(lines.join("\n"), "info");
     },

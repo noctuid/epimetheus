@@ -12,11 +12,13 @@ Status: I would call this beta level software, though I am focusing on stability
 - [Local Quickstart](#local-quickstart)
 - [Configuration](#configuration)
   - [Example Configuration](#example-configuration)
+- [Project-local Settings](#project-local-settings)
 - [Recommended User Best Practices](#recommended-user-best-practices)
 - [Caveats](#caveats)
 - [FAQ](#faq)
 
 See [Reference](docs/reference.md) for detailed configuration, tools, commands, and operational details.
+See [Architecture](docs/architecture/ingestion.md) and [Config Architecture](docs/architecture/config.md) for implementation design notes.
 See [Comparison](docs/comparison.md) for how this plugin compares to others and the design decisions behind it.
 
 # Key Features
@@ -58,7 +60,7 @@ Additionally:
 - Avoids breaking prompt caching - recall messages are appended at the end of the context for a single turn only; the canonical conversation history (which determines cache validity) grows normally with each turn, so caching should work as expected
 - Marks sessions as dirty on `message_end` so content is retained even if Hindsight is temporarily down; pending markers persist until the next successful flush
 - Properly handles forking when ingesting full sessions: forks will not duplicate parent content and will only contain new content
-- Provides automatic tags: session id, parent session id, cwd, basedir (cwd basename), project (configurable name, falls back to basedir), store method (tool or auto), and any configured tags like `harness:pi` (default)
+- Provides automatic tags: session id, parent session id, cwd, basedir (cwd basename), project (derived per session), store method (tool or auto), and any configured tags like `harness:pi` (default)
 - Allows choosing what content to retain and stripping unnecessary fields to reduce tokens/cost
 
 # Local Quickstart
@@ -151,6 +153,11 @@ Configuration is stored in `<getAgentDir()>/epimetheus/config.json` or `config.j
   // "requireExtraContextBeforeFlush": true,
 }
 ```
+
+# Project-local Settings
+Project-local settings live under a project cwd instead of the global epimetheus config. Currently, the only supported project-local setting is a flush config `projectName` override. See [Project-local Settings](docs/reference.md#project-local-settings) for more details.
+
+If you need other project-local settings, please open an issue describing the setting and why it needs to vary by project.
 
 # Recommended User Best Practices
 ## Initially

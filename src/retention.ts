@@ -21,6 +21,7 @@ import {
   type SessionEntry,
   type SessionHeader,
 } from "./document";
+import { resolveProjectNameForFlush } from "./flush-config";
 import {
   buildMetaFile,
   FLUSH_BLOCKED_NO_EXTRA_CONTEXT,
@@ -62,16 +63,24 @@ export async function queueToolRetain(
   sessionCwd: string,
   parentSessionId: string | undefined,
   config: Pick<HindsightConfig, "constantTags" | "observationScopes">,
-  sessionUserTags: string[]
+  sessionUserTags: string[],
+  /**
+   * Pre-resolved project name to bake into tags and observation-scope
+   * placeholders. Callers with flush-config awareness (see
+   * `resolveProjectNameForFlush`) should pass this so tool retains and session
+   * flushes share the same `project:` tag. When omitted, falls back to
+   * `getProjectName(sessionCwd)` (git common dir or cwd basename).
+   */
+  projectName?: string
 ): Promise<QueueResult> {
-  const projectName = getProjectName(sessionCwd);
+  const resolvedProjectName = projectName ?? getProjectName(sessionCwd);
   // Build complete tags at queue time
   const tags = [
     ...config.constantTags,
     `session:${sessionId}`,
     `cwd:${sessionCwd}`,
     `basedir:${getBasedir(sessionCwd)}`,
-    `project:${projectName}`,
+    `project:${resolvedProjectName}`,
     `store_method:tool`,
     `parent:${parentSessionId ?? sessionId}`,
     ...(toolTags ?? []),
@@ -84,7 +93,7 @@ export async function queueToolRetain(
     sessionId,
     parentSessionId,
     sessionCwd,
-    projectName
+    resolvedProjectName
   );
 
   const entry: ToolQueueEntry = {
@@ -296,14 +305,21 @@ export async function upsertToHindsight(
   client: HindsightClientWrapper,
   params: UpsertParams,
   config: HindsightConfig,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * Pre-resolved project name for `{project}` observation-scope placeholder
+   * expansion. Callers with flush-config awareness should pass this so the
+   * scopes match the document tags. When omitted, falls back to
+   * `getProjectName(params.sessionCwd)` (git common dir or cwd basename).
+   */
+  projectName?: string
 ): Promise<void> {
   const expandedScopes = expandSessionObservationScopes(
     config,
     params.sessionId,
     params.parentSessionId,
     params.sessionCwd,
-    getProjectName(params.sessionCwd)
+    projectName ?? getProjectName(params.sessionCwd)
   );
 
   const result = await client.retain(
@@ -446,7 +462,12 @@ function resolveSessionFlushMetadata(
   header: SessionHeader,
   entries: SessionEntry[],
   hindsightMeta: HindsightMeta | null,
-  config: HindsightConfig
+  config: HindsightConfig,
+  /**
+   * Pre-resolved project name (flush-config-aware) for the `project:` tag.
+   * When omitted, `buildDocumentTags` falls back to `getProjectName(header.cwd)`.
+   */
+  projectName?: string
 ): {
   parentSessionId: string | undefined;
   sessionCwd: string;
@@ -461,6 +482,7 @@ function resolveSessionFlushMetadata(
   const tags = buildDocumentTags(header, config, {
     sessionUserTags: base.sessionUserTags,
     parentSessionId: base.parentSessionId,
+    projectName,
   });
   return {
     ...base,
@@ -676,8 +698,41 @@ export async function parseAndUpsertSession(
       return;
     }
 
+    // Resolve the project name flush-config-aware, so document tags and
+    // observation-scope placeholders match across the upsert. If the session
+    // is marked as using project-local flush config and that resolution fails
+    // (cwd gone, or config missing/invalid), fail closed: leave pending work
+    // queued (restoreClaim) and notify. Auto-flush notifications are suppressed
+    // like other transient block warnings unless debug or surfaceBlocks.
+    //
+    // This re-validates FRESH (independent of the active-session latch in
+    // runtime-state) so flush-pending handles non-active sessions and catches
+    // config files that disappeared or became invalid after session_start.
+    const projectNameResult = resolveProjectNameForFlush(
+      header.cwd,
+      hindsightMeta?.usesProjectFlushConfig
+    );
+    if (!projectNameResult.ok) {
+      if (claim) restoreClaim(claim);
+      if (!options?.autoFlush || debug || options?.surfaceBlocks) {
+        ctx.ui.notify(
+          `Flush blocked for session ${sessionId}: ${projectNameResult.error}. Pending work remains queued. ` +
+            `Restore the cwd-local flush config or run \`/hindsight detach-flush-config\`.`,
+          "warning"
+        );
+      }
+      return;
+    }
+    const resolvedProjectName = projectNameResult.projectName;
+
     // Resolve metadata from parsed session data (session file is authority, not live state)
-    const resolved = resolveSessionFlushMetadata(header, entries, hindsightMeta, config);
+    const resolved = resolveSessionFlushMetadata(
+      header,
+      entries,
+      hindsightMeta,
+      config,
+      resolvedProjectName
+    );
 
     // Serialize messages
     const formattedStrs = messages.map((m) => JSON.stringify(m));
@@ -708,7 +763,7 @@ export async function parseAndUpsertSession(
     );
 
     // Network call
-    await upsertToHindsight(client, upsertParams, config, signal);
+    await upsertToHindsight(client, upsertParams, config, signal, resolvedProjectName);
 
     // Finalize: write parsed artifacts and complete the claim. If the claim dir
     // disappeared during the network call, queue state was concurrently cleared;

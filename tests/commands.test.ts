@@ -9,6 +9,12 @@ import type { HindsightClientWrapper } from "../src/client";
 import { registerCommands } from "../src/commands";
 import type { RecallMessageDetails } from "../src/index";
 import {
+  markStartupReady,
+  resetRegisteredHindsightTools,
+  resetStartupReady,
+  setRegisteredHindsightTools,
+} from "../src/runtime-state";
+import {
   createMockClient,
   readToolQueueFromDisk,
   setupTempAgentDir,
@@ -41,6 +47,10 @@ afterEach(() => {
   } catch {
     // best-effort
   }
+  // Reset runtime-state so tests start/leave operational state clean (these
+  // tests call registerCommands directly, without a session_start).
+  resetStartupReady();
+  resetRegisteredHindsightTools();
 });
 
 interface RegisteredCmd {
@@ -109,6 +119,14 @@ describe("registerCommands", () => {
   });
 
   function register(config = statusTestConfig, client = mockClient) {
+    registerWithReady(config, client, () => true);
+  }
+
+  function registerWithReady(
+    config = statusTestConfig,
+    client = mockClient,
+    isReady: () => boolean = () => true
+  ) {
     registerCommands(
       mockPi as unknown as import("@earendil-works/pi-coding-agent").ExtensionAPI,
       config,
@@ -118,7 +136,7 @@ describe("registerCommands", () => {
       () => {
         autoRecallDisplayOverride = !autoRecallDisplayOverride;
       },
-      () => true,
+      isReady,
       { configPath: undefined, envVars: [], warning: undefined, validationWarnings: [] }
     );
   }
@@ -814,6 +832,19 @@ describe("registerCommands", () => {
         { type: "custom", customType: "hindsight-meta", data: { retained: false } },
       ];
       register({ ...statusTestConfig, retainSessionsByDefault: false });
+
+      // refreshToolVisibility reads the unified operational state + the
+      // registered-tools list from runtime-state. These registerCommands
+      // tests bypass session_start, so latch operational + record the
+      // registered tools manually.
+      markStartupReady();
+      setRegisteredHindsightTools([
+        "hindsight_set_extra_context",
+        "hindsight_get_extra_context",
+        "hindsight_retain",
+        "hindsight_recall",
+        "hindsight_reflect",
+      ]);
 
       // Simulate session_start hiding the tool
       mockActiveTools.length = 0;
@@ -2233,6 +2264,61 @@ describe("registerCommands", () => {
       await getHandler()("popup", ctx);
 
       expect((overlayDetails as RecallMessageDetails | null)?.count).toBe(1);
+    });
+
+    it("is unavailable in degraded mode (not ready): no overlay, no recall to inspect", async () => {
+      // Degraded mode skips auto-recall, so there is no current recall to
+      // inspect. /hindsight popup must short-circuit with an info message and
+      // NOT invoke the overlay — even when recall details are cached from a
+      // prior operational turn.
+      recallDetails = {
+        count: 2,
+        snippet: "cached",
+        memories: "cached",
+      };
+      registerWithReady(statusTestConfig, mockClient, () => false);
+
+      let overlayCalled = false;
+      const ctx = {
+        ...makeCtx(),
+        ui: {
+          ...makeCtx().ui,
+          custom: mock(async () => {
+            overlayCalled = true;
+          }),
+        },
+      } as unknown as ExtensionContext;
+
+      await getHandler()("popup", ctx);
+
+      expect(overlayCalled).toBe(false);
+      expect(lastNotification?.message).toContain("not ready");
+      expect(lastNotification?.message).toContain("auto-recall is skipped");
+    });
+
+    it("reports it requires autoRecallEnabled when auto-recall is disabled", async () => {
+      recallDetails = {
+        count: 2,
+        snippet: "cached",
+        memories: "cached",
+      };
+      registerWithReady({ ...statusTestConfig, autoRecallEnabled: false }, mockClient, () => true);
+
+      let overlayCalled = false;
+      const ctx = {
+        ...makeCtx(),
+        ui: {
+          ...makeCtx().ui,
+          custom: mock(async () => {
+            overlayCalled = true;
+          }),
+        },
+      } as unknown as ExtensionContext;
+
+      await getHandler()("popup", ctx);
+
+      expect(overlayCalled).toBe(false);
+      expect(lastNotification?.message).toContain("autoRecallEnabled is false");
     });
   });
 

@@ -22,13 +22,22 @@ import {
 import { prefixLog, STATUS_ID } from "./constants";
 import { getDataDir } from "./data-dir";
 import { getLegacyDataDir, migrateDataDir } from "./data-dir-migration";
+import { evaluateActiveSessionFlushState } from "./flush-config";
 import { getHindsightMeta, shouldSessionBeRetained, updateSessionMetadata } from "./meta";
 import { shouldRetainMessage } from "./prepare";
 import { touchPendingFlag } from "./queue";
 import { flushCurrentSession } from "./retention";
-import { isStartupReady, markStartupReady, resetStartupReady } from "./runtime-state";
-import { isToolEnabled, registerTools, updateRetainToolVisibility } from "./tools";
-import { extractParentSessionId, getProjectName, truncate } from "./utils";
+import {
+  clearStartupReady,
+  isOperationalReady,
+  markStartupReady,
+  resetActiveSessionFlushReady,
+  resetRegisteredHindsightTools,
+  resetStartupReady,
+  setActiveSessionFlushReady,
+} from "./runtime-state";
+import { refreshToolVisibility, registerTools } from "./tools";
+import { clearProjectNameCache, extractParentSessionId, getProjectName, truncate } from "./utils";
 import { getHindsightCompatibilityError } from "./version";
 
 // Runtime toggle for recall display (overrides config)
@@ -66,6 +75,9 @@ export function _resetState(): void {
   toolsRegistered = false;
   startupReadyPromise = null;
   resetStartupReady();
+  resetActiveSessionFlushReady();
+  resetRegisteredHindsightTools();
+  clearProjectNameCache();
   resetNotReadyWarned();
 }
 
@@ -253,32 +265,29 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * Establish health/version readiness with single-flight.
+   * Probe server health + version and update the readiness latch. Single-flight
+   * so overlapping `session_start` callers share one probe pass.
    *
-   * If readiness is already latched, returns true without probing. Otherwise,
-   * overlapping callers share one probe; a successful probe flips startupReady
-   * one-way. Failures leave readiness false and can be retried later.
+   * Readiness is re-enterable: there is no fast-path skip when already latched.
+   * Every call probes and updates the latch (`true` on success, `false` on
+   * failure via {@link clearStartupReady}) so that a later `session_start`
+   * observing an unreachable/incompatible server re-enters the unified degraded
+   * mode (all tools hidden, auto-recall/retain/flush skipped, operational
+   * commands blocked). A subsequent healthy probe restores readiness.
    *
-   * This helper must not perform session setup. session_start owns metadata,
-   * tool registration, retain visibility, and startup flushes.
+   * This helper must not perform session setup (metadata, tools, visibility,
+   * startup flush) — that stays in `session_start`.
    */
   function ensureStartupReady(ctx: ExtensionContext): Promise<boolean> {
-    // Fast path: already latched — no probe, no shared work.
-    if (isStartupReady()) return Promise.resolve(true);
-    // Single-flight: a concurrent caller (session_start + before_agent_start
-    // overlap, or two before_agent_start events) joins the in-flight probe.
+    // Single-flight: a concurrent session_start joins the in-flight probe.
     if (startupReadyPromise) return startupReadyPromise;
 
     startupReadyPromise = (async () => {
       try {
-        if (!(await probeStartupHealth(client, ctx))) return false;
-        // One-way latch: only ever flips false → true. After one successful
-        // config + connection pass, later health failures are treated as likely
-        // transient: report them via status, but don't tear down process-global
-        // handlers/tools or disturb per-session tool visibility. Health/version
-        // is the gating concern; session init stays in `session_start`.
-        markStartupReady();
-        return true;
+        const healthy = await probeStartupHealth(client, ctx);
+        if (healthy) markStartupReady();
+        else clearStartupReady();
+        return healthy;
       } finally {
         // Clear so a failed attempt can be retried, and so a post-latch caller
         // never observes a stale resolved promise.
@@ -289,34 +298,104 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (event, ctx) => {
-    // session_start owns per-session setup. Health/version readiness is checked
-    // first; when unavailable, skip side effects. Once ready, setup still runs
-    // on every session_start so new/resumed sessions get their own metadata and
-    // retain-tool visibility even after global readiness was latched earlier.
-    const wasReady = isStartupReady();
-    if (!(await ensureStartupReady(ctx))) return;
+    // session_start owns per-session setup. Health/version readiness is probed
+    // every time (re-enterable): a failed probe re-enters the unified degraded
+    // mode (startupReady=false → isOperationalReady=false → all tools hidden,
+    // auto-recall/retain/flush skipped, operational commands blocked); a healthy
+    // probe restores readiness. setup then runs on every session_start so
+    // new/resumed sessions get their own metadata and tool visibility.
+    const probeHealthy = await ensureStartupReady(ctx);
+    if (!probeHealthy) {
+      // Server unreachable/incompatible → unified degraded mode. Status was
+      // already set unhealthy by probeStartupHealth. If tools were already
+      // registered (e.g. from a prior healthy session_start), hide ALL of them
+      // now that we've re-entered degraded mode (isOperationalReady() is false).
+      // On a first-ever failed start, no tools are registered yet — tools
+      // register lazily only on a healthy session_start, so there is nothing to
+      // hide and no setActiveTools call. activeSessionFlushReady is left as-is;
+      // the server failure is the degraded cause for this session.
+      if (toolsRegistered) {
+        refreshToolVisibility(pi, false);
+      }
+      return;
+    }
 
-    // If readiness was already latched, probe again to refresh status. A later
-    // health/version failure is reported as unhealthy, but treated as transient:
-    // do not undo readiness, tear down tools, or skip this session's
-    // metadata/visibility work. Do skip startup auto-flush below because it is
-    // automatic network work and this handler just observed an unhealthy server.
-    const currentProbeHealthy = wasReady ? await probeStartupHealth(client, ctx) : true;
+    // Validate the active session's project-local flush-config state BEFORE
+    // enabling operational behavior (retain tool visibility, auto-mark metadata,
+    // startup flush). An invalid/required-but-missing cwd-local flush config
+    // hard-fails the ACTIVE session through this degraded pathway: unhealthy
+    // status, retain tool hidden, auto-retain skipped (see message_end), and no
+    // startup flush. Diagnostic commands (/hindsight status, /hindsight
+    // config) and the recovery command (/hindsight detach-flush-config, which
+    // is NOT in OPERATIONAL_SUBCOMMANDS) remain available. The flush path
+    // (parseAndUpsertSession) re-validates freshly so flush-pending still
+    // handles other sessions and catches files that disappeared later.
+    const entries = ctx.sessionManager.getEntries();
+    const existingMeta = getHindsightMeta(entries);
+    const sessionHeader = ctx.sessionManager.getHeader();
+    const sessionCwd = sessionHeader?.cwd ?? ctx.cwd;
+    const flushState = evaluateActiveSessionFlushState(sessionCwd, existingMeta);
+
+    if (!flushState.ready) {
+      // Active session is in failed project-local flush-config state → single
+      // degraded mode: unhealthy status, ALL Hindsight tools hidden (not just
+      // retain), no auto-retain (message_end), no startup flush. Diagnostic
+      // commands (/hindsight status, /hindsight config, /hindsight toggle-display,
+      // /hindsight popup) and the recovery command (/hindsight detach-flush-config,
+      // which is NOT in OPERATIONAL_SUBCOMMANDS) remain available. The flush path
+      // (parseAndUpsertSession) re-validates freshly per target session so
+      // flush-pending still handles other sessions and catches files that
+      // disappeared later.
+      setActiveSessionFlushReady(false);
+      ctx.ui.setStatus(STATUS_ID, config.statusUnhealthy);
+      ctx.ui.notify(
+        `Hindsight active session unavailable: ${flushState.reason}. ` +
+          `All Hindsight tools are hidden and retention is disabled for this session. ` +
+          `Run \`/hindsight detach-flush-config\` to stop requiring the project-local ` +
+          `flush config, or fix ${sessionCwd ?? "<cwd>"}/.pi/epimetheus/flush-config.jsonc.`,
+        "warning"
+      );
+      // Register hindsight tools once (process-global) so they can be
+      // re-shown when the session recovers; then hide ALL of them via the
+      // unified visibility refresh (isOperationalReady() is false here, so
+      // refreshToolVisibility hides every registered hindsight_* tool).
+      if (!toolsRegistered) {
+        registerTools(pi, config, client);
+        toolsRegistered = true;
+      }
+      refreshToolVisibility(pi, false);
+      return;
+    }
+
+    // Active session flush-config OK. Mirror this in the per-session latch so
+    // message_end auto-retain and the retain tool visibility reflect the now-
+    // healthy session (a prior failed session may have left it false).
+    setActiveSessionFlushReady(true);
 
     // Auto-create session metadata if none exists, using retainSessionsByDefault
     // as the default retained state. This ensures every session has explicit
     // metadata, so toggle-retain and other commands work predictably.
-    const entries = ctx.sessionManager.getEntries();
-    const existingMeta = getHindsightMeta(entries);
+    //
+    // If a valid cwd-local flush config exists for an unmarked session,
+    // auto-mark usesProjectFlushConfig:true so future flushes require it
+    // (latest value wins, so an explicit false from /hindsight
+    // detach-flush-config survives — auto-mark only fires when the flag is
+    // still undefined).
     if (!existingMeta) {
       const sessionId = ctx.sessionManager.getSessionId();
-      await updateSessionMetadata(
-        pi,
-        sessionId,
-        entries,
-        { retained: config.retainSessionsByDefault },
-        config
-      );
+      const updates: Partial<{ retained: boolean; usesProjectFlushConfig: boolean }> = {
+        retained: config.retainSessionsByDefault,
+      };
+      if (flushState.autoMark) updates.usesProjectFlushConfig = true;
+      await updateSessionMetadata(pi, sessionId, entries, updates, config);
+    } else if (existingMeta.usesProjectFlushConfig === undefined && flushState.autoMark) {
+      // Legacy session without an explicit usesProjectFlushConfig flag. Auto-mark
+      // true without touching pending (the flag affects future flushes; the
+      // user can re-flush manually if they want retroactive tag correction).
+      // Explicit user detach (usesProjectFlushConfig:false) is preserved because
+      // latest-wins only re-marks when the flag is still undefined.
+      const sessionId = ctx.sessionManager.getSessionId();
+      await updateSessionMetadata(pi, sessionId, entries, { usesProjectFlushConfig: true }, config);
     }
 
     // Register hindsight tools once (process-global). Late registration
@@ -328,24 +407,16 @@ export default function (pi: ExtensionAPI) {
       registerTools(pi, config, client);
       toolsRegistered = true;
     }
-    // Update hindsight_retain tool visibility based on the current session's
-    // retention state. When not retained, the tool is hidden from the LLM
-    // entirely (instead of being available but failing on execution).
-    if (isToolEnabled(config, "retain")) {
-      const isRetained = shouldSessionBeRetained(entries, config);
-      updateRetainToolVisibility(pi, isRetained);
-    }
+    // Refresh tool visibility for the unified operational state + this
+    // session's retention flag. Operational here (startupReady latched and the
+    // active-session flush config just validated OK), so all registered tools
+    // are shown except hindsight_retain when the session is not retained.
+    refreshToolVisibility(pi, shouldSessionBeRetained(entries, config));
 
     // On startup, optionally flush pending work across all sessions. This is
     // reason-gated to `session_start` only — it is a best-effort cleanup of old
-    // pending sessions, not a readiness prerequisite, so `before_agent_start`'s
-    // recovery path must NOT trigger it (avoids surprising first-prompt flushes).
-    if (
-      currentProbeHealthy &&
-      event.reason === "startup" &&
-      config.autoFlushPendingOn.includes("startup") &&
-      client
-    ) {
+    // pending sessions, not a readiness prerequisite.
+    if (event.reason === "startup" && config.autoFlushPendingOn.includes("startup") && client) {
       await flushAllPending(config, client, ctx, { notifyNoWork: false, autoFlush: true });
     }
   });
@@ -366,7 +437,7 @@ export default function (pi: ExtensionAPI) {
     (value) => {
       autoRecallDisplayOverride = value;
     },
-    isStartupReady,
+    isOperationalReady,
     {
       configPath,
       envVars,
@@ -391,14 +462,16 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
     if (!client || !config.autoRecallEnabled) return;
 
-    // before_agent_start can be the first lifecycle point with the user's
-    // prompt. If session_start has not latched readiness yet, check
-    // health/version on demand so first-turn recall can proceed when the server
-    // is healthy. This does not initialize the session; that remains
-    // session_start's responsibility. The extra readiness read is defensive: if
-    // another lifecycle path latched readiness while this await resolved false,
-    // don't skip an otherwise-safe first-turn recall.
-    if (!(await ensureStartupReady(ctx)) && !isStartupReady()) return;
+    // session_start is awaited before the first prompt in current Pi (interactive,
+    // print, and RPC), so by the time before_agent_start fires, startup readiness
+    // and the active session's flush-config state have already been evaluated.
+    // Only check the unified operational state here and return if degraded —
+    // never probe or mutate readiness from before_agent_start (that risks
+    // surprising first-prompt side effects and is session_start's job). If the
+    // session is degraded (server unreachable/incompatible, or required-but-
+    // missing/invalid cwd-local flush config), auto-recall is skipped for this
+    // turn; the first turn after recovery will recall.
+    if (!isOperationalReady()) return;
 
     // Use event.prompt directly — available before the user message is
     // persisted to the session (fixes first-message recall).
@@ -497,7 +570,7 @@ export default function (pi: ExtensionAPI) {
 
   // Mark sessions as dirty on message_end event
   pi.on("message_end", async (event, ctx: ExtensionContext) => {
-    if (!config.autoRetainEnabled || !isStartupReady()) return;
+    if (!config.autoRetainEnabled || !isOperationalReady()) return;
 
     const sessionId = ctx.sessionManager.getSessionId();
     if (!sessionId) {
@@ -525,7 +598,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Auto-flush: suppresses transient block notifications unless debug mode is on. */
   const autoFlush = async (ctx: ExtensionContext): Promise<void> => {
-    if (!client || !isStartupReady()) return;
+    if (!client || !isOperationalReady()) return;
     const sessionId = ctx.sessionManager.getSessionId();
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (!sessionId || !sessionPath) return;
@@ -661,7 +734,7 @@ export default function (pi: ExtensionAPI) {
   // semantics: success, no-work, and block/not-retained warnings are suppressed
   // unless `debug: true` (compaction is not a final-chance event like `/quit`).
   pi.on("session_compact", async (_event, ctx: ExtensionContext) => {
-    if (!config.autoFlushSessionOn.includes("compact") || !client || !isStartupReady()) return;
+    if (!config.autoFlushSessionOn.includes("compact") || !client || !isOperationalReady()) return;
     const sessionId = ctx.sessionManager.getSessionId();
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (!sessionId || !sessionPath) return;
@@ -688,7 +761,7 @@ export default function (pi: ExtensionAPI) {
   //     skipped to avoid duplicate work (see config validation warning).
   pi.on("session_shutdown", async (event, ctx: ExtensionContext) => {
     if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") return;
-    if (!client || !isStartupReady()) return;
+    if (!client || !isOperationalReady()) return;
     if (event.reason === "reload") {
       if (!config.autoFlushSessionOn.includes("reload")) return;
       const sessionId = ctx.sessionManager.getSessionId();

@@ -131,6 +131,15 @@ export interface HindsightMeta {
   tags?: string[];
   /** Extra context appended to the Hindsight context field (after session name). */
   extraContext?: string;
+  /**
+   * When true, flushes for this session require a valid cwd-local flush config
+   * (`<cwd>/.pi/epimetheus/flush-config.jsonc|.json`) and use its `projectName`.
+   * Append-only: each new hindsight-meta entry carries forward the prior value
+   * unless explicitly overridden. Latest metadata value wins. The flush config
+   * path and the resolved project name are deliberately NOT stored here — see
+   * `src/flush-config.ts` for resolution details.
+   */
+  usesProjectFlushConfig?: boolean;
 }
 
 /**
@@ -178,6 +187,14 @@ export function buildMetaUpdate(
     updates.extraContext !== undefined ? updates.extraContext : existing?.extraContext;
   if (extraContext !== undefined) {
     meta.extraContext = extraContext;
+  }
+
+  const usesProjectFlushConfig =
+    updates.usesProjectFlushConfig !== undefined
+      ? updates.usesProjectFlushConfig
+      : existing?.usesProjectFlushConfig;
+  if (usesProjectFlushConfig !== undefined) {
+    meta.usesProjectFlushConfig = usesProjectFlushConfig;
   }
 
   return meta;

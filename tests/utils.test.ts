@@ -5,8 +5,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
+  clearProjectNameCache,
   extractParentSessionId,
   extractTextFromContent,
   getBasedir,
@@ -181,62 +182,55 @@ describe("getBasedir", () => {
 });
 
 describe("getProjectName", () => {
-  it("returns EPIMETHEUS_PROJECT_NAME when set", () => {
-    const originalNew = process.env.EPIMETHEUS_PROJECT_NAME;
-    const originalOld = process.env.PI_HINDSIGHT_PROJECT_NAME;
-    process.env.EPIMETHEUS_PROJECT_NAME = "custom-project";
-    try {
-      expect(getProjectName("/home/user/myapp")).toBe("custom-project");
-    } finally {
-      if (originalNew === undefined) delete process.env.EPIMETHEUS_PROJECT_NAME;
-      else process.env.EPIMETHEUS_PROJECT_NAME = originalNew;
-      if (originalOld === undefined) delete process.env.PI_HINDSIGHT_PROJECT_NAME;
-      else process.env.PI_HINDSIGHT_PROJECT_NAME = originalOld;
-    }
+  // Env-var overrides (EPIMETHEUS_PROJECT_NAME / PI_HINDSIGHT_PROJECT_NAME) were
+  // removed because env vars do not track Pi session switching. Default
+  // derivation is git common dir -> basename (cached per cwd).
+  afterEach(() => clearProjectNameCache());
+
+  it("returns cwd basename for a non-git directory", () => {
+    expect(getProjectName("/home/user/myapp")).toBe("myapp");
   });
 
-  it("falls back to legacy PI_HINDSIGHT_PROJECT_NAME when EPIMETHEUS_PROJECT_NAME is unset", () => {
-    const originalNew = process.env.EPIMETHEUS_PROJECT_NAME;
-    const originalOld = process.env.PI_HINDSIGHT_PROJECT_NAME;
-    delete process.env.EPIMETHEUS_PROJECT_NAME;
-    process.env.PI_HINDSIGHT_PROJECT_NAME = "custom-project";
-    try {
-      expect(getProjectName("/home/user/myapp")).toBe("custom-project");
-    } finally {
-      if (originalNew === undefined) delete process.env.EPIMETHEUS_PROJECT_NAME;
-      else process.env.EPIMETHEUS_PROJECT_NAME = originalNew;
-      if (originalOld === undefined) delete process.env.PI_HINDSIGHT_PROJECT_NAME;
-      else process.env.PI_HINDSIGHT_PROJECT_NAME = originalOld;
-    }
-  });
-
-  it("prioritizes EPIMETHEUS_PROJECT_NAME over PI_HINDSIGHT_PROJECT_NAME", () => {
-    const originalNew = process.env.EPIMETHEUS_PROJECT_NAME;
-    const originalOld = process.env.PI_HINDSIGHT_PROJECT_NAME;
-    process.env.EPIMETHEUS_PROJECT_NAME = "new-project";
-    process.env.PI_HINDSIGHT_PROJECT_NAME = "old-project";
-    try {
-      expect(getProjectName("/home/user/myapp")).toBe("new-project");
-    } finally {
-      if (originalNew === undefined) delete process.env.EPIMETHEUS_PROJECT_NAME;
-      else process.env.EPIMETHEUS_PROJECT_NAME = originalNew;
-      if (originalOld === undefined) delete process.env.PI_HINDSIGHT_PROJECT_NAME;
-      else process.env.PI_HINDSIGHT_PROJECT_NAME = originalOld;
-    }
-  });
-
-  it("falls back to cwd basename when neither project-name env var is set", () => {
-    const originalNew = process.env.EPIMETHEUS_PROJECT_NAME;
-    const originalOld = process.env.PI_HINDSIGHT_PROJECT_NAME;
-    delete process.env.EPIMETHEUS_PROJECT_NAME;
-    delete process.env.PI_HINDSIGHT_PROJECT_NAME;
+  it("ignores EPIMETHEUS_PROJECT_NAME (env overrides removed)", () => {
+    process.env.EPIMETHEUS_PROJECT_NAME = "ignored-project";
     try {
       expect(getProjectName("/home/user/myapp")).toBe("myapp");
     } finally {
-      if (originalNew === undefined) delete process.env.EPIMETHEUS_PROJECT_NAME;
-      else process.env.EPIMETHEUS_PROJECT_NAME = originalNew;
-      if (originalOld === undefined) delete process.env.PI_HINDSIGHT_PROJECT_NAME;
-      else process.env.PI_HINDSIGHT_PROJECT_NAME = originalOld;
+      delete process.env.EPIMETHEUS_PROJECT_NAME;
     }
+  });
+
+  it("ignores legacy PI_HINDSIGHT_PROJECT_NAME (env overrides removed)", () => {
+    process.env.PI_HINDSIGHT_PROJECT_NAME = "ignored-legacy";
+    try {
+      expect(getProjectName("/home/user/myapp")).toBe("myapp");
+    } finally {
+      delete process.env.PI_HINDSIGHT_PROJECT_NAME;
+    }
+  });
+
+  it("derives the git common dir name when `<cwd>/.git` exists (single repo)", () => {
+    // Use a real temp dir with a .git directory so deriveGitProjectName runs.
+    // git rev-parse from outside a repo returns non-zero, so we only assert
+    // the basename fallback path here; the git-common-dir derivation is
+    // covered by flush-config.test.ts real-git worktree tests.
+    const dir = join(tmpdir(), `epimetheus-utils-${Date.now()}`);
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    try {
+      // No git repo config -> git fails -> basename fallback.
+      expect(getProjectName(dir)).toBe(basename(dir));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("caches the result per cwd (same cwd returns same name without re-deriving)", () => {
+    expect(getProjectName("/home/user/cached-app")).toBe("cached-app");
+    expect(getProjectName("/home/user/cached-app")).toBe("cached-app");
+  });
+
+  it("returns a different name for a different cwd", () => {
+    expect(getProjectName("/home/user/app-a")).toBe("app-a");
+    expect(getProjectName("/home/user/app-b")).toBe("app-b");
   });
 });

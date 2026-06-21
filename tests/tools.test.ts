@@ -9,7 +9,14 @@ import type { RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-cl
 import type { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
 import { clearSessionQueueState, removePendingFlag } from "../src/queue";
-import { isToolEnabled, registerTools, updateRetainToolVisibility } from "../src/tools";
+import {
+  markStartupReady,
+  resetActiveSessionFlushReady,
+  resetRegisteredHindsightTools,
+  resetStartupReady,
+  setActiveSessionFlushReady,
+} from "../src/runtime-state";
+import { isToolEnabled, refreshToolVisibility, registerTools } from "../src/tools";
 import {
   readToolQueueFromDisk,
   setupTempAgentDir,
@@ -117,6 +124,10 @@ afterEach(() => {
   // Clean up any queue files created during tests
   removePendingFlag(TEST_SESSION_ID);
   clearSessionQueueState(TEST_SESSION_ID);
+  // Reset runtime-state latches so tests start/leave operational state clean.
+  resetStartupReady();
+  resetActiveSessionFlushReady();
+  resetRegisteredHindsightTools();
 });
 
 // ============================================
@@ -757,65 +768,94 @@ describe("hindsight_retain context forwarding", () => {
 });
 
 // ============================================
-// updateRetainToolVisibility tests
+// refreshToolVisibility tests
 // ============================================
 
-describe("updateRetainToolVisibility", () => {
-  it("removes hindsight_retain from active tools when not retained", () => {
+describe("refreshToolVisibility", () => {
+  /** Make the extension operational so tools can be shown. */
+  function beOperational(): void {
+    markStartupReady();
+    setActiveSessionFlushReady(true);
+  }
+
+  it("hides ALL hindsight tools when degraded (not operational)", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
+    // Start operational+retained: all hindsight tools active.
+    refreshToolVisibility(pi, true);
+    expect(pi.getActiveTools()).toContain("hindsight_retain");
+    expect(pi.getActiveTools()).toContain("hindsight_recall");
+    expect(pi.getActiveTools()).toContain("hindsight_reflect");
 
-    // Initially all tools are active
-    const activeBefore = pi.getActiveTools();
-    expect(activeBefore).toContain("hindsight_retain");
-
-    updateRetainToolVisibility(pi, false);
-
-    const activeAfter = pi.getActiveTools();
-    expect(activeAfter).not.toContain("hindsight_retain");
-    // Other hindsight tools should remain
-    expect(activeAfter).toContain("hindsight_recall");
-    expect(activeAfter).toContain("hindsight_reflect");
+    // Flip to degraded: ALL hindsight tools hidden (not just retain).
+    setActiveSessionFlushReady(false);
+    refreshToolVisibility(pi, true);
+    const active = pi.getActiveTools();
+    expect(active).not.toContain("hindsight_retain");
+    expect(active).not.toContain("hindsight_recall");
+    expect(active).not.toContain("hindsight_reflect");
+    expect(active).not.toContain("hindsight_set_extra_context");
+    expect(active).not.toContain("hindsight_get_extra_context");
   });
 
-  it("adds hindsight_retain back when session becomes retained", () => {
+  it("when operational + retained, shows all registered hindsight tools incl retain", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
 
-    // Remove first
-    updateRetainToolVisibility(pi, false);
-    const activeAfterRemove = pi.getActiveTools();
-    expect(activeAfterRemove).not.toContain("hindsight_retain");
+    refreshToolVisibility(pi, true);
 
-    // Add back
-    updateRetainToolVisibility(pi, true);
-    const activeAfterAdd = pi.getActiveTools();
-    expect(activeAfterAdd).toContain("hindsight_retain");
+    const active = pi.getActiveTools();
+    expect(active).toContain("hindsight_retain");
+    expect(active).toContain("hindsight_recall");
+    expect(active).toContain("hindsight_reflect");
   });
 
-  it("is a no-op when retained=true and tool is already active", () => {
+  it("when operational + not retained, hides only hindsight_retain", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
 
-    // Tool is active by default
-    const callCountBefore = pi.setActiveToolsCalls.length;
-    updateRetainToolVisibility(pi, true);
+    refreshToolVisibility(pi, false);
 
-    // setActiveTools should not have been called
-    expect(pi.setActiveToolsCalls.length).toBe(callCountBefore);
+    const active = pi.getActiveTools();
+    expect(active).not.toContain("hindsight_retain");
+    // Read-only tools remain available when operational.
+    expect(active).toContain("hindsight_recall");
+    expect(active).toContain("hindsight_reflect");
   });
 
-  it("is a no-op when retained=false and tool is already inactive", () => {
+  it("restores hindsight_retain when transitioning not-retained -> retained while operational", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
 
-    // Remove first
-    updateRetainToolVisibility(pi, false);
-    const callCountAfterRemove = pi.setActiveToolsCalls.length;
+    refreshToolVisibility(pi, false);
+    expect(pi.getActiveTools()).not.toContain("hindsight_retain");
 
-    // Calling again should be a no-op
-    updateRetainToolVisibility(pi, false);
-    expect(pi.setActiveToolsCalls.length).toBe(callCountAfterRemove);
+    refreshToolVisibility(pi, true);
+    expect(pi.getActiveTools()).toContain("hindsight_retain");
+  });
+
+  it("preserves non-hindsight tools across visibility changes", () => {
+    const pi = createMockPi();
+    // Register an unrelated tool to simulate other extensions/built-ins.
+    (pi as unknown as { registerTool: (t: unknown) => void }).registerTool({
+      name: "other_tool",
+      execute: () => ({}),
+      parameters: {},
+    });
+    registerTools(pi, testConfig, createMockClient());
+    beOperational();
+
+    refreshToolVisibility(pi, false); // hide retain
+    expect(pi.getActiveTools()).toContain("other_tool");
+
+    setActiveSessionFlushReady(false); // degraded
+    refreshToolVisibility(pi, true);
+    expect(pi.getActiveTools()).toContain("other_tool");
+    expect(pi.getActiveTools()).not.toContain("hindsight_retain");
   });
 });
 

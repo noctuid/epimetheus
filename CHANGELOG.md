@@ -2,6 +2,28 @@
 
 ## Pending
 
+### Features
+
+- **Project-local flush config** — Added optional cwd-local project-name overrides for flushing via `<cwd>/.pi/epimetheus/flush-config.jsonc|.json` (`.jsonc` wins; no ancestor walk). The schema currently supports only `projectName`. Sessions started with a valid project-local config are marked to keep using it; marked sessions and sessions with an invalid present config fail closed instead of silently falling back. Unmarked sessions continue with the default project-name derivation.
+- **`/hindsight detach-flush-config`** — Added a recovery command to stop requiring the project-local flush config for the current session and re-flush with the cwd-derived project name.
+- **Flush-config diagnostics** — `/hindsight config` now reports the session cwd, metadata flag, config-file presence, resolved/default project names, and whether flushing is blocked.
+- **Default project names now prefer the git common dir** — Unmarked sessions derive project names as git common dir → `basename(cwd)`, so worktrees share the main repo name. Project-name environment-variable overrides were removed because they do not follow Pi session switching.
+
+### Fixed
+
+- **Degraded mode is more consistent** — Config/server/startup failures and active-session project-local flush-config failures block operational tools, queue writes, network work, and operational slash commands while keeping diagnostics, display controls, recall rendering/filtering, and recovery commands available. `enabled: false` remains a full global kill switch.
+
+### Internal
+
+- Added a centralized flush-config resolver and integrated flush-aware project-name resolution into session and tool flush paths.
+- Updated session parsing/upsert paths to use pre-resolved project names and restore pending claims on fail-closed flush-config errors.
+- Expanded test fixtures for realistic session cwd and project-local flush-config metadata cases.
+
+### Documentation
+
+- Documented project-local flush config, resolution order, fail-closed behavior, and `/hindsight detach-flush-config` in `docs/reference.md`.
+- Added `docs/architecture/config.md` and moved ingestion architecture docs to `docs/architecture/ingestion.md`.
+
 ## 0.5.0
 
 ### Breaking Changes
@@ -78,7 +100,7 @@ User note:
 
 ### Documentation
 
-- Added `docs/ARCHITECTURE.md` documenting the queue protocol, claim/recovery flow, live session state, parsed artifacts, and normal flush authority model.
+- Added `docs/architecture/ingestion.md` documenting the queue protocol, claim/recovery flow, live session state, parsed artifacts, and normal flush authority model.
 
 ### Internal
 

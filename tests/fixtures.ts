@@ -339,8 +339,8 @@ export function setupTempAgentDir(label: string): string {
  *
  * Includes both the current `EPIMETHEUS_*` (preferred) and legacy
  * `PI_HINDSIGHT_*` fallback names so tests that set either get cleaned up.
- * `HINDSIGHT_API_URL` / `HINDSIGHT_API_KEY` (official Hindsight service vars)
- * and `EPIMETHEUS_PROJECT_NAME` / `PI_HINDSIGHT_PROJECT_NAME` are included too.
+ * `HINDSIGHT_API_URL` / `HINDSIGHT_API_KEY` are official Hindsight service vars.
+ * Removed project-name env vars are still listed so tests can verify they are ignored.
  */
 export const HINDSIGHT_ENV_KEYS = [
   "EPIMETHEUS_ENABLED",
@@ -463,6 +463,12 @@ export async function withTempDir<T>(fn: (tmpDir: string) => Promise<T>): Promis
  * @param options.parentSession - Optional parent session path (for forked sessions)
  * @param options.messages - Messages to include. Defaults to a single user message.
  *   Pass an empty array to write a header-only file (e.g. for fork-without-messages tests).
+ * @param options.cwd - Optional cwd to record in the session header (defaults to
+ *   "/test" for backward compat with existing tests).
+ * @param options.retained - Defaults to true; sets the hindsight-meta retained flag.
+ * @param options.extraContext - Optional hindsight-meta extraContext string.
+ * @param options.usesProjectFlushConfig - Optional hindsight-meta flag marking
+ *   the session as requiring a cwd-local flush config.
  */
 export function writeSessionFile(
   dir: string,
@@ -470,8 +476,10 @@ export function writeSessionFile(
   options: {
     parentSession?: string;
     messages?: Array<{ role: string; content: unknown }>;
+    cwd?: string;
     retained?: boolean;
     extraContext?: string;
+    usesProjectFlushConfig?: boolean;
   } = {}
 ): string {
   const sessionPath = join(dir, `${sessionId}.jsonl`);
@@ -479,7 +487,7 @@ export function writeSessionFile(
     type: "session",
     id: sessionId,
     timestamp: new Date().toISOString(),
-    cwd: "/test",
+    cwd: options.cwd ?? "/test",
   };
   if (options.parentSession) {
     header.parentSession = options.parentSession;
@@ -492,6 +500,9 @@ export function writeSessionFile(
   const metaData: Record<string, unknown> = { retained };
   if (options.extraContext !== undefined) {
     metaData.extraContext = options.extraContext;
+  }
+  if (options.usesProjectFlushConfig !== undefined) {
+    metaData.usesProjectFlushConfig = options.usesProjectFlushConfig;
   }
   lines.push(
     JSON.stringify({

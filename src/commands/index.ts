@@ -13,18 +13,7 @@ import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
 import { EXTENSION_ID } from "../constants";
 import type { RecallMessageDetails } from "../index";
-
-// Whether the not-ready warning has been shown this process. Resets on
-// /reload (module re-import) and from index.ts's test reset hook. Avoids
-// spamming the same unavailable warning on repeated blocked operational
-// commands while startup hasn't completed.
-let notReadyWarned = false;
-
-/** Reset module-level command state. Exported for tests via index.ts._resetState(). */
-export function resetNotReadyWarned(): void {
-  notReadyWarned = false;
-}
-
+import { createDetachFlushConfigSubcommand } from "./detach-flush-config";
 import {
   createExtraContextSubcommand,
   createRemoveTagSubcommand,
@@ -40,6 +29,17 @@ import {
 } from "./session";
 import { createConfigSubcommand, createStatusSubcommand } from "./status";
 import type { Subcommand } from "./types";
+
+// Whether the not-ready warning has been shown this process. Resets on
+// /reload (module re-import) and from index.ts's test reset hook. Avoids
+// spamming the same unavailable warning on repeated blocked operational
+// commands while startup hasn't completed.
+let notReadyWarned = false;
+
+/** Reset module-level command state. Exported for tests via index.ts._resetState(). */
+export function resetNotReadyWarned(): void {
+  notReadyWarned = false;
+}
 
 /**
  * Register the `/hindsight` command with all subcommands.
@@ -79,10 +79,21 @@ export function registerCommands(
   /**
    * Operational subcommands that perform writes/network or queue work. These are
    * blocked (unavailable message, no side effects) until a healthy startup has
-   * completed (`isReady()`). Diagnostic/display subcommands (`status`, `config`,
-   * `popup`, `toggle-display`, and the debug-only `active-tools`) remain
+   * completed (`isReady()`). Diagnostic/display subcommands (`status`,
+   * `config`, `toggle-display`, and the debug-only `active-tools`) remain
    * available even when not ready so users can inspect state and reason about
    * why the extension is unavailable.
+   *
+   * `detach-flush-config` is intentionally NOT operational: it is the recovery
+   * command for an active session that failed readiness because of an invalid
+   * or missing cwd-local flush config. It must remain available even in that
+   * failed state so the user can stop requiring the flush config without
+   * manually editing the session file. It only writes session metadata + a
+   * pending marker (no client/network), so running it while not ready is safe.
+   *
+   * `popup` is display-only but gated separately (see the handler): degraded
+   * mode skips auto-recall, so there is no current recall to inspect; it also
+   * requires `autoRecallEnabled`.
    */
   const OPERATIONAL_SUBCOMMANDS = new Set([
     "flush",
@@ -94,6 +105,11 @@ export function registerCommands(
     "remove-tag",
     "set-extra-context",
   ]);
+
+  // Display-only, but only meaningful when auto-recall can run and cache a
+  // current recall. Kept out of OPERATIONAL_SUBCOMMANDS so it gets a specific
+  // user-facing explanation instead of the generic operational-command warning.
+  const AUTO_RECALL_CACHE_SUBCOMMANDS = new Set(["popup"]);
 
   const subcommands: Record<string, Subcommand> = {
     flush: createFlushSubcommand(client, config),
@@ -122,6 +138,7 @@ export function registerCommands(
     tag: createTagSubcommand(pi, config),
     "remove-tag": createRemoveTagSubcommand(pi, config),
     "set-extra-context": createExtraContextSubcommand(pi, config),
+    "detach-flush-config": createDetachFlushConfigSubcommand(pi, config),
     "toggle-display": createToggleDisplaySubcommand(
       config,
       getAutoRecallDisplayOverride,
@@ -204,23 +221,48 @@ export function registerCommands(
       }
 
       // Block operational subcommands until a healthy startup completes.
-      // Diagnostic/display subcommands (status, config, popup, toggle-display,
-      // active-tools) remain available so users can inspect why the extension
-      // is unavailable.
+      // Diagnostic/display subcommands (status, config, toggle-display,
+      // active-tools, and the detach-flush-config recovery command) remain
+      // available so users can inspect why the extension is unavailable.
       if (OPERATIONAL_SUBCOMMANDS.has(subcommandName) && !isReady()) {
         // Surface the full reason once per process; subsequent blocked attempts
         // stay quiet so repeated commands while unhealthy don't spam.
         if (!notReadyWarned) {
           notReadyWarned = true;
           ctx.ui.notify(
-            `${EXTENSION_ID} is not ready (config/startup checks failed or have not run). ` +
+            `${EXTENSION_ID} is not ready (startup checks have not completed, the ` +
+              `server is unreachable/incompatible, or the active session's ` +
+              `project-local flush config is required-but-missing/invalid). ` +
               `Operational commands (flush, parse-and-upsert-session, toggle-retain, ...) ` +
-              `are unavailable until config is valid and the server is reachable/version-compatible. ` +
+              `are unavailable until startup succeeds and the active session's ` +
+              `flush config is valid or detached via \`/hindsight detach-flush-config\`. ` +
               `Run \`/hindsight status\` for details.`,
             "warning"
           );
         }
         return;
+      }
+
+      // Commands that inspect the auto-recall cache are display-only but still
+      // require operational auto-recall: degraded mode skips auto-recall, so
+      // there is no current recall to inspect. They also require
+      // `autoRecallEnabled` — without auto-recall, no recall is ever cached.
+      if (AUTO_RECALL_CACHE_SUBCOMMANDS.has(subcommandName)) {
+        if (!isReady()) {
+          ctx.ui.notify(
+            `${EXTENSION_ID} is not ready; auto-recall is skipped in degraded mode, ` +
+              `so there is no recall to inspect. Run \`/hindsight status\` for details.`,
+            "info"
+          );
+          return;
+        }
+        if (!config.autoRecallEnabled) {
+          ctx.ui.notify(
+            "Cannot pop up recall: autoRecallEnabled is false (no recall is cached).",
+            "info"
+          );
+          return;
+        }
       }
 
       await subcommand.handler(subArgs, ctx);
