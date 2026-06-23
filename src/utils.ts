@@ -2,8 +2,27 @@
  * Shared utility functions.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join } from "node:path";
+
+/** Convert a parser/string offset into a 1-based line/character location. */
+export function offsetToLineColumn(
+  content: string,
+  offset: number
+): { line: number; character: number } {
+  let line = 1;
+  let character = 1;
+  for (let i = 0; i < offset && i < content.length; i++) {
+    if (content[i] === "\n") {
+      line++;
+      character = 1;
+    } else {
+      character++;
+    }
+  }
+  return { line, character };
+}
 
 /**
  * Truncate a string to max character count (code points, not code units).
@@ -98,14 +117,189 @@ export function getBasedir(cwd: string): string {
 }
 
 /**
- * Get the project name, falling back to basedir if not set via env var.
- * Reads `EPIMETHEUS_PROJECT_NAME` if set, with `PI_HINDSIGHT_PROJECT_NAME` as a
- * legacy fallback; otherwise derives from the cwd basename.
+ * Resolve the git common dir for `cwd`, returning the absolute path of the
+ * common dir (e.g. `/repo/.git` for both `/repo` and `/repo/worktrees/foo`).
+ *
+ * Uses `git rev-parse --git-common-dir`. Returns `null` when `git` is
+ * unavailable, the commondir cannot be resolved, or the result is degenerate.
+ *
+ * Single-slot per-cwd cache: project-config lookup, default project-name
+ * derivation, and the active-session project-name cache all call this for the
+ * same cwd, so caching avoids redundant `git rev-parse` spawns. Cleared by
+ * {@link clearProjectNameCache}.
+ *
+ * Callers should guard this with `existsSync(join(cwd, ".git"))` to avoid
+ * spawning git for directories that are not git repos.
+ */
+export function resolveGitCommonDir(cwd: string): string | null {
+  if (commonDirCache?.cwd === cwd) return commonDirCache.commonDir;
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawnSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      encoding: "utf-8",
+      timeout: 5000,
+    });
+  } catch {
+    return null;
+  }
+  if (result.error) return null;
+  if (typeof result.status !== "number" || result.status !== 0) return null;
+  const raw = typeof result.stdout === "string" ? result.stdout.trim() : "";
+  if (!raw) return null;
+
+  const abs = isAbsolute(raw) ? raw : join(cwd, raw);
+  const resolved = realpathOrSelf(abs);
+  commonDirCache = { cwd, commonDir: resolved };
+  return resolved;
+}
+
+/**
+ * Resolve the git commondir's parent path (the main repo root) for `cwd`.
+ *
+ * For a main repo `/repo` the commondir is `/repo/.git` and the parent is `/repo`.
+ * For a worktree `/repo/wt/foo` the commondir is also `/repo/.git` → parent `/repo`.
+ *
+ * Submodules are excluded: their commondir is `<super>/.git/modules/<name>`
+ * (basename is not `.git`), so taking its parent would resolve to `modules`
+ * instead of the submodule working tree. Only a commondir whose basename is
+ * `.git` — a real main-repo or linked-worktree shared dir — yields a parent.
+ *
+ * Returns `null` when the commondir cannot be resolved, is not a `.git` dir
+ * (e.g. a submodule), or the parent is degenerate (e.g. `/`). Callers can use
+ * this to look for `.pi` config in the main repo when a worktree doesn't have
+ * its own.
+ *
+ * Callers should guard this with `existsSync(join(cwd, ".git"))` to avoid
+ * spawning git for directories that are not git repos.
+ */
+export function resolveGitCommonDirParent(cwd: string): string | null {
+  const commonDir = resolveGitCommonDir(cwd);
+  // Only a `.git` commondir (main repo or linked worktree shared dir) has a
+  // meaningful parent. A submodule's commondir is `<super>/.git/modules/<name>`
+  // — its basename is not `.git`, so skip it and let callers fall back to
+  // basename(cwd).
+  const parent = !commonDir || basename(commonDir) !== ".git" ? null : dirname(commonDir);
+  return !parent || parent === "/" || parent === "." ? null : parent;
+}
+
+/**
+ * Derive the main repo name from `<cwd>/.git`'s git common dir, so worktrees
+ * share the main repo name instead of each getting their worktree dir name.
+ *
+ * Uses `git rev-parse --git-common-dir`, then derives a name based on the
+ * commondir's layout:
+ *   - main repo `/repo`         → commondir `/repo/.git` → `repo`
+ *   - worktree `/repo/wt/foo`   → commondir `/repo/.git` → `repo` (shared)
+ *   - submodule `/super/mysub`  → commondir `/super/.git/modules/mysub` → `mysub`
+ *   - submodule worktree        → same commondir            → `mysub` (shared)
+ *
+ * For a `.git` commondir (main repo or linked worktree), the name is
+ * `basename(dirname(commonDir))`. For a submodule commondir (basename is not
+ * `.git`, e.g. `<super>/.git/modules/<name>`), the name is
+ * `basename(commonDir)` — the submodule name — so submodule worktrees share it.
+ *
+ * Returns `null` when `git` is unavailable, the commondir cannot be resolved,
+ * or the derived name is empty / degenerate. Callers fall back to basename.
+ *
+ * Callers should guard this with `existsSync(join(cwd, ".git"))` to avoid
+ * spawning git for directories that are not git repos.
+ */
+export function deriveGitProjectName(cwd: string): string | null {
+  const commonDir = resolveGitCommonDir(cwd);
+  if (!commonDir) return null;
+  const base = basename(commonDir);
+  // `.git` commondir (main repo / linked worktree) → name is the parent dir.
+  // Submodule commondir (`<super>/.git/modules/<name>`) → name is the
+  // commondir basename (the submodule name), so worktrees share it.
+  const name = base === ".git" ? basename(dirname(commonDir)) : base;
+  if (!name || name === "/" || name === ".") return null;
+  return name;
+}
+
+/**
+ * Resolve a symlink'd path to its real target. Falls back to the input path
+ * when realpath fails (e.g., the path was already removed between the
+ * `existsSync` check and the realpath call).
+ */
+function realpathOrSelf(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * Derive the default project name for a cwd and report its source, WITHOUT
+ * caching. If `<cwd>/.git` exists and {@link deriveGitProjectName} returns a
+ * name, returns `{ name, source: "git" }` (so a main repo and its worktrees
+ * share the main repo name); otherwise returns `{ name: basename(cwd),
+ * source: "basename" }`.
+ *
+ * This is the uncached primitive underneath {@link getProjectName}. The flush
+ * path calls this directly (via `project-config.ts`'s `defaultProjectName`) rather
+ * than {@link getProjectName}, because `flush-pending` resolves many session
+ * cwds per run and must NOT go through the active-session-oriented single-slot
+ * cache.
+ */
+export function deriveDefaultProjectName(cwd: string): {
+  name: string;
+  source: "git" | "basename";
+} {
+  if (existsSync(join(cwd, ".git"))) {
+    const gitName = deriveGitProjectName(cwd);
+    if (gitName !== null) return { name: gitName, source: "git" };
+    // fall through to basename on any git failure
+  }
+  return { name: basename(cwd), source: "basename" };
+}
+
+/**
+ * Single-slot cache for the default project name, keyed by cwd. The active
+ * session's cwd is stable within a session, so the (potentially slow) git
+ * derivation runs at most once per cwd instead of on every turn (auto-recall
+ * builds `{project}` placeholder params on every `before_agent_start`).
+ * Cleared by {@link clearProjectNameCache} (tests / module reset).
+ *
+ * Only the *active* session's name is cached here — batch flushers that resolve
+ * many cwds (flush-pending) should call {@link deriveDefaultProjectName} directly.
+ */
+let projectNameCache: { cwd: string; name: string } | null = null;
+
+/**
+ * Single-slot per-cwd cache for {@link resolveGitCommonDir}, so the
+ * project-config fallback lookup and default project-name derivation share one
+ * `git rev-parse` spawn per cwd. Cleared alongside the project-name cache.
+ */
+let commonDirCache: { cwd: string; commonDir: string } | null = null;
+
+/** Clear the project-name and commondir caches. Exported for tests/reset via `_resetState()`. */
+export function clearProjectNameCache(): void {
+  projectNameCache = null;
+  commonDirCache = null;
+}
+
+/**
+ * Get the default project name for a cwd: git common dir (so worktrees share
+ * the main repo name) → basename. Cached per cwd (single-slot, active-session
+ * oriented).
+ *
+ * This is the default derivation shared by the flush path (via
+ * {@link ./project-config.ts resolveProjectName}'s detached/unmarked case)
+ * and the auto-recall `{project}` placeholder. Project-local project config can
+ * override the project name for flush/tool-retain tagging. Env-var overrides
+ * (`EPIMETHEUS_PROJECT_NAME` / legacy `PI_HINDSIGHT_PROJECT_NAME`) were removed
+ * because env vars do not track Pi session switching.
+ *
+ * Callers resolving many cwds per run (e.g. flush-pending) should call
+ * {@link deriveDefaultProjectName} directly to bypass the active-session cache.
  */
 export function getProjectName(cwd: string): string {
-  return (
-    process.env.EPIMETHEUS_PROJECT_NAME || process.env.PI_HINDSIGHT_PROJECT_NAME || basename(cwd)
-  );
+  if (projectNameCache?.cwd === cwd) return projectNameCache.name;
+  const name = deriveDefaultProjectName(cwd).name;
+  projectNameCache = { cwd, name };
+  return name;
 }
 
 /**

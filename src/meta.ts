@@ -131,6 +131,15 @@ export interface HindsightMeta {
   tags?: string[];
   /** Extra context appended to the Hindsight context field (after session name). */
   extraContext?: string;
+  /**
+   * When true, project-aware session behavior requires a valid cwd-local project
+   * config (`<cwd>/.pi/epimetheus/config.jsonc|.json`) and uses its
+   * `projectName`. Append-only: each new hindsight-meta entry carries forward
+   * the prior value unless explicitly overridden. Latest metadata value wins.
+   * The project config path and the resolved project name are deliberately NOT
+   * stored here — see `src/project-config.ts` for resolution details.
+   */
+  usesProjectConfig?: boolean;
 }
 
 /**
@@ -153,6 +162,11 @@ export function getHindsightMeta(
     }
   }
   return null;
+}
+
+/** Effective project-config flag from session metadata. */
+export function getProjectConfigFlag(meta: HindsightMeta | null): boolean | undefined {
+  return meta?.usesProjectConfig;
 }
 
 /**
@@ -178,6 +192,14 @@ export function buildMetaUpdate(
     updates.extraContext !== undefined ? updates.extraContext : existing?.extraContext;
   if (extraContext !== undefined) {
     meta.extraContext = extraContext;
+  }
+
+  const usesProjectConfig =
+    updates.usesProjectConfig !== undefined
+      ? updates.usesProjectConfig
+      : getProjectConfigFlag(existing);
+  if (usesProjectConfig !== undefined) {
+    meta.usesProjectConfig = usesProjectConfig;
   }
 
   return meta;

@@ -11,20 +11,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
-import { EXTENSION_ID } from "../constants";
+import { prefixLog } from "../constants";
 import type { RecallMessageDetails } from "../index";
-
-// Whether the not-ready warning has been shown this process. Resets on
-// /reload (module re-import) and from index.ts's test reset hook. Avoids
-// spamming the same unavailable warning on repeated blocked operational
-// commands while startup hasn't completed.
-let notReadyWarned = false;
-
-/** Reset module-level command state. Exported for tests via index.ts._resetState(). */
-export function resetNotReadyWarned(): void {
-  notReadyWarned = false;
-}
-
+import { DEGRADED_REASON_PENDING, DegradedReasonKind, getDegradedReason } from "../runtime-state";
+import { createDetachProjectNameSubcommand } from "./detach-project-name";
 import {
   createExtraContextSubcommand,
   createRemoveTagSubcommand,
@@ -40,6 +30,69 @@ import {
 } from "./session";
 import { createConfigSubcommand, createStatusSubcommand } from "./status";
 import type { Subcommand } from "./types";
+
+/**
+ * Build the manual-command blocked message, surfacing the specific degraded
+ * reason when known (set by index.ts whenever readiness changes) and NEVER
+ * falling back to an all-encompassing generic warning. Repeated on every
+ * manual operational-command attempt (no dedup). Recovery advice is
+ * cause-specific so it never tells the user to detach the project name when
+ * the cause is actually a server/version or global-config issue.
+ */
+function blockedMessage(): string {
+  return prefixLog(
+    `operational commands ` +
+      "(flush, parse-and-upsert-session, toggle-retain, ...) are blocked while in degraded mode." +
+      `\n${degradedReasonSentence()}\n${degradedRecoveryAdvice()}`
+  );
+}
+
+/**
+ * The specific degraded reason as a finished sentence (or the internal
+ * "startup readiness has not completed yet" fallback when no reason is
+ * classified). Shared by the operational-command and popup block paths so the
+ * popup message never uses the old generic "not ready" wording either.
+ *
+ * Causes that carry an `errors[]` (currently global-config) render them as a
+ * bulleted list below the summary; the shared `epimetheus: ` log prefix is
+ * stripped from each error here because it is redundant inside an
+ * already-epimetheus-branded block message (and was previously duplicated
+ * once per error in the joined string).
+ */
+function degradedReasonSentence(): string {
+  const reason = getDegradedReason();
+  if (reason?.errors && reason.errors.length > 0) {
+    const bullets = reason.errors
+      .map((e) => e.replace(/^epimetheus:\s*/, ""))
+      .map((e) => `  - ${e}`)
+      .join("\n");
+    return `Reason: ${reason.message}:\n${bullets}`;
+  }
+  return `Reason: ${reason?.message ?? DEGRADED_REASON_PENDING}.`;
+}
+
+/**
+ * Cause-specific recovery advice. NEVER suggests detach-project-name for a
+ * server or global-config cause.
+ */
+function degradedRecoveryAdvice(): string {
+  const reason = getDegradedReason();
+  if (reason?.kind === DegradedReasonKind.ProjectName) {
+    const configPath = reason.configPath ?? `${reason.cwd ?? "<cwd>"}/.pi/epimetheus/config.jsonc`;
+    if (reason.projectNameRecovery === "fix-config") {
+      return `Fix ${configPath} (see \`/hindsight config\` for details).`;
+    }
+    return `Run \`/hindsight detach-project-name\` to stop requiring it, or fix ${configPath}.`;
+  }
+  if (reason?.kind === DegradedReasonKind.GlobalConfig) {
+    return (
+      "Run `/hindsight config` to inspect the config source and validation " +
+      "errors, then fix the global config file or environment variables."
+    );
+  }
+  // Server/version unreachable/incompatible, or any other cause.
+  return "Run `/hindsight status` for details, and `/reload` to retry after fixing the server or configuration.";
+}
 
 /**
  * Register the `/hindsight` command with all subcommands.
@@ -71,18 +124,24 @@ export function registerCommands(
     validationWarnings: string[];
   }
 ): void {
-  // Reset the not-ready dedup flag on each (re)registration: in production this
-  // is once per extension load (resets on /reload); in tests, once per
-  // extension.default(pi), so each test starts with a fresh warning.
-  resetNotReadyWarned();
-
   /**
    * Operational subcommands that perform writes/network or queue work. These are
    * blocked (unavailable message, no side effects) until a healthy startup has
-   * completed (`isReady()`). Diagnostic/display subcommands (`status`, `config`,
-   * `popup`, `toggle-display`, and the debug-only `active-tools`) remain
+   * completed (`isReady()`). Diagnostic/display subcommands (`status`,
+   * `config`, `toggle-display`, and the debug-only `active-tools`) remain
    * available even when not ready so users can inspect state and reason about
    * why the extension is unavailable.
+   *
+   * `detach-project-name` is intentionally NOT operational: it is the recovery
+   * command for an active session that failed readiness because of an invalid
+   * or missing cwd-local project name config. It must remain available even in
+   * that failed state so the user can stop requiring the project name without
+   * manually editing the session file. It only writes session metadata + a
+   * pending marker (no client/network), so running it while not ready is safe.
+   *
+   * `popup` is display-only but gated separately (see the handler): degraded
+   * mode skips auto-recall, so there is no current recall to inspect; it also
+   * requires `autoRecallEnabled`.
    */
   const OPERATIONAL_SUBCOMMANDS = new Set([
     "flush",
@@ -94,6 +153,11 @@ export function registerCommands(
     "remove-tag",
     "set-extra-context",
   ]);
+
+  // Display-only, but only meaningful when auto-recall can run and cache a
+  // current recall. Kept out of OPERATIONAL_SUBCOMMANDS so it gets a specific
+  // user-facing explanation instead of the generic operational-command warning.
+  const AUTO_RECALL_CACHE_SUBCOMMANDS = new Set(["popup"]);
 
   const subcommands: Record<string, Subcommand> = {
     flush: createFlushSubcommand(client, config),
@@ -122,6 +186,7 @@ export function registerCommands(
     tag: createTagSubcommand(pi, config),
     "remove-tag": createRemoveTagSubcommand(pi, config),
     "set-extra-context": createExtraContextSubcommand(pi, config),
+    "detach-project-name": createDetachProjectNameSubcommand(pi, config),
     "toggle-display": createToggleDisplaySubcommand(
       config,
       getAutoRecallDisplayOverride,
@@ -203,24 +268,62 @@ export function registerCommands(
         return;
       }
 
-      // Block operational subcommands until a healthy startup completes.
-      // Diagnostic/display subcommands (status, config, popup, toggle-display,
-      // active-tools) remain available so users can inspect why the extension
-      // is unavailable.
+      // Block operational subcommands until the extension is operational.
+      // Diagnostic/display subcommands (status, config, toggle-display,
+      // active-tools, and the detach-project-name recovery command) remain
+      // available so users can inspect why the extension is unavailable.
+      //
+      // Manual blocked attempts must REPEAT the reason on every invocation
+      // (no dedup) and surface the specific degraded cause when known, so the
+      // user is told exactly why this command is unavailable rather than a
+      // generic catch-all. The reason lives in `runtime-state`'s
+      // `degradedReason` slot, set by index.ts whenever readiness changes.
       if (OPERATIONAL_SUBCOMMANDS.has(subcommandName) && !isReady()) {
-        // Surface the full reason once per process; subsequent blocked attempts
-        // stay quiet so repeated commands while unhealthy don't spam.
-        if (!notReadyWarned) {
-          notReadyWarned = true;
-          ctx.ui.notify(
-            `${EXTENSION_ID} is not ready (config/startup checks failed or have not run). ` +
-              `Operational commands (flush, parse-and-upsert-session, toggle-retain, ...) ` +
-              `are unavailable until config is valid and the server is reachable/version-compatible. ` +
-              `Run \`/hindsight status\` for details.`,
-            "warning"
-          );
-        }
+        ctx.ui.notify(blockedMessage(), "warning");
         return;
+      }
+
+      // `detach-project-name` is a recovery command for the project-name
+      // degraded cause, so it stays available when that is the reason. But it
+      // writes session metadata + a pending marker, so it must be blocked when
+      // the degraded cause is global config or server/version — the fail-fast
+      // bootstrap path promises no metadata/session-state/queue writes while
+      // global config is invalid.
+      if (
+        subcommandName === "detach-project-name" &&
+        !isReady() &&
+        getDegradedReason()?.kind !== DegradedReasonKind.ProjectName
+      ) {
+        ctx.ui.notify(blockedMessage(), "warning");
+        return;
+      }
+
+      // Commands that inspect the auto-recall cache are display-only but still
+      // require operational auto-recall: degraded mode skips auto-recall, so
+      // there is no current recall to inspect. They also require
+      // `autoRecallEnabled` — without auto-recall, no recall is ever cached.
+      if (AUTO_RECALL_CACHE_SUBCOMMANDS.has(subcommandName)) {
+        if (!isReady()) {
+          // Degraded mode skips auto-recall, so there is no current recall to
+          // inspect. Surface the SPECIFIC degraded reason + cause-specific
+          // recovery advice (shared with operational-command blocking) rather
+          // than the old generic "not ready" wording.
+          ctx.ui.notify(
+            prefixLog(
+              `Cannot pop up recall: auto-recall is skipped in degraded mode, ` +
+                `so there is no recall to inspect. ${degradedReasonSentence()} ${degradedRecoveryAdvice()}`
+            ),
+            "info"
+          );
+          return;
+        }
+        if (!config.autoRecallEnabled) {
+          ctx.ui.notify(
+            "Cannot pop up recall: autoRecallEnabled is false (no recall is cached).",
+            "info"
+          );
+          return;
+        }
       }
 
       await subcommand.handler(subArgs, ctx);

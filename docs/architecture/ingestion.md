@@ -1,6 +1,6 @@
-# Architecture
+# Ingestion Architecture
 
-This document explains epimetheus' ingestion architecture: how session content, explicit tool retains, and metadata move from Pi session state into Hindsight.
+This document explains epimetheus' ingestion architecture: how session content, explicit tool retains, and metadata move from Pi session state into Hindsight. For config/readiness behavior, see [Config Architecture](config.md).
 
 ## Goals
 
@@ -270,7 +270,7 @@ Config/env-derived ingestion metadata is rebuilt whenever an upsert happens inst
 - final Hindsight context from current `hindsightContextPrefix`, session name, and extra context;
 - constant tags from current config;
 - structural tags such as `session:<id>`, `cwd:<path>`, `basedir:<name>`, `store_method:auto`, and `parent:<id>`;
-- project tag/name, including the current `EPIMETHEUS_PROJECT_NAME` override when set, otherwise derived from the session cwd;
+- project tag/name, resolved for the target session at flush time: project-local config `projectName` when required/present, otherwise git common-dir basename or cwd basename;
 - observation scopes from current config, with placeholders expanded using the session ID, parent session ID, session cwd, basedir, and project name;
 - entities from current config.
 

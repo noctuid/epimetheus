@@ -14,6 +14,9 @@
  *  command (`/hindsight`), tool names, or message types — those are separate. */
 export const EXTENSION_ID = "epimetheus";
 
+/** Human-facing extension name. */
+export const EXTENSION_DISPLAY_NAME = `${EXTENSION_ID.slice(0, 1).toUpperCase()}${EXTENSION_ID.slice(1)}`;
+
 /** Status-bar key (currently equal to {@link EXTENSION_ID}). */
 export const STATUS_ID = EXTENSION_ID;
 

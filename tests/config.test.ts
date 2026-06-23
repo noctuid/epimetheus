@@ -737,7 +737,7 @@ describe("loadConfig", () => {
     expect(warning).toContain('(value: "value")');
   });
 
-  it("rejects projectName in config file (EPIMETHEUS_PROJECT_NAME is env-only)", () => {
+  it("rejects projectName in global config file (project-local setting only)", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({

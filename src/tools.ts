@@ -9,7 +9,13 @@ import { type Static, Type } from "typebox";
 import type { HindsightClientWrapper } from "./client";
 import type { HindsightConfig, MemoryType, ToolName } from "./config";
 import { getHindsightMeta, shouldSessionBeRetained, updateSessionMetadata } from "./meta";
+import { resolveProjectName } from "./project-config";
 import { queueToolRetain } from "./retention";
+import {
+  getRegisteredHindsightTools,
+  isOperationalReady,
+  setRegisteredHindsightTools,
+} from "./runtime-state";
 import { extractParentSessionId } from "./utils";
 
 // Reusable schemas
@@ -96,12 +102,10 @@ export function registerTools(
   pi: ExtensionAPI,
   config: HindsightConfig,
   client: HindsightClientWrapper | null
-): void {
-  // Register hindsight_set_extra_context when enabled.
-  // Gated by toolsEnabled like all other tools. Can be included in the array
-  // as "set_extra_context". The /hindsight set-extra-context slash command still
-  // works regardless of this setting.
+): string[] {
+  const registered: string[] = [];
   if (isToolEnabled(config, "set_extra_context")) {
+    registered.push("hindsight_set_extra_context");
     pi.registerTool({
       name: "hindsight_set_extra_context",
       label: "Hindsight Extra Context",
@@ -157,6 +161,7 @@ export function registerTools(
   }
 
   if (isToolEnabled(config, "get_extra_context")) {
+    registered.push("hindsight_get_extra_context");
     pi.registerTool({
       name: "hindsight_get_extra_context",
       label: "Hindsight Get Extra Context",
@@ -206,6 +211,7 @@ export function registerTools(
 
   // Register hindsight_retain if enabled
   if (isToolEnabled(config, "retain")) {
+    registered.push("hindsight_retain");
     // hindsight_retain - always available, just queues to disk
     pi.registerTool({
       name: "hindsight_retain",
@@ -277,15 +283,41 @@ export function registerTools(
         const meta = getHindsightMeta(entries);
         const sessionUserTags = meta?.tags ?? [];
 
+        // Resolve the project name project-aware so tool retains share the
+        // same `project:` tag as session flushes. The session's recorded cwd
+        // (header.cwd) is authoritative — matches what the upsert path uses.
+        // If the session is marked as using project-local config and the
+        // resolution fails (cwd gone, or config missing/invalid), fail closed:
+        // do not queue — the memory would otherwise be tagged with the wrong
+        // project name
+        const retainCwd = header?.cwd ?? ctx.cwd;
+        const projectNameResult = resolveProjectName(retainCwd, meta?.usesProjectConfig);
+        if (!projectNameResult.ok) {
+          const recoveryAdvice =
+            projectNameResult.recovery === "fix-config"
+              ? `Fix the config at ${retainCwd}/.pi/epimetheus/config.jsonc.`
+              : `Use /hindsight detach-project-name to stop requiring the project-local projectName override, or restore the config at ${retainCwd}/.pi/epimetheus/.`;
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed to store memory: ${projectNameResult.error}. ${recoveryAdvice}`,
+              },
+            ],
+            details: { success: false, error: projectNameResult.error },
+          };
+        }
+
         const result = await queueToolRetain(
           sessionId,
           params.content,
           params.tags,
           params.metadata,
-          ctx.cwd,
+          retainCwd,
           parentSessionId,
           config,
-          sessionUserTags
+          sessionUserTags,
+          projectNameResult.projectName
         );
         if (!result.success) {
           return {
@@ -303,10 +335,11 @@ export function registerTools(
   }
 
   // recall and reflect require client
-  if (!client) return;
+  if (!client) return registered;
 
   // Register hindsight_recall if enabled
   if (isToolEnabled(config, "recall")) {
+    registered.push("hindsight_recall");
     pi.registerTool({
       name: "hindsight_recall",
       label: "Hindsight Recall",
@@ -383,6 +416,7 @@ export function registerTools(
 
   // Register hindsight_reflect if enabled
   if (isToolEnabled(config, "reflect")) {
+    registered.push("hindsight_reflect");
     pi.registerTool({
       name: "hindsight_reflect",
       label: "Hindsight Reflect",
@@ -442,31 +476,44 @@ export function registerTools(
       },
     });
   }
+
+  setRegisteredHindsightTools(registered);
+  return registered;
 }
 
 /**
- * Update whether hindsight_retain is visible to the LLM based on retention state.
+ * Refresh the visibility of all registered Hindsight tools based on the
+ * unified operational state and the session's retention flag.
  *
- * When a session is not retained, hindsight_retain is removed from active tools
- * so the LLM never sees it as an option (instead of seeing it and having calls fail).
- * When retained, it's added back if it was previously removed.
+ * - Degraded (`!isOperationalReady()`): hide ALL hindsight tools so the LLM
+ *   never sees any of them (no recall/reflect/retain/extra-context). This is
+ *   the single degraded mode regardless of cause (unreachable/incompatible
+ *   server, or required-but-missing/invalid cwd-local project config).
+ * - Operational: show all registered hindsight tools, except `hindsight_retain`
+ *   is hidden when the session is not retained (so the LLM never sees a tool
+ *   whose calls would fail). `retained` has no effect on the other tools.
  *
- * Note: The execute-time check in hindsight_retain remains as a defensive
- * fallback in case the tool is called through edge cases (e.g., mid-turn toggle).
+ * Reads `isOperationalReady()` and the registered-tool list from
+ * `runtime-state`, so callers only need to pass the session's `retained` flag.
+ *
+ * Enabling/disabling tools is the only place degraded mode is enforced — there
+ * are no operational-state checks inside tool execute handlers.
  */
-export function updateRetainToolVisibility(pi: ExtensionAPI, retained: boolean): void {
-  const toolName = "hindsight_retain";
+export function refreshToolVisibility(pi: ExtensionAPI, retained: boolean): void {
   const activeNames = pi.getActiveTools();
+  // Preserve non-hindsight tools (other extensions / built-ins) unchanged.
+  const nonHindsight = activeNames.filter((n) => !n.startsWith("hindsight_"));
 
-  if (retained) {
-    // Add hindsight_retain if not already active
-    if (!activeNames.includes(toolName)) {
-      pi.setActiveTools([...activeNames, toolName]);
-    }
-  } else {
-    // Remove hindsight_retain from active tools
-    if (activeNames.includes(toolName)) {
-      pi.setActiveTools(activeNames.filter((n) => n !== toolName));
-    }
+  if (!isOperationalReady()) {
+    // Degraded: hide all hindsight tools.
+    pi.setActiveTools(nonHindsight);
+    return;
   }
+
+  // Operational: show all registered hindsight tools except retain when not
+  // retained.
+  const toShow = getRegisteredHindsightTools().filter(
+    (name) => name !== "hindsight_retain" || retained
+  );
+  pi.setActiveTools([...nonHindsight, ...toShow]);
 }

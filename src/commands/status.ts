@@ -7,6 +7,7 @@ import type { HindsightClientWrapper } from "../client";
 import type { HindsightConfig } from "../config";
 import type { RecallMessageDetails } from "../index";
 import { getHindsightMeta, shouldSessionBeRetained } from "../meta";
+import { findProjectConfigFile, resolveProjectConfig, resolveProjectName } from "../project-config";
 import { getPendingWorkCount } from "../retention";
 import { getHindsightCompatibilityError, MIN_HINDSIGHT_VERSION } from "../version";
 import type { Subcommand } from "./types";
@@ -176,6 +177,59 @@ export function createConfigSubcommand(
         }
       } else {
         lines.push("  None");
+      }
+
+      // Session-specific project config diagnostics. These are unrelated to the
+      // global config above: they describe how the *current* session's project
+      // name will be resolved during a flush (its cwd-local project config,
+      // metadata flag, and derived name). The project-local section mirrors the
+      // main Config Source block above (file/presence/status + loaded
+      // projectName or invalid reason).
+      lines.push("\n== Session-Specific Project Config ==");
+      const header = ctx.sessionManager?.getHeader?.();
+      const sessionCwd = header?.cwd ?? ctx.cwd;
+      lines.push(`  Session cwd: ${sessionCwd ?? "(none)"}`);
+
+      const entries = ctx.sessionManager?.getEntries?.() ?? [];
+      const meta = getHindsightMeta(entries);
+      const usesFlag = meta?.usesProjectConfig;
+      const flagLabel =
+        usesFlag === undefined
+          ? "<unset>"
+          : usesFlag
+            ? "true (requires cwd-local project config)"
+            : "false (detached)";
+      lines.push(`  usesProjectConfig: ${flagLabel}`);
+
+      // Project-local config file: path/presence/status + loaded projectName
+      // (or invalid reason).
+      const configPath = findProjectConfigFile(sessionCwd ?? "");
+      if (configPath) {
+        const loaded = resolveProjectConfig(sessionCwd ?? "");
+        if (loaded.ok) {
+          lines.push(`  Project-local config: ${configPath} (valid)`);
+          lines.push(`    projectName: ${loaded.config.projectName}`);
+        } else {
+          lines.push(`  Project-local config: ${configPath} (invalid — ${loaded.error})`);
+        }
+        for (const w of loaded.warnings) lines.push(`    warning: ${w}`);
+      } else {
+        lines.push("  Project-local config: <missing>");
+      }
+
+      // Compact one-line resolution: what this session would use as the
+      // project name. Avoid saying flush would proceed: project-name resolution
+      // is only one prerequisite, and other flush guards may still block.
+      const resolutionMarked = resolveProjectName(sessionCwd ?? "", usesFlag);
+      if (resolutionMarked.ok) {
+        lines.push(
+          `  Project name: ${resolutionMarked.projectName} (source: ${resolutionMarked.source})`
+        );
+      } else {
+        lines.push(`  Project name: (blocked) ${resolutionMarked.error}`);
+        // When blocked by project-name resolution, pending work remains queued
+        // for retry after the user fixes or detaches the project-local config.
+        lines.push("  Flush: blocked — pending left queued");
       }
 
       ctx.ui.notify(lines.join("\n"), "info");

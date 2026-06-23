@@ -4,16 +4,26 @@
  */
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-client";
 import type { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
 import { clearSessionQueueState, removePendingFlag } from "../src/queue";
-import { isToolEnabled, registerTools, updateRetainToolVisibility } from "../src/tools";
+import {
+  markStartupReady,
+  resetActiveSessionProjectReady,
+  resetRegisteredHindsightTools,
+  resetStartupReady,
+  setActiveSessionProjectReady,
+} from "../src/runtime-state";
+import { isToolEnabled, refreshToolVisibility, registerTools } from "../src/tools";
 import {
   readToolQueueFromDisk,
   setupTempAgentDir,
   testConfig as sharedTestConfig,
+  withTempDir,
 } from "./fixtures";
 
 setupTempAgentDir("tools");
@@ -117,6 +127,10 @@ afterEach(() => {
   // Clean up any queue files created during tests
   removePendingFlag(TEST_SESSION_ID);
   clearSessionQueueState(TEST_SESSION_ID);
+  // Reset runtime-state latches so tests start/leave operational state clean.
+  resetStartupReady();
+  resetActiveSessionProjectReady();
+  resetRegisteredHindsightTools();
 });
 
 // ============================================
@@ -314,6 +328,97 @@ describe("hindsight_retain", () => {
     expect(result.details.success).toBe(false);
     expect(result.details.error).toContain("does not allow retention");
     expect(result.content[0]!.text).toContain("Warning:");
+  });
+
+  it("returns error when project-local config is invalid (fix-config)", async () => {
+    // The retain tool re-resolves the project name before queueing (so a
+    // memory is never tagged with the wrong project name). A marked session
+    // whose cwd-local config is invalid fails closed: no queue entry, and the
+    // tool surfaces the specific reason + fix-config recovery advice.
+    await withTempDir(async (tmpCwd) => {
+      mkdirSync(join(tmpCwd, ".pi", "epimetheus"), { recursive: true });
+      writeFileSync(
+        join(tmpCwd, ".pi", "epimetheus", "config.jsonc"),
+        JSON.stringify({ notProjectName: "x" }),
+        "utf-8"
+      );
+
+      const pi = createMockPi();
+      registerTools(pi, testConfig, createMockClient());
+      const retainTool = pi.tools.find((t: ToolDef) => t.name === "hindsight_retain");
+      const ctx = createMockContext({
+        sessionManager: {
+          getSessionId: mock(() => TEST_SESSION_ID),
+          getEntries: mock(() => [
+            {
+              type: "custom",
+              customType: "hindsight-meta",
+              data: { retained: true, usesProjectConfig: true },
+            },
+          ]),
+          getHeader: mock(() => ({ id: TEST_SESSION_ID, cwd: tmpCwd })),
+        },
+      });
+
+      const result = (await retainTool!.execute(
+        "tc1",
+        { content: "Fact" },
+        undefined,
+        undefined,
+        ctx
+      )) as {
+        content: Array<{ type: string; text: string }>;
+        details: { success: boolean; error: string };
+      };
+      expect(result.details.success).toBe(false);
+      expect(result.details.error).toContain("project config");
+      expect(result.details.error).toContain("invalid");
+      expect(result.content[0]!.text).toContain("Failed to store memory");
+      expect(result.content[0]!.text).toContain("Fix the config at");
+      expect(result.content[0]!.text).toContain(tmpCwd);
+      // Nothing was queued.
+      expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    });
+  });
+
+  it("returns error when project-local config is missing (detach-or-fix)", async () => {
+    // Marked session whose cwd has no project config file: fail closed with
+    // the detach-or-fix recovery advice (suggests /hindsight detach-project-name).
+    await withTempDir(async (tmpCwd) => {
+      // No .pi/epimetheus/config.jsonc at tmpCwd.
+      const pi = createMockPi();
+      registerTools(pi, testConfig, createMockClient());
+      const retainTool = pi.tools.find((t: ToolDef) => t.name === "hindsight_retain");
+      const ctx = createMockContext({
+        sessionManager: {
+          getSessionId: mock(() => TEST_SESSION_ID),
+          getEntries: mock(() => [
+            {
+              type: "custom",
+              customType: "hindsight-meta",
+              data: { retained: true, usesProjectConfig: true },
+            },
+          ]),
+          getHeader: mock(() => ({ id: TEST_SESSION_ID, cwd: tmpCwd })),
+        },
+      });
+
+      const result = (await retainTool!.execute(
+        "tc1",
+        { content: "Fact" },
+        undefined,
+        undefined,
+        ctx
+      )) as {
+        content: Array<{ type: string; text: string }>;
+        details: { success: boolean; error: string };
+      };
+      expect(result.details.success).toBe(false);
+      expect(result.details.error).toContain("no project config file is present");
+      expect(result.content[0]!.text).toContain("Failed to store memory");
+      expect(result.content[0]!.text).toContain("detach-project-name");
+      expect(readToolQueueFromDisk(TEST_SESSION_ID)).toHaveLength(0);
+    });
   });
 });
 
@@ -757,65 +862,94 @@ describe("hindsight_retain context forwarding", () => {
 });
 
 // ============================================
-// updateRetainToolVisibility tests
+// refreshToolVisibility tests
 // ============================================
 
-describe("updateRetainToolVisibility", () => {
-  it("removes hindsight_retain from active tools when not retained", () => {
+describe("refreshToolVisibility", () => {
+  /** Make the extension operational so tools can be shown. */
+  function beOperational(): void {
+    markStartupReady();
+    setActiveSessionProjectReady(true);
+  }
+
+  it("hides ALL hindsight tools when degraded (not operational)", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
+    // Start operational+retained: all hindsight tools active.
+    refreshToolVisibility(pi, true);
+    expect(pi.getActiveTools()).toContain("hindsight_retain");
+    expect(pi.getActiveTools()).toContain("hindsight_recall");
+    expect(pi.getActiveTools()).toContain("hindsight_reflect");
 
-    // Initially all tools are active
-    const activeBefore = pi.getActiveTools();
-    expect(activeBefore).toContain("hindsight_retain");
-
-    updateRetainToolVisibility(pi, false);
-
-    const activeAfter = pi.getActiveTools();
-    expect(activeAfter).not.toContain("hindsight_retain");
-    // Other hindsight tools should remain
-    expect(activeAfter).toContain("hindsight_recall");
-    expect(activeAfter).toContain("hindsight_reflect");
+    // Flip to degraded: ALL hindsight tools hidden (not just retain).
+    setActiveSessionProjectReady(false);
+    refreshToolVisibility(pi, true);
+    const active = pi.getActiveTools();
+    expect(active).not.toContain("hindsight_retain");
+    expect(active).not.toContain("hindsight_recall");
+    expect(active).not.toContain("hindsight_reflect");
+    expect(active).not.toContain("hindsight_set_extra_context");
+    expect(active).not.toContain("hindsight_get_extra_context");
   });
 
-  it("adds hindsight_retain back when session becomes retained", () => {
+  it("when operational + retained, shows all registered hindsight tools incl retain", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
 
-    // Remove first
-    updateRetainToolVisibility(pi, false);
-    const activeAfterRemove = pi.getActiveTools();
-    expect(activeAfterRemove).not.toContain("hindsight_retain");
+    refreshToolVisibility(pi, true);
 
-    // Add back
-    updateRetainToolVisibility(pi, true);
-    const activeAfterAdd = pi.getActiveTools();
-    expect(activeAfterAdd).toContain("hindsight_retain");
+    const active = pi.getActiveTools();
+    expect(active).toContain("hindsight_retain");
+    expect(active).toContain("hindsight_recall");
+    expect(active).toContain("hindsight_reflect");
   });
 
-  it("is a no-op when retained=true and tool is already active", () => {
+  it("when operational + not retained, hides only hindsight_retain", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
 
-    // Tool is active by default
-    const callCountBefore = pi.setActiveToolsCalls.length;
-    updateRetainToolVisibility(pi, true);
+    refreshToolVisibility(pi, false);
 
-    // setActiveTools should not have been called
-    expect(pi.setActiveToolsCalls.length).toBe(callCountBefore);
+    const active = pi.getActiveTools();
+    expect(active).not.toContain("hindsight_retain");
+    // Read-only tools remain available when operational.
+    expect(active).toContain("hindsight_recall");
+    expect(active).toContain("hindsight_reflect");
   });
 
-  it("is a no-op when retained=false and tool is already inactive", () => {
+  it("restores hindsight_retain when transitioning not-retained -> retained while operational", () => {
     const pi = createMockPi();
     registerTools(pi, testConfig, createMockClient());
+    beOperational();
 
-    // Remove first
-    updateRetainToolVisibility(pi, false);
-    const callCountAfterRemove = pi.setActiveToolsCalls.length;
+    refreshToolVisibility(pi, false);
+    expect(pi.getActiveTools()).not.toContain("hindsight_retain");
 
-    // Calling again should be a no-op
-    updateRetainToolVisibility(pi, false);
-    expect(pi.setActiveToolsCalls.length).toBe(callCountAfterRemove);
+    refreshToolVisibility(pi, true);
+    expect(pi.getActiveTools()).toContain("hindsight_retain");
+  });
+
+  it("preserves non-hindsight tools across visibility changes", () => {
+    const pi = createMockPi();
+    // Register an unrelated tool to simulate other extensions/built-ins.
+    (pi as unknown as { registerTool: (t: unknown) => void }).registerTool({
+      name: "other_tool",
+      execute: () => ({}),
+      parameters: {},
+    });
+    registerTools(pi, testConfig, createMockClient());
+    beOperational();
+
+    refreshToolVisibility(pi, false); // hide retain
+    expect(pi.getActiveTools()).toContain("other_tool");
+
+    setActiveSessionProjectReady(false); // degraded
+    refreshToolVisibility(pi, true);
+    expect(pi.getActiveTools()).toContain("other_tool");
+    expect(pi.getActiveTools()).not.toContain("hindsight_retain");
   });
 });
 
