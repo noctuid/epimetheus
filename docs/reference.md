@@ -22,6 +22,7 @@ Detailed configuration, tools, commands, and operational details for epimetheus.
     - [entities](#entities)
   - [observationScopes](#observationscopes)
     - [Project scope for relocatable projects](#project-scope-for-relocatable-projects)
+  - [Project-local Settings](#project-local-settings)
   - [autoRecallTags](#autorecalltags)
   - [Project-specific Recall and Storage](#project-specific-recall-and-storage)
   - [Environment Variables](#environment-variables)
@@ -375,14 +376,14 @@ Using custom scope groups is recommended. Most users should combine a per-user s
 | `{parent}` | `parent:<parentId>` | Cross-fork observations (falls back to session ID if no parent) |
 | `{cwd}` | `cwd:<path>` | Per-directory observations |
 | `{basedir}` | `basedir:<basename>` | Per-directory-name observations |
-| `{project}` | `project:<name>` | Per-project observations (name from `EPIMETHEUS_PROJECT_NAME` or cwd basename) |
+| `{project}` | `project:<name>` | Per-project observations (git common-dir name when available, otherwise cwd basename; can override with project-local config `projectName`) |
 
 Placeholders must be used as standalone tags — e.g. `["{session}"]` not `["{session}:extra"]`. Non-exact placeholder usage will produce a config warning.
 
 **Choosing your scopes:**
 - **Per-session observations** (`["{session}"]`) — facts within a single session only — this is rarely useful unless you frequently resume the same session over and over. In practice, you'll get more value from:
 - **Per-user** (`["user:<me>"]`) — facts that span all your sessions/documents and memories stored manually with `hindsight_retain` tool, even across different harnesses. Add `"user:<me>"` to `constantTags` and use it as a scope. This is the most broadly useful scope.
-- **Per-project** (`["{project}"]`) — facts about a specific project, independent of directory. The project tag defaults to the cwd basename but can be overridden with `EPIMETHEUS_PROJECT_NAME`. This is ideal when a project might change directories or have multiple separate worktrees — observations stay linked to the project identity rather than a specific path. See [Project scope for relocatable projects](#project-scope-for-relocatable-projects).
+- **Per-project** (`["{project}"]`) — facts about a specific project, independent of directory. The project tag defaults to the git common-dir name when available (so worktrees get the same project name), otherwise the cwd basename. It can be overridden per project with [project-local settings](#project-local-settings). This is ideal over `{cwd}` when a project might change directories or have multiple separate worktrees — observations stay linked to the project identity rather than a specific path. See [Project scope for relocatable projects](#project-scope-for-relocatable-projects).
 - **Per-directory** (`["{cwd}"]`) — facts about a specific project/codebase, consolidated across all sessions in that directory
 - **Per-basedir** (`["{basedir}"]`) — facts scoped by directory name (basename). Less precise than `{cwd}` but works across different parent paths with the same directory name
 - **Per-harness** (`["harness:pi"]`) — facts that span all pi sessions (included as a default constant tag)
@@ -394,29 +395,22 @@ Recommended example — Per-user scope plus per-project scope:
   "constantTags": ["harness:pi", "user:<me>"],
   "observationScopes": [
     ["user:<me>"],   // observations across all your sessions
-    ["{project}"]     // observations scoped to this project (basedir or EPIMETHEUS_PROJECT_NAME)
+    ["{project}"]     // observations scoped to this project
   ]
 }
 ```
 
 This creates two consolidation passes:
 1. One for facts that span all your sessions (even across different harnesses, assuming you've also tagged those documents with `user:<me>`)
-2. One for facts specific to the current project (identified by `EPIMETHEUS_PROJECT_NAME` or the cwd basename)
+2. One for facts specific to the current project (identified by project-local config when used, otherwise git common-dir name or cwd basename)
 
 > **Note on duplicate observations:** When you have multiple scopes in `observationScopes`, the same underlying memories may produce duplicate observations — one per scope. For example, a project-scoped observation and a global (per-user) observation may contain overlapping information. To avoid recalling duplicates, you should filter auto-recalled observations to the scope you currently want (e.g., use `autoRecallTags: ["{project}"]` for project-specific recall or `autoRecallTags: ["user:<me>"]` for global recall). Alternatively, if you will never need to switch between scopes, you can limit `observationScopes` to just one entry.
 
 ### Project scope for relocatable projects
 
-Use `{project}` when you want observations tied to a project identity rather than a specific directory path. By default `{project}` expands to the cwd basename, so observations automatically follow the project across directory moves (e.g., `~/projects/myapp` → `~/work/myapp` — the `cwd` tag changes but the `project` tag stays the same).
+Use `{project}` when you want observations tied to a project identity rather than a specific directory path. By default `{project}` expands to the git common-dir name when available, otherwise the cwd basename, so normal git worktrees share the main repo project name automatically.
 
-You only need to set `EPIMETHEUS_PROJECT_NAME` when you have multiple directories with the same basename that should have separate observations (e.g. `~/work/myapp` vs. `~/personal/myapp`) or if you are using separate worktree folders and want the project name to be the same for both.
-
-Set `EPIMETHEUS_PROJECT_NAME` per directory in, e.g. `.env` with [direnv](https://direnv.net/) or [mise](https://mise.jdx.dev/):
-
-```envrc
-# In .env per project directory (loaded by direnv or mise):
-EPIMETHEUS_PROJECT_NAME=myapp
-```
+Use [project-local settings](#project-local-settings) when the derived project name is not the identity you want to retain under, such as when multiple unrelated directories share the same basename or when you want to rename the project identity without moving the directory.
 
 ```jsonc
 {
@@ -429,13 +423,13 @@ EPIMETHEUS_PROJECT_NAME=myapp
 ```
 
 **When to use `{project}` vs. `{cwd}` vs. `{basedir}`:**
-- `{project}` (recommended) — Observations scoped by project name (cwd basename by default). Automatically follows directory moves. Set `EPIMETHEUS_PROJECT_NAME` to disambiguate directories with the same basename or to give separate worktree directories the same project name.
+- `{project}` (recommended) — Observations scoped by project name (git common-dir name when available, otherwise cwd basename). Use project-local config `projectName` to override the retained project identity for a project.
 - `{cwd}` — Use when you want observations tied to an exact directory path. Different directories with the same basename produce separate observations.
 - `{basedir}` — Use when you want observations grouped by directory name regardless of parent path. All directories named `myapp` share observations.
 
-> **Note:** Since `basedir:` and `project:` tags are generated at retain time, re-parsing and re-ingesting a session (via `/hindsight parse-and-upsert-session`) will use the *current* basedir or `EPIMETHEUS_PROJECT_NAME`. This means you can change the project identity of an existing session by updating the env var and re-ingesting — useful for correcting or migrating project names after the fact. The `cwd:` tag is fixed from the session header and does not change on re-parse (unless you manually change it).
+> **Note:** Since `basedir:` and `project:` tags are generated at retain time, re-parsing and re-ingesting a session (via `/hindsight parse-and-upsert-session`) will use the current project resolution for that session. This means you can change the retained project identity of an existing session by adding or editing its project-local config and re-ingesting. The `cwd:` tag is fixed from the session header and does not change on re-parse (unless you manually change it).
 >
-> The `cwd:` tag and `{cwd}`/`{basedir}`/`{project}` placeholders (in both observation scopes and auto-recall tags) use the session's cwd from the session header — the directory the session was first created in.
+> The `cwd:` tag and `{cwd}`/`{basedir}`/`{project}` placeholders use the session's cwd from the session header — the directory the session was first created in.
 
 Full example with all available scopes:
 ```jsonc
@@ -444,7 +438,7 @@ Full example with all available scopes:
   "observationScopes": [
     ["user:<me>"],    // observations across all your sessions
     ["harness:pi"],   // observations across all pi sessions
-    ["{project}"],    // observations scoped to this project (EPIMETHEUS_PROJECT_NAME or basedir)
+    ["{project}"],    // observations scoped to this project
     ["{cwd}"],        // observations scoped to this exact directory path
     ["{basedir}"],    // observations scoped to this directory name
     ["{session}"],    // observations scoped to this session only (rarely needed)
@@ -459,6 +453,44 @@ export EPIMETHEUS_OBSERVATION_SCOPES='[["{session}","user:alice"],["project:foo"
 ```
 
 Note: This is currently a config-only setting and not exposed as a parameter on the `hindsight_retain` tool. The configured scope applies to all retains (both auto and tool-initiated).
+
+## Project-local Settings
+
+Project-local settings live under the project cwd instead of in the global epimetheus config. The only project-local setting currently supported is `projectName`.
+
+If you need other project-local settings, please open an issue describing the setting and why it needs to vary by project.
+
+See [Config Architecture](architecture/config.md#project-local-config) for the high-level design. This subsection is for user-facing instructions.
+
+**File location** (`.jsonc` has priority over `.json`):
+
+- `<cwd>/.pi/epimetheus/config.jsonc`
+- `<cwd>/.pi/epimetheus/config.json`
+- `<git-commondir-parent>/.pi/epimetheus/config.jsonc` (fallback for git worktrees)
+- `<git-commondir-parent>/.pi/epimetheus/config.json` (fallback for git worktrees)
+
+The cwd is checked first. When `<cwd>/.git` exists and the git commondir resolves to a different directory, the commondir's parent (the main repo root) is checked as a fallback. This lets git worktrees share the main repo's project config without needing their own `.pi` directory. No ancestor walk beyond this git-aware fallback is performed.
+
+**Schema**:
+
+```jsonc
+{
+  "projectName": "my-stable-project-name"
+}
+```
+
+**Project-name resolution order**:
+
+1. **If the session is marked `usesProjectConfig: true`**, the project config file **must** exist and contain a valid non-empty `projectName` (checked in cwd first, then the git commondir parent), or project-aware operations fail closed — pending flush work is left queued and auto-recall is skipped.
+2. **If the session is unmarked and a project config file is present but invalid**, the flush **fails closed** instead of silently falling back to a derived project name.
+3. **Otherwise**:
+   - project-local `projectName` if specified (cwd first, then git commondir parent)
+   - if `<cwd>/.git` exists, the git common dir is resolved so worktrees share the main repo name (e.g. `/repo` and `/repo/worktrees/foo` both → `repo`)
+   - else `basename(cwd)`
+
+When a session is started in or resumed from a directory that contains a project-local config with a valid non-empty `projectName`, epimetheus marks the session as using it. Future project-aware operations for that session then require the cwd-local project config to exist and specify a valid `projectName`; that `projectName` is used in place of the cwd-derived default for flush tags and `{project}` auto-recall filters. Requiring the project config afterwards prevents accidentally using the wrong project identity later (e.g. moving to a new drive, recloning the project, etc.).
+
+`/hindsight detach-project-name` stops the current session from requiring the cwd-local `projectName`. Use this if you no longer want to override the project name for a session (e.g. the resolution algorithm handles a new VCS it did not handle before and the config is no longer necessary).
 
 ### autoRecallTags
 Tags to filter by during auto-recall. When set, only memories matching these tags will be recalled. Supports the same placeholder expansion as observation scopes (`{session}`, `{parent}`, `{cwd}`, `{basedir}`, `{project}`), expanded at recall time using the current session context.
@@ -567,15 +599,12 @@ Configuration options can also be set via environment variables (override config
 | `EPIMETHEUS_RETAIN_CONTENT` | `retainContent` | RetainContent (JSON) | *(see retainContent default)* |
 | `EPIMETHEUS_STRIP` | `strip` | StripConfig (JSON) | *(see strip default)* |
 | `EPIMETHEUS_TOOL_FILTER` | `toolFilter` | ToolFilter (JSON) | *(see toolFilter default)* |
-| `EPIMETHEUS_PROJECT_NAME` | *(not in config)* | string | *(falls back to cwd basename)* |
 | `EPIMETHEUS_ENTITIES` | `entities` | EntityInput[] (JSON) | `[]` |
 | `EPIMETHEUS_OBSERVATION_SCOPES` | `observationScopes` | ObservationScopes (JSON or preset string) | `null` (required) |
 | `EPIMETHEUS_STATUS_HEALTHY` | `statusHealthy` | string | `"🧠"` |
 | `EPIMETHEUS_STATUS_UNHEALTHY` | `statusUnhealthy` | string | `"🤯"` |
 | `EPIMETHEUS_DEBUG` | `debug` | boolean | `false` |
 </details>
-
-> **Note:** `EPIMETHEUS_PROJECT_NAME` is a special environment variable that controls the `project:` auto-tag and `{project}` observation scope placeholder. Unlike other env vars, it does not correspond to a config file key — it is read at tag-build time and falls back to the cwd basename if not set. This makes it ideal for setting per-directory in `.env` (with direnv or mise) to disambiguate directories that share the same basename or to give separate worktree directories the same project name so they share observations.
 
 # Additional Details
 ## Memory Fencing
@@ -629,6 +658,7 @@ All commands are under `/hindsight <subcommand>`. With no subcommand, defaults t
 | `tag <tag>` | Add a tag to the session's hindsight metadata |
 | `remove-tag <tag>` | Remove a tag from the session's hindsight metadata |
 | `set-extra-context <text>` | Set extra context for extraction caveats (appended to Hindsight context field). Call with no text to indicate no extra context is needed (satisfies the flush guard). |
+| `detach-project-name` | Stop requiring the cwd-local `projectName` for this session. See [Project-local Settings](#project-local-settings). |
 | `toggle-display` | Toggle recall message visibility in UI |
 | `popup` | Pop up last recalled messages in overlay |
 | `status` | Show operational status (connection, session, recall info, queue count) |

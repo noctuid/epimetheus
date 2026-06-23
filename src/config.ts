@@ -14,20 +14,7 @@ import type {
 import { type ParseError, parse as parseJsonc, printParseErrorCode } from "jsonc-parser";
 import { prefixLog } from "./constants";
 import { getDataDir } from "./data-dir";
-
-function offsetToLineColumn(content: string, offset: number): { line: number; character: number } {
-  let line = 1;
-  let character = 1;
-  for (let i = 0; i < offset && i < content.length; i++) {
-    if (content[i] === "\n") {
-      line++;
-      character = 1;
-    } else {
-      character++;
-    }
-  }
-  return { line, character };
-}
+import { offsetToLineColumn } from "./utils";
 
 export interface RetainContent {
   assistant: ("text" | "thinking" | "toolCall")[];

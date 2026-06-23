@@ -8,7 +8,7 @@ import type { HindsightConfig } from "../config";
 import { getHindsightMeta, shouldSessionBeRetained, updateSessionMetadata } from "../meta";
 import { clearSessionQueueState, touchPendingFlag } from "../queue";
 import { parseAndUpsertSession } from "../retention";
-import { isToolEnabled, updateRetainToolVisibility } from "../tools";
+import { isToolEnabled, refreshToolVisibility } from "../tools";
 import type { Subcommand } from "./types";
 
 /**
@@ -35,7 +35,7 @@ async function enableRetention(
   await updateSessionMetadata(pi, sessionId, entries, { retained: true }, config);
 
   if (isToolEnabled(config, "retain")) {
-    updateRetainToolVisibility(pi, true);
+    refreshToolVisibility(pi, true);
   }
 
   // Create a pending marker immediately so that if the upsert fails or can't
@@ -102,7 +102,7 @@ async function disableRetention(
   await updateSessionMetadata(pi, sessionId, entries, { retained: false }, config);
 
   if (isToolEnabled(config, "retain")) {
-    updateRetainToolVisibility(pi, false);
+    refreshToolVisibility(pi, false);
   }
 
   // clear after retain disabled to avoid new tool retains coming in and being

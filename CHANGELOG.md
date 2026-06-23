@@ -2,6 +2,32 @@
 
 ## Pending
 
+### Features
+
+- **Project-local config** — Added optional project-name overrides via `<cwd>/.pi/epimetheus/config.jsonc|.json` (`.jsonc` wins; no ancestor walk). The schema currently supports only `projectName`. Sessions started with a valid project-local config are marked to keep using it; marked sessions and sessions with an invalid present config fail closed instead of silently falling back. Unmarked sessions continue with the default project-name derivation. Flush tags and `{project}` auto-recall tags/tag groups use the same resolved project name.
+- **Git worktree config fallback** — Project-config lookup falls back to the git commondir's parent (the main repo root) when a cwd has no `.pi/epimetheus/config.*` of its own. Git worktrees share the main repo's project config without needing their own `.pi` directory, while cwd-local config still takes precedence. No ancestor walk beyond this git-aware fallback is performed.
+- **`/hindsight detach-project-name`** — Added a recovery command to stop requiring the project-local config for the current session and use the cwd-derived project name for future flushes and auto-recall. It is blocked when the degraded cause is invalid global config or server/version issues (not a project-name failure).
+- **Project-name diagnostics** — `/hindsight config` now reports the session cwd, metadata flag, config-file presence, resolved project name, and project-name resolution blocks.
+- **Degraded-mode block reasons** — Manual operational slash commands (`/hindsight flush`, `flush-pending`, `parse-and-upsert-session`, `toggle-retain`, `tag`, `remove-tag`, `set-extra-context`) now surface the specific degraded cause (unreachable/incompatible server, or the active session's project-name failure) on every attempt instead of a one-time generic catch-all. Diagnostic/display/recovery commands remain available.
+- **Compact project-name diagnostics** — `/hindsight config`'s `Session-Specific Project Config` section now shows the project-local config (file/presence/status + loaded `projectName` or invalid reason) in the same style as the main config source, and a one-line `Project name: <resolved> (source: <source>)` resolution, keeping the cwd-local/no-ancestor-walk note concise.
+- **Default project names now prefer the git common dir** — Unmarked sessions derive project names as git common dir → `basename(cwd)`, so worktrees share the main repo name. For git submodules (and their worktrees), the commondir basename is used directly (e.g. `<super>/.git/modules/<name>` → `name`), so submodule worktrees share the submodule name instead of resolving to `modules`. Project-name environment-variable overrides were removed because they do not follow Pi session switching.
+
+### Fixed
+
+- **Degraded mode is more consistent** — Config/server/startup failures and active-session project-name failures block operational tools, queue writes, network work, and operational slash commands while keeping diagnostics, display controls, recall rendering/filtering, and recovery commands available. When auto-recall is skipped due to a project-name resolution failure, the cached recall details from a previous turn are cleared so `/hindsight popup` and status don't show a stale recall for the skipped prompt. `enabled: false` remains a full global kill switch.
+
+### Internal
+
+- Added a centralized project-local config resolver and integrated project-aware project-name resolution into auto-recall, session, and tool flush paths.
+- Updated session parsing/upsert paths to use pre-resolved project names and restore pending claims on fail-closed project-name errors.
+- Expanded test fixtures for realistic session cwd and project-local config metadata cases.
+- Added typed degraded-mode reason causes so recovery paths do not parse human-readable reason text.
+
+### Documentation
+
+- Documented project-local config, resolution order, fail-closed behavior, and `/hindsight detach-project-name` in `docs/reference.md`.
+- Added `docs/architecture/config.md` and moved ingestion architecture docs to `docs/architecture/ingestion.md`.
+
 ## 0.5.0
 
 ### Breaking Changes
@@ -78,7 +104,7 @@ User note:
 
 ### Documentation
 
-- Added `docs/ARCHITECTURE.md` documenting the queue protocol, claim/recovery flow, live session state, parsed artifacts, and normal flush authority model.
+- Added `docs/architecture/ingestion.md` documenting the queue protocol, claim/recovery flow, live session state, parsed artifacts, and normal flush authority model.
 
 ### Internal
 

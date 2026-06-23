@@ -238,18 +238,29 @@ function buildForkedMessages(
 
 /**
  * Build tags for a document.
+ *
+ * `options.projectName`, when provided, overrides the cwd-derived project name
+ * for the `project:<name>` tag. Callers that have already resolved the project
+ * name (e.g. via `resolveProjectName`, which is project-aware)
+ * should pass it through here so documents and tool entries share the same
+ * `project:` tag. When omitted, falls back to `getProjectName(header.cwd)`.
  */
 export function buildDocumentTags(
   header: SessionHeader,
   config: HindsightConfig,
-  options?: { storeMethod?: "auto" | "tool"; sessionUserTags?: string[]; parentSessionId?: string }
+  options?: {
+    storeMethod?: "auto" | "tool";
+    sessionUserTags?: string[];
+    parentSessionId?: string;
+    projectName?: string;
+  }
 ): string[] {
   const tags = [
     ...config.constantTags,
     `session:${header.id}`,
     `cwd:${header.cwd}`,
     `basedir:${getBasedir(header.cwd)}`,
-    `project:${getProjectName(header.cwd)}`,
+    `project:${options?.projectName ?? getProjectName(header.cwd)}`,
     `store_method:${options?.storeMethod ?? "auto"}`,
   ];
 
