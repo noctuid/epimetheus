@@ -194,20 +194,20 @@ describe("validateConfig", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("warns when retainContent.user is empty", () => {
+  it("errors when retainContent.user is empty", () => {
     const config = {
       ...validConfig,
       retainContent: { ...validConfig.retainContent, user: [] as ("text" | "image")[] },
     };
     const result = validateConfig(config);
-    expect(result.valid).toBe(true);
-    expect(result.warnings).toContain(
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
       'epimetheus: retainContent.user cannot be empty. Using default: ["text"].'
     );
     expect(config.retainContent.user).toEqual(["text"]);
   });
 
-  it("warns when retainContent.assistant is empty", () => {
+  it("errors when retainContent.assistant is empty", () => {
     const config = {
       ...validConfig,
       retainContent: {
@@ -216,10 +216,10 @@ describe("validateConfig", () => {
       },
     };
     const result = validateConfig(config);
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
     expect(
-      result.warnings.some((w) =>
-        w.includes("retainContent.assistant cannot be empty. Using default:")
+      result.errors.some((e) =>
+        e.includes("retainContent.assistant cannot be empty. Using default:")
       )
     ).toBe(true);
     expect(config.retainContent.assistant).toEqual(["text", "thinking", "toolCall"]);
@@ -250,12 +250,12 @@ describe("validateConfig", () => {
     expect(result.warnings).toHaveLength(0);
   });
 
-  it("warns when hindsightContextMaxLength is negative", () => {
+  it("errors when hindsightContextMaxLength is negative", () => {
     const config = { ...validConfig, hindsightContextMaxLength: -1 };
     const result = validateConfig(config);
-    expect(result.valid).toBe(true);
-    expect(result.warnings).toContain(
-      "epimetheus: hindsightContextMaxLength must be >= 0. Using default: 100."
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      "epimetheus: hindsightContextMaxLength must be a non-negative number. Using default: 100."
     );
     expect(config.hindsightContextMaxLength).toBe(100);
   });
@@ -299,6 +299,25 @@ describe("validateConfig", () => {
       "epimetheus: retainContent.assistant contains duplicate values. Using deduplicated value."
     );
     expect(config.retainContent.assistant).toEqual(["text"]);
+  });
+
+  it("warns when retainContent.toolResult has duplicates (the only valid value)", () => {
+    // toolResult's only valid value is "text", so ["text", "text"] is the
+    // natural duplicate case — it must warn and deduplicate, NOT error.
+    const config = {
+      ...validConfig,
+      retainContent: {
+        assistant: ["text"] as ("text" | "thinking" | "toolCall")[],
+        user: ["text"] as ("text" | "image")[],
+        toolResult: ["text", "text"] as "text"[],
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      "epimetheus: retainContent.toolResult contains duplicate values. Using deduplicated value."
+    );
+    expect(config.retainContent.toolResult).toEqual(["text"]);
   });
 
   it("warns when strip has duplicates", () => {
@@ -346,9 +365,9 @@ describe("validateConfig", () => {
 describe("validateConfig resets invalid values to defaults", () => {
   it("hindsightContextMaxLength -5 → reset to 100", () => {
     const config = { ...validConfig, hindsightContextMaxLength: -5 };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.hindsightContextMaxLength).toBe(100);
-    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+    expect(errors.some((e) => e.includes("Using default"))).toBe(true);
   });
 
   it("recallMaxQueryChars 0 → reset to 800", () => {
@@ -363,9 +382,9 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       retainContent: { ...validConfig.retainContent, user: [] as ("text" | "image")[] },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.retainContent.user).toEqual(["text"]);
-    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+    expect(errors.some((e) => e.includes("Using default"))).toBe(true);
   });
 
   it("retainContent.assistant [] → reset to default", () => {
@@ -376,9 +395,9 @@ describe("validateConfig resets invalid values to defaults", () => {
         assistant: [] as ("text" | "thinking" | "toolCall")[],
       },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.retainContent.assistant).toEqual(["text", "thinking", "toolCall"]);
-    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+    expect(errors.some((e) => e.includes("Using default"))).toBe(true);
   });
 
   it('retainContent.assistant ["text", "text"] → deduplicated to ["text"]', () => {
@@ -409,11 +428,11 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       toolFilter: { toolCall: { include: [] } },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.toolFilter.toolCall).toEqual({
       exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
     });
-    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+    expect(errors.some((e) => e.includes("Using default"))).toBe(true);
   });
 
   it("toolFilter.toolCall both include+exclude → reset to default", () => {
@@ -423,11 +442,11 @@ describe("validateConfig resets invalid values to defaults", () => {
         toolCall: { include: ["bash"], exclude: ["read"] } as unknown as ToolFilterMode,
       },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.toolFilter.toolCall).toEqual({
       exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
     });
-    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+    expect(errors.some((e) => e.includes("Using default"))).toBe(true);
   });
 
   it('autoRecallTypes ["observation", "observation"] → deduplicated', () => {
@@ -456,12 +475,11 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       observationScopes: "invalid_preset" as unknown as HindsightConfig["observationScopes"],
     };
-    const { warnings, errors } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.observationScopes).toBeNull();
-    expect(warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
-    expect(errors).toContain(
-      "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
-    );
+    expect(
+      errors.some((e) => e.includes("Using default (null)") && e.includes("invalid preset"))
+    ).toBe(true);
   });
 
   it("observationScopes [] → reset to null → error", () => {
@@ -469,12 +487,13 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       observationScopes: [] as HindsightConfig["observationScopes"],
     };
-    const { warnings, errors } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.observationScopes).toBeNull();
-    expect(warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
-    expect(errors).toContain(
-      "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
-    );
+    expect(
+      errors.some(
+        (e) => e.includes("Using default (null)") && e.includes("array must not be empty")
+      )
+    ).toBe(true);
   });
 
   it('observationScopes [["valid"], []] → reset to null → error', () => {
@@ -482,12 +501,11 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       observationScopes: [["valid"], []] as HindsightConfig["observationScopes"],
     };
-    const { warnings, errors } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.observationScopes).toBeNull();
-    expect(warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
-    expect(errors).toContain(
-      "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
-    );
+    expect(
+      errors.some((e) => e.includes("Using default (null)") && e.includes("must not be empty"))
+    ).toBe(true);
   });
 
   it("retainContent with missing user property → reset to default", () => {
@@ -495,10 +513,10 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       retainContent: { assistant: ["text"] as ("text" | "thinking" | "toolCall")[] },
     } as unknown as HindsightConfig;
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.retainContent.user).toEqual(["text"]);
     expect(
-      warnings.some((w) => w.includes("retainContent.user") && w.includes("Using default"))
+      errors.some((e) => e.includes("retainContent.user") && e.includes("Using default"))
     ).toBe(true);
   });
 
@@ -507,20 +525,23 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       retainContent: { user: ["text"] as ("text" | "image")[] },
     } as unknown as HindsightConfig;
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.retainContent.assistant).toEqual(["text", "thinking", "toolCall"]);
     expect(
-      warnings.some((w) => w.includes("retainContent.assistant") && w.includes("Using default"))
+      errors.some((e) => e.includes("retainContent.assistant") && e.includes("Using default"))
     ).toBe(true);
   });
 
-  it("strip with missing topLevel property → does not crash", () => {
+  it("strip with missing topLevel property → fails closed", () => {
     const config = {
       ...validConfig,
       strip: { message: ["api"] },
     } as unknown as HindsightConfig;
-    const { valid } = validateConfig(config);
-    expect(valid).toBe(true);
+    const { valid, errors } = validateConfig(config);
+    expect(valid).toBe(false);
+    expect(errors.some((e) => e.includes("strip.topLevel") && e.includes("not an array"))).toBe(
+      true
+    );
   });
 
   it("autoRecallTypes with invalid type values → reset to default", () => {
@@ -548,10 +569,31 @@ describe("validateConfig resets invalid values to defaults", () => {
         toolResult: [] as "text"[],
       },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.retainContent.user).toEqual(["text"]);
+    expect(errors.some((e) => e.includes("retainContent.user") && e.includes("not an array"))).toBe(
+      true
+    );
+  });
+
+  it('retainContent.toolResult as string "text" (not array) → reset to default', () => {
+    // A scalar where an array is expected is structural malformation of a
+    // retain-affecting field, so it must fail closed (error), not warn.
+    const config = {
+      ...validConfig,
+      retainContent: {
+        user: ["text"] as ("text" | "image")[],
+        assistant: ["text"] as ("text" | "thinking" | "toolCall")[],
+        toolResult: "text" as unknown as "text"[],
+      },
+    };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(config.retainContent.toolResult).toEqual(["text"]);
     expect(
-      warnings.some((w) => w.includes("retainContent.user") && w.includes("not an array"))
+      result.errors.some(
+        (e) => e.includes("retainContent.toolResult") && e.includes("not an array")
+      )
     ).toBe(true);
   });
 
@@ -563,9 +605,9 @@ describe("validateConfig resets invalid values to defaults", () => {
         message: ["api"],
       },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.strip.topLevel).toEqual(["type", "id", "parentId"]);
-    expect(warnings.some((w) => w.includes("strip.topLevel") && w.includes("not an array"))).toBe(
+    expect(errors.some((e) => e.includes("strip.topLevel") && e.includes("not an array"))).toBe(
       true
     );
   });
@@ -575,12 +617,12 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       toolFilter: { toolCall: 42 as unknown as import("../src/config").ToolFilterMode },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.toolFilter.toolCall).toEqual({
       exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
     });
     expect(
-      warnings.some((w) => w.includes("toolFilter.toolCall") && w.includes("must be an object"))
+      errors.some((e) => e.includes("toolFilter.toolCall") && e.includes("must be an object"))
     ).toBe(true);
   });
 
@@ -589,13 +631,13 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       toolFilter: { toolCall: { include: 42 as unknown as string[] } },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.toolFilter.toolCall).toEqual({
       exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
     });
     expect(
-      warnings.some(
-        (w) => w.includes("toolFilter.toolCall.include") && w.includes("must be a string array")
+      errors.some(
+        (e) => e.includes("toolFilter.toolCall.include") && e.includes("must be a string array")
       )
     ).toBe(true);
   });
@@ -609,10 +651,10 @@ describe("validateConfig resets invalid values to defaults", () => {
         toolResult: [] as "text"[],
       },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.retainContent.user).toEqual(["text"]);
     expect(
-      warnings.some((w) => w.includes("retainContent.user") && w.includes("invalid values"))
+      errors.some((e) => e.includes("retainContent.user") && e.includes("invalid values"))
     ).toBe(true);
   });
 
@@ -621,13 +663,13 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       toolFilter: { toolCall: { include: [42] as unknown as string[] } },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.toolFilter.toolCall).toEqual({
       exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
     });
     expect(
-      warnings.some(
-        (w) => w.includes("toolFilter.toolCall.include") && w.includes("must contain only strings")
+      errors.some(
+        (e) => e.includes("toolFilter.toolCall.include") && e.includes("must contain only strings")
       )
     ).toBe(true);
   });
@@ -637,11 +679,9 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       strip: { topLevel: [42] as unknown as string[], message: ["api"] },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.strip.topLevel).toEqual(["type", "id", "parentId"]);
-    expect(warnings.some((w) => w.includes("strip.topLevel") && w.includes("non-string"))).toBe(
-      true
-    );
+    expect(errors.some((e) => e.includes("strip.topLevel") && e.includes("non-string"))).toBe(true);
   });
 
   it("toolFilter: { toolCall: null } → reset to default", () => {
@@ -649,12 +689,12 @@ describe("validateConfig resets invalid values to defaults", () => {
       ...validConfig,
       toolFilter: { toolCall: null as unknown as import("../src/config").ToolFilterMode },
     };
-    const { warnings } = validateConfig(config);
+    const { errors } = validateConfig(config);
     expect(config.toolFilter.toolCall).toEqual({
       exclude: ["grep", "find", "ls", "read", "hindsight_retain"],
     });
     expect(
-      warnings.some((w) => w.includes("toolFilter.toolCall") && w.includes("must be an object"))
+      errors.some((e) => e.includes("toolFilter.toolCall") && e.includes("must be an object"))
     ).toBe(true);
   });
 });
@@ -1451,25 +1491,31 @@ describe("loadConfig", () => {
   });
 
   // JsonArray fallback warning tests
-  it("warns on invalid JSON in constantTags via env var", () => {
+  it("errors on invalid JSON in constantTags via env var", () => {
     process.env.PI_HINDSIGHT_CONSTANT_TAGS = "not-json";
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.constantTags).toEqual(["harness:pi"]); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("constantTags contains invalid JSON");
+    // loadConfig applies the raw string (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("constantTags must be a string array"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
+    expect(config.constantTags).toEqual(["harness:pi"]);
   });
 
-  it("warns on non-array JSON in constantTags via env var", () => {
+  it("errors on non-array JSON in constantTags via env var", () => {
     process.env.PI_HINDSIGHT_CONSTANT_TAGS = '"not-an-array"';
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.constantTags).toEqual(["harness:pi"]); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("constantTags must be a JSON array");
+    // loadConfig applies the parsed value raw (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("constantTags must be a string array"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
+    expect(config.constantTags).toEqual(["harness:pi"]);
   });
 
-  it("warns on invalid JSON in constantTags in config file", () => {
+  it("errors on invalid JSON in constantTags in config file", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
@@ -1480,9 +1526,12 @@ describe("loadConfig", () => {
     );
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.constantTags).toEqual(["harness:pi"]); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("constantTags contains invalid JSON");
+    // loadConfig applies the raw string (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("constantTags must be a string array"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
+    expect(config.constantTags).toEqual(["harness:pi"]);
   });
 
   it("does not warn on valid JSON array for constantTags", () => {
@@ -1513,22 +1562,28 @@ describe("loadConfig", () => {
   });
 
   // entities env var warning tests
-  it("warns on invalid JSON in entities via env var", () => {
+  it("errors on invalid JSON in entities via env var", () => {
     process.env.PI_HINDSIGHT_ENTITIES = "not-json";
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.entities).toEqual([]); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("entities contains invalid JSON");
+    // loadConfig applies the raw string (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("entities must be an array"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
+    expect(config.entities).toEqual([]);
   });
 
-  it("warns on non-array JSON in entities via env var", () => {
+  it("errors on non-array JSON in entities via env var", () => {
     process.env.PI_HINDSIGHT_ENTITIES = '"not-an-array"';
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.entities).toEqual([]); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("entities must be a JSON array");
+    // loadConfig applies the parsed value raw (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("entities must be an array"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
+    expect(config.entities).toEqual([]);
   });
 
   it("does not warn on valid JSON array for entities", () => {
@@ -1540,7 +1595,7 @@ describe("loadConfig", () => {
   });
 
   // retainContent warning tests
-  it("warns on non-object retainContent in config file", () => {
+  it("errors on non-object retainContent in config file", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
@@ -1551,13 +1606,16 @@ describe("loadConfig", () => {
     );
 
     const { config, warning } = loadConfig(TEST_DIR);
+    // loadConfig applies the raw string (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("retainContent must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect(config.retainContent).toEqual({
       assistant: ["text", "thinking", "toolCall"],
       user: ["text"],
       toolResult: ["text"],
-    }); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("retainContent contains invalid JSON");
+    });
   });
 
   it("does not warn on null retainContent (might be intentional)", () => {
@@ -1604,7 +1662,7 @@ describe("loadConfig", () => {
   });
 
   // strip warning tests
-  it("warns on non-object strip in config file", () => {
+  it("errors on non-object strip in config file", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
@@ -1615,6 +1673,11 @@ describe("loadConfig", () => {
     );
 
     const { config, warning } = loadConfig(TEST_DIR);
+    // loadConfig applies the raw value (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("strip must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect(config.strip).toEqual({
       topLevel: ["type", "id", "parentId"],
       message: [
@@ -1627,9 +1690,7 @@ describe("loadConfig", () => {
         "timestamp",
         "responseId",
       ],
-    }); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("strip must be an object, got array");
+    });
   });
 
   it("does not warn on null strip (might be intentional)", () => {
@@ -1695,43 +1756,52 @@ describe("loadConfig", () => {
     expect(warning).toBeUndefined();
   });
 
-  it("warns on invalid JSON in legacy PI_HINDSIGHT_RETAIN_CONTENT env var", () => {
+  it("errors on invalid JSON in legacy PI_HINDSIGHT_RETAIN_CONTENT env var", () => {
     process.env.PI_HINDSIGHT_RETAIN_CONTENT = "not-json";
 
     const { config, warning } = loadConfig(TEST_DIR);
+    // loadConfig applies the raw string (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("retainContent must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect(config.retainContent).toEqual({
       assistant: ["text", "thinking", "toolCall"],
       user: ["text"],
       toolResult: ["text"],
-    }); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("retainContent contains invalid JSON");
+    });
   });
 
-  it("warns on non-object JSON in legacy PI_HINDSIGHT_RETAIN_CONTENT env var", () => {
+  it("errors on non-object JSON in legacy PI_HINDSIGHT_RETAIN_CONTENT env var", () => {
     process.env.PI_HINDSIGHT_RETAIN_CONTENT = '["not-an-object"]';
 
     const { config, warning } = loadConfig(TEST_DIR);
+    // loadConfig applies the parsed value raw (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("retainContent must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect(config.retainContent).toEqual({
       assistant: ["text", "thinking", "toolCall"],
       user: ["text"],
       toolResult: ["text"],
-    }); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("retainContent must be a JSON object");
+    });
   });
 
-  it("warns on null JSON in legacy PI_HINDSIGHT_RETAIN_CONTENT env var", () => {
+  it("errors on null JSON in legacy PI_HINDSIGHT_RETAIN_CONTENT env var", () => {
     process.env.PI_HINDSIGHT_RETAIN_CONTENT = "null";
 
     const { config, warning } = loadConfig(TEST_DIR);
+    // loadConfig applies the parsed null raw (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("retainContent must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect(config.retainContent).toEqual({
       assistant: ["text", "thinking", "toolCall"],
       user: ["text"],
       toolResult: ["text"],
-    }); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("retainContent must be a JSON object, got null");
+    });
   });
 
   it("env var overrides config file for retainContent", () => {
@@ -1770,10 +1840,15 @@ describe("loadConfig", () => {
     expect(warning).toBeUndefined();
   });
 
-  it("warns on invalid JSON in legacy PI_HINDSIGHT_STRIP env var", () => {
+  it("errors on invalid JSON in legacy PI_HINDSIGHT_STRIP env var", () => {
     process.env.PI_HINDSIGHT_STRIP = "not-json";
 
     const { config, warning } = loadConfig(TEST_DIR);
+    // loadConfig applies the raw string (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("strip must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect(config.strip).toEqual({
       topLevel: ["type", "id", "parentId"],
       message: [
@@ -1786,15 +1861,18 @@ describe("loadConfig", () => {
         "timestamp",
         "responseId",
       ],
-    }); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("strip contains invalid JSON");
+    });
   });
 
-  it("warns on non-object JSON in legacy PI_HINDSIGHT_STRIP env var", () => {
+  it("errors on non-object JSON in legacy PI_HINDSIGHT_STRIP env var", () => {
     process.env.PI_HINDSIGHT_STRIP = "42";
 
     const { config, warning } = loadConfig(TEST_DIR);
+    // loadConfig applies the parsed value raw (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("strip must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect(config.strip).toEqual({
       topLevel: ["type", "id", "parentId"],
       message: [
@@ -1807,9 +1885,7 @@ describe("loadConfig", () => {
         "timestamp",
         "responseId",
       ],
-    }); // Falls back to default
-    expect(warning).toBeDefined();
-    expect(warning).toContain("strip must be a JSON object");
+    });
   });
 
   it("env var overrides config file for strip", () => {
@@ -2087,17 +2163,20 @@ describe("loadConfig", () => {
     expect(config.toolFilter.toolCall).toEqual({ exclude: ["bash"] });
   });
 
-  it("warns on invalid JSON for toolFilter env var", () => {
+  it("errors on invalid JSON for toolFilter env var", () => {
     process.env.PI_HINDSIGHT_TOOL_FILTER = "not-json";
 
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(warning).toContain("epimetheus: toolFilter contains invalid JSON");
-    // Falls back to default (not empty {}) on parse errors
+    // loadConfig applies the raw string (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("toolFilter must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect((config.toolFilter.toolCall as { exclude: string[] }).exclude).toContain("grep");
     expect((config.toolFilter.toolResult as { exclude: string[] }).exclude).toContain("grep");
   });
 
-  it("toolFilter with both include and exclude is a validation warning", () => {
+  it("toolFilter with both include and exclude is a validation error", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -2105,8 +2184,8 @@ describe("loadConfig", () => {
       },
     };
 
-    const { warnings } = validateConfig(config);
-    expect(warnings).toContain(
+    const { errors } = validateConfig(config);
+    expect(errors).toContain(
       'epimetheus: toolFilter.toolCall cannot have both \'include\' and \'exclude\'. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
     );
     expect(config.toolFilter.toolCall).toEqual({
@@ -2114,7 +2193,7 @@ describe("loadConfig", () => {
     });
   });
 
-  it("toolFilter with empty include list is a validation warning", () => {
+  it("toolFilter with empty include list is a validation error", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -2122,8 +2201,8 @@ describe("loadConfig", () => {
       },
     };
 
-    const { warnings } = validateConfig(config);
-    expect(warnings).toContain(
+    const { errors } = validateConfig(config);
+    expect(errors).toContain(
       'epimetheus: toolFilter.toolCall.include cannot be empty. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
     );
     expect(config.toolFilter.toolCall).toEqual({
@@ -2131,7 +2210,7 @@ describe("loadConfig", () => {
     });
   });
 
-  it("toolFilter with empty exclude list is a validation warning", () => {
+  it("toolFilter with empty exclude list is a validation error", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -2139,8 +2218,8 @@ describe("loadConfig", () => {
       },
     };
 
-    const { warnings } = validateConfig(config);
-    expect(warnings).toContain(
+    const { errors } = validateConfig(config);
+    expect(errors).toContain(
       'epimetheus: toolFilter.toolResult.exclude cannot be empty. Using default: {"exclude":["grep","find","ls","write","edit","hindsight_retain","hindsight_recall","hindsight_reflect"]}.'
     );
     expect(config.toolFilter.toolResult).toEqual({
@@ -2157,7 +2236,7 @@ describe("loadConfig", () => {
     });
   });
 
-  it("toolFilter with unknown keys is a validation warning", () => {
+  it("toolFilter with unknown keys is a validation error", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -2165,8 +2244,8 @@ describe("loadConfig", () => {
       },
     };
 
-    const { warnings } = validateConfig(config);
-    expect(warnings).toContain(
+    const { errors } = validateConfig(config);
+    expect(errors).toContain(
       'epimetheus: toolFilter.toolCall has unknown key \'blocklist\'. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
     );
     expect(config.toolFilter.toolCall).toEqual({
@@ -2174,7 +2253,7 @@ describe("loadConfig", () => {
     });
   });
 
-  it("toolFilter sub-object without include or exclude is a validation warning", () => {
+  it("toolFilter sub-object without include or exclude is a validation error", () => {
     const config: HindsightConfig = {
       ...validConfig,
       toolFilter: {
@@ -2182,8 +2261,8 @@ describe("loadConfig", () => {
       },
     };
 
-    const { warnings } = validateConfig(config);
-    expect(warnings).toContain(
+    const { errors } = validateConfig(config);
+    expect(errors).toContain(
       'epimetheus: toolFilter.toolCall must have either \'include\' or \'exclude\'. Using default: {"exclude":["grep","find","ls","read","hindsight_retain"]}.'
     );
     expect(config.toolFilter.toolCall).toEqual({
@@ -2191,7 +2270,7 @@ describe("loadConfig", () => {
     });
   });
 
-  it("warns on invalid toolFilter type in config file", () => {
+  it("errors on invalid toolFilter type in config file", () => {
     writeFileSync(
       join(TEST_DIR, "config.json"),
       JSON.stringify({
@@ -2202,9 +2281,13 @@ describe("loadConfig", () => {
     );
 
     const { config, warning } = loadConfig(TEST_DIR);
-    // Falls back to default
+    // Raw malformed value applied by loadConfig (not reset + warned).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("toolFilter must be an object"))).toBe(true);
+    // validateConfig reset the malformed value to default so it is not used.
     expect((config.toolFilter.toolCall as { exclude: string[] }).exclude).toContain("grep");
-    expect(warning).toContain("epimetheus: toolFilter must be an object, got number");
+    expect((config.toolFilter.toolResult as { exclude: string[] }).exclude).toContain("grep");
   });
 
   it("does not warn on null toolFilter (might be intentional)", () => {
@@ -2284,7 +2367,7 @@ describe("observationScopes", () => {
     expect(config.observationScopes).toEqual([["session:abc", "user:alice"], ["project:foo"]]);
   });
 
-  it("rejects null from config file (loadConfig warns, validateConfig errors)", () => {
+  it("rejects null from config file (loadConfig applies raw, validateConfig errors)", () => {
     writeFileSync(
       join(TEST_DIR, "config.jsonc"),
       JSON.stringify({
@@ -2296,7 +2379,7 @@ describe("observationScopes", () => {
     );
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("epimetheus: observationScopes is required");
+    expect(warning).toBeUndefined();
     const { errors } = validateConfig(config);
     expect(errors).toContain(
       "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
@@ -2315,25 +2398,30 @@ describe("observationScopes", () => {
     expect(config.observationScopes).toEqual([["session:abc"]]);
   });
 
-  it("rejects null from env var (loadConfig warns, validateConfig errors)", () => {
+  it("rejects null from env var (loadConfig applies raw, validateConfig errors)", () => {
     process.env.PI_HINDSIGHT_OBSERVATION_SCOPES = "null";
     process.env.HINDSIGHT_API_URL = "https://test.test";
     process.env.HINDSIGHT_API_KEY = "test-key";
     process.env.PI_HINDSIGHT_BANK_ID = "test-bank";
     const { config, warning } = loadConfig(TEST_DIR);
     expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("epimetheus: observationScopes is required");
+    expect(warning).toBeUndefined();
     const { errors } = validateConfig(config);
     expect(errors).toContain(
       "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
     );
   });
 
-  it("falls back to default for invalid env var", () => {
+  it("errors on invalid env var (validateConfig catches)", () => {
     process.env.PI_HINDSIGHT_OBSERVATION_SCOPES = "invalid_value";
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("epimetheus: observationScopes is required");
+    // loadConfig applies the raw string (not a preset, not parseable JSON).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("invalid preset") && e.includes("invalid_value"))).toBe(
+      true
+    );
+    expect(config.observationScopes).toBeNull(); // reset by validateConfig
   });
 
   it("supports placeholder syntax in arrays", () => {
@@ -2364,7 +2452,7 @@ describe("observationScopes", () => {
     expect(config.observationScopes).toBe("combined");
   });
 
-  it("rejects empty top-level array", () => {
+  it("rejects empty top-level array (validateConfig resets)", () => {
     writeFileSync(
       join(TEST_DIR, "config.jsonc"),
       JSON.stringify({
@@ -2374,11 +2462,14 @@ describe("observationScopes", () => {
       })
     );
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("epimetheus: observationScopes is required");
+    // loadConfig applies the raw array (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("array must not be empty"))).toBe(true);
+    expect(config.observationScopes).toBeNull(); // reset by validateConfig
   });
 
-  it("rejects empty inner array", () => {
+  it("rejects empty inner array (validateConfig resets)", () => {
     writeFileSync(
       join(TEST_DIR, "config.jsonc"),
       JSON.stringify({
@@ -2388,11 +2479,13 @@ describe("observationScopes", () => {
       })
     );
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("epimetheus: observationScopes is required");
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("must not be empty"))).toBe(true);
+    expect(config.observationScopes).toBeNull(); // reset by validateConfig
   });
 
-  it("rejects non-array inner values", () => {
+  it("rejects non-array inner values (validateConfig resets)", () => {
     writeFileSync(
       join(TEST_DIR, "config.jsonc"),
       JSON.stringify({
@@ -2402,8 +2495,11 @@ describe("observationScopes", () => {
       })
     );
     const { config, warning } = loadConfig(TEST_DIR);
-    expect(config.observationScopes).toBe(null);
-    expect(warning).toContain("epimetheus: observationScopes is required");
+    // loadConfig applies the raw array (no longer resets + warns).
+    expect(warning).toBeUndefined();
+    const { errors } = validateConfig(config);
+    expect(errors.some((e) => e.includes("must be an array of strings"))).toBe(true);
+    expect(config.observationScopes).toBeNull(); // reset by validateConfig
   });
 
   it("warns on non-exact placeholder in tag string", () => {
@@ -2457,62 +2553,61 @@ describe("validateConfig for observationScopes", () => {
     );
   });
 
-  it("warns on empty top-level array", () => {
+  it("errors on empty top-level array", () => {
     const config = {
       ...validConfig,
       observationScopes: [] as HindsightConfig["observationScopes"],
     };
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.warnings).toContain(
+    expect(result.errors).toContain(
       "epimetheus: observationScopes: array must not be empty. Using default (null)."
     );
     expect(config.observationScopes).toBeNull();
-    expect(result.errors).toContain(
-      "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
-    );
   });
 
-  it("warns on empty inner array", () => {
+  it("errors on empty inner array", () => {
     const config = {
       ...validConfig,
       observationScopes: [["session:abc"], []] as HindsightConfig["observationScopes"],
     };
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(
+      result.errors.some(
+        (e) => e.includes("Using default (null)") && e.includes("must not be empty")
+      )
+    ).toBe(true);
     expect(config.observationScopes).toBeNull();
-    expect(result.errors).toContain(
-      "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
-    );
   });
 
-  it("warns on invalid preset string", () => {
+  it("errors on invalid preset string", () => {
     const config = {
       ...validConfig,
       observationScopes: "invalid" as unknown as HindsightConfig["observationScopes"],
     };
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(
+      result.errors.some((e) => e.includes("Using default (null)") && e.includes("invalid preset"))
+    ).toBe(true);
     expect(config.observationScopes).toBeNull();
-    expect(result.errors).toContain(
-      "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
-    );
   });
 
-  it("warns on non-string/array value", () => {
+  it("errors on non-string/array value", () => {
     const config = {
       ...validConfig,
       observationScopes: 42 as unknown as HindsightConfig["observationScopes"],
     };
     const result = validateConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.warnings.some((w) => w.includes("Using default (null)"))).toBe(true);
+    expect(
+      result.errors.some(
+        (e) =>
+          e.includes("Using default (null)") && e.includes("must be a preset string or an array")
+      )
+    ).toBe(true);
     expect(config.observationScopes).toBeNull();
-    expect(result.errors).toContain(
-      "epimetheus: observationScopes is required (must be a preset string or an array of tag arrays)"
-    );
   });
 
   it("warns on non-exact placeholder in tag string", () => {

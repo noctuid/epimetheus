@@ -15,6 +15,7 @@
 ### Fixed
 
 - **Degraded mode is more consistent** — Config/server/startup failures and active-session project-name failures block operational tools, queue writes, network work, and operational slash commands while keeping diagnostics, display controls, recall rendering/filtering, and recovery commands available. When auto-recall is skipped due to a project-name resolution failure, the cached recall details from a previous turn are cleared so `/hindsight popup` and status don't show a stale recall for the skipped prompt. `enabled: false` remains a full global kill switch.
+- **Fail closed on malformed retention settings** — The extension now enters degraded mode (blocking retention) when any retention-affecting config setting is malformed, instead of silently resetting to a default.
 
 ### Internal
 

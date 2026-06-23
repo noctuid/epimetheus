@@ -2121,6 +2121,47 @@ describe("real entrypoint bootstrap", () => {
     cleanupParsedArtifacts(sessionId);
   });
 
+  it("malformed retain config fails fast into degraded mode (same path as invalid global config)", async () => {
+    // A malformed retain-affecting field (here a scalar where an array is
+    // expected) must trip validateConfig → fail-fast degraded mode, identical
+    // to the apiUrl/apiKey-empty path tested above. Ensures retain-field
+    // malformation actually propagates to the disabled/degraded bootstrap path,
+    // not just the validateConfig unit level.
+    activeConfig = {
+      ...testConfig,
+      retainContent: {
+        user: ["text"] as ("text" | "image")[],
+        assistant: ["text"] as ("text" | "thinking" | "toolCall")[],
+        // Scalar where an array is expected → structural malformation.
+        toolResult: "text" as unknown as "text"[],
+      },
+    };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    // No tools or flush/retain handlers are registered in fail-fast mode.
+    expect(pi.tools).toHaveLength(0);
+    expect(pi.handlers.has("session_shutdown")).toBe(false);
+    expect(pi.handlers.has("message_end")).toBe(false);
+    // /hindsight remains available for diagnostics.
+    expect(pi.commands.has("hindsight")).toBe(true);
+    expect(pi.renderers.has("hindsight-recall")).toBe(true);
+
+    // session_start only sets the unhealthy status.
+    const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
+    const handler = pi.handlers.get("session_start")!;
+    await handler({ type: "session_start" }, ctx);
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("epimetheus", "🤯");
+
+    const { removePendingFlag, clearSessionQueueState } =
+      require("../src/queue") as typeof import("../src/queue");
+    removePendingFlag(BOOTSTRAP_SESSION);
+    clearSessionQueueState(BOOTSTRAP_SESSION);
+    cleanupParsedArtifacts(BOOTSTRAP_SESSION);
+  });
+
   it("invalid config: diagnostic commands explain missing observationScopes", async () => {
     activeConfig = { ...testConfig, observationScopes: null };
 

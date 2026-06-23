@@ -310,35 +310,6 @@ function validateTagGroupItem(item: unknown): boolean {
   return false;
 }
 
-function parseJsonArray(
-  value: string | undefined,
-  defaultValue: string[],
-  fieldName: string
-): { value: string[]; warning?: string } {
-  if (value === undefined) return { value: defaultValue };
-  try {
-    const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) {
-      if (parsed.every((item) => typeof item === "string")) {
-        return { value: parsed };
-      }
-      return {
-        value: defaultValue,
-        warning: `${fieldName} must be a JSON array of strings. Using default.`,
-      };
-    }
-    return {
-      value: defaultValue,
-      warning: `${fieldName} must be a JSON array, got ${typeof parsed}. Using default.`,
-    };
-  } catch {
-    return {
-      value: defaultValue,
-      warning: `${fieldName} contains invalid JSON. Using default.`,
-    };
-  }
-}
-
 function parseEventList<T extends string>(
   value: unknown,
   defaultValue: readonly T[],
@@ -429,49 +400,47 @@ function setConfigKey(config: HindsightConfig, key: keyof HindsightConfig, value
 
 /**
  * Set an object-type config field from a raw value (config file or env var string).
- * Handles: direct object assignment, JSON string parsing, and fallback to default.
- * Used by retainContent, strip, and toolFilter which all accept JSON objects.
+ * The value is applied raw (parsed first if it's a JSON string) so validateConfig
+ * can fail closed on any structural malformation — this function does not reset
+ * to a default and returns no warning. Used by retainContent, strip, and
+ * toolFilter which all accept JSON objects.
  *
  * @param config - The config object to mutate
  * @param key - The config key to set
  * @param value - The raw value (object from config file, or JSON string from env var)
- * @returns A warning string if the value was invalid and fallback was used
  */
 function setObjectField(
   config: HindsightConfig,
   key: keyof HindsightConfig,
   value: unknown
 ): string | undefined {
-  // Direct object from config file
+  // Direct object from config file — apply raw. validateConfig fails closed
+  // on structural malformation (the single authority for these fields).
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     setConfigKey(config, key, value);
     return;
   }
-  // String value from env var - parse as JSON
+  // String value from env var - parse as JSON and apply the parsed value
+  // raw (even if it's not an object). validateConfig fails closed on
+  // non-object structures, so no silent reset here. An unparseable string is
+  // also applied raw so validateConfig catches it ("got string").
   if (typeof value === "string") {
     try {
-      const parsed = JSON.parse(value);
-      if (parsed === null) {
-        setConfigKey(config, key, structuredClone(DEFAULT_CONFIG[key]));
-        return `${key} must be a JSON object, got null. Using default.`;
-      }
-      if (typeof parsed === "object" && !Array.isArray(parsed)) {
-        setConfigKey(config, key, parsed);
-        return;
-      }
-      setConfigKey(config, key, structuredClone(DEFAULT_CONFIG[key]));
-      return `${key} must be a JSON object, got ${Array.isArray(parsed) ? "array" : typeof parsed}. Using default.`;
+      setConfigKey(config, key, JSON.parse(value));
+      return;
     } catch {
-      setConfigKey(config, key, structuredClone(DEFAULT_CONFIG[key]));
-      return `${key} contains invalid JSON. Using default.`;
+      setConfigKey(config, key, value);
+      return;
     }
   }
   // null might be intentional (e.g., unsetting config), don't warn
   if (value === null) {
     return;
   }
-  setConfigKey(config, key, structuredClone(DEFAULT_CONFIG[key]));
-  return `${key} must be an object, got ${Array.isArray(value) ? "array" : typeof value}. Using default.`;
+  // Non-object non-string value (e.g. array or number from a config file) —
+  // apply raw so validateConfig can fail closed with a specific message.
+  setConfigKey(config, key, value);
+  return;
 }
 
 /**
@@ -795,35 +764,31 @@ function setConfigValue(
         config[key] = value;
         return;
       }
-      const result = parseJsonArray(String(value), DEFAULT_CONFIG[key] as string[], "constantTags");
-      config[key] = result.value;
-      return result.warning;
+      // String value from env var - parse JSON and apply raw. validateConfig
+      // fails closed on non-array or non-string elements. An unparseable
+      // string is also applied raw so validateConfig catches it ("got string").
+      try {
+        config[key] = JSON.parse(String(value));
+        return;
+      } catch {
+        config[key] = value as string[];
+        return;
+      }
     }
     case "entities": {
       if (Array.isArray(value)) {
-        if (validateEntities(value)) {
-          config[key] = value;
-          return;
-        }
-        config[key] = DEFAULT_CONFIG[key];
-        return "entities must be an array of objects with a string 'text' property; using default.";
+        config[key] = value;
+        return;
       }
-      // String value from env var - parse and check for warning
+      // String value from env var - parse JSON and apply raw. validateConfig
+      // fails closed on non-array or malformed entries. An unparseable string
+      // is applied raw so validateConfig catches it ("got string").
       try {
-        const parsed = JSON.parse(String(value));
-        if (Array.isArray(parsed)) {
-          if (validateEntities(parsed)) {
-            config[key] = parsed;
-            return;
-          }
-          config[key] = DEFAULT_CONFIG[key];
-          return "entities must be an array of objects with a string 'text' property; using default.";
-        }
-        config[key] = DEFAULT_CONFIG[key];
-        return `entities must be a JSON array, got ${typeof parsed}. Using default.`;
+        config[key] = JSON.parse(String(value));
+        return;
       } catch {
-        config[key] = DEFAULT_CONFIG[key];
-        return "entities contains invalid JSON. Using default.";
+        config[key] = value as typeof DEFAULT_CONFIG.entities;
+        return;
       }
     }
     case "retainContent":
@@ -834,53 +799,43 @@ function setConfigValue(
     case "observationScopes": {
       if (value === null || value === undefined || value === "") {
         config[key] = null;
-        return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
+        return;
       }
+      // String preset values are valid as-is. Other strings (e.g. a JSON
+      // array from an env var) are parsed so an array value flows through.
+      // Non-string values (arrays/objects from a config file) are applied raw.
+      // validateConfig fails closed on any structural malformation.
       if (typeof value === "string") {
-        // Could be a preset string or JSON string (from env var or config file)
         const presetValues = ["per_tag", "combined", "all_combinations"];
         if (presetValues.includes(value)) {
           config[key] = value as ObservationScopes;
           return;
         }
-        // Try parsing as JSON (for arrays)
         try {
-          const parsed = JSON.parse(value);
-          if (parsed === null) {
-            config[key] = null;
-            return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
-          }
-          const validated = validateObservationScopes(parsed);
-          if (validated !== undefined) {
-            config[key] = validated;
-            return;
-          }
-          config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
-          return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
+          config[key] = JSON.parse(value) as ObservationScopes;
+          return;
         } catch {
-          config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
-          return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
-        }
-      }
-      // Non-string value (from config file)
-      {
-        const validated = validateObservationScopes(value);
-        if (validated !== undefined) {
-          config[key] = validated;
+          // Unparseable non-preset string: no value to validate. validateConfig
+          // will fail closed on the raw string (not a preset, not an array).
+          config[key] = value as ObservationScopes;
           return;
         }
-        config[key] = DEFAULT_CONFIG[key] as ObservationScopes;
-        return `observationScopes is required. Set a preset ("per_tag", "combined", "all_combinations") or an array of tag arrays.`;
       }
+      config[key] = value as ObservationScopes;
+      return;
     }
     case "apiUrl":
     case "apiKey":
     case "bankId":
-    case "hindsightContextPrefix":
     case "recallPromptPreamble":
     case "statusHealthy":
     case "statusUnhealthy":
       config[key] = String(value);
+      return;
+    case "hindsightContextPrefix":
+      // Apply raw (no String() coercion) so validateConfig fails closed on
+      // non-string values from a config file. Env vars are already strings.
+      config[key] = value as string;
       return;
     default: {
       // This should never happen if VALID_CONFIG_KEYS is correct
@@ -888,32 +843,6 @@ function setConfigValue(
       throw new Error(`Unexpected config key: ${_exhaustive}`);
     }
   }
-}
-
-/**
- * Validate an observation_scopes value.
- * Returns the validated value or undefined if invalid.
- */
-function validateObservationScopes(value: unknown): ObservationScopes | undefined {
-  if (value === null) return null;
-  if (typeof value === "string") {
-    const presetValues: string[] = ["per_tag", "combined", "all_combinations"];
-    if (presetValues.includes(value)) return value as ObservationScopes;
-    return undefined;
-  }
-  if (Array.isArray(value)) {
-    if (value.length === 0) return undefined; // Empty top-level array is invalid
-    // Must be string[][] (array of arrays of strings)
-    for (const inner of value) {
-      if (!Array.isArray(inner)) return undefined;
-      if (inner.length === 0) return undefined; // Empty inner array is invalid
-      for (const item of inner) {
-        if (typeof item !== "string") return undefined;
-      }
-    }
-    return value as string[][];
-  }
-  return undefined;
 }
 
 /**
@@ -1386,9 +1315,12 @@ export function loadConfig(extensionsDir?: string): {
  * Validate and fix a loaded config. Mutates the config object to reset invalid
  * values to their defaults and returns the validation result.
  *
- * Only `apiUrl`, `apiKey`, `bankId`, and `observationScopes` missing/invalid
- * produce errors (which disable the plugin). All other issues produce warnings
- * and the config value is reset to its default.
+ * Fail-closed policy: any malformed setting affecting the retention pipeline
+ * (apiUrl/apiKey/bankId, retainContent, strip, toolFilter, constantTags,
+ * entities, hindsightContextPrefix, hindsightContextMaxLength,
+ * observationScopes) produces an error — the extension enters degraded mode
+ * and all retention is blocked until the config is fixed. Duplicate values
+ * and other non-malformation issues produce warnings.
  */
 export function validateConfig(config: HindsightConfig): {
   valid: boolean;
@@ -1429,10 +1361,25 @@ export function validateConfig(config: HindsightConfig): {
     }
   }
 
-  // Validate hindsightContextMaxLength - reset to default if out of range
-  if (config.hindsightContextMaxLength < 0) {
-    warnings.push(
-      `hindsightContextMaxLength must be >= 0. Using default: ${DEFAULT_CONFIG.hindsightContextMaxLength}.`
+  // Validate hindsightContextPrefix - fail closed on non-string values.
+  // (setConfigValue no longer String()-coerces, so a non-string from a config
+  // file reaches this check.) The length-overflow info warning below stays.
+  if (typeof config.hindsightContextPrefix !== "string") {
+    errors.push(
+      `hindsightContextPrefix must be a string, got ${typeof config.hindsightContextPrefix}. Using default: "${DEFAULT_CONFIG.hindsightContextPrefix}".`
+    );
+    config.hindsightContextPrefix = DEFAULT_CONFIG.hindsightContextPrefix;
+  }
+  // Validate hindsightContextMaxLength - fail closed on malformed values
+  // (non-number, NaN, or negative). Reset to default so the in-memory value is
+  // never the malformed one.
+  if (
+    typeof config.hindsightContextMaxLength !== "number" ||
+    Number.isNaN(config.hindsightContextMaxLength) ||
+    config.hindsightContextMaxLength < 0
+  ) {
+    errors.push(
+      `hindsightContextMaxLength must be a non-negative number. Using default: ${DEFAULT_CONFIG.hindsightContextMaxLength}.`
     );
     config.hindsightContextMaxLength = DEFAULT_CONFIG.hindsightContextMaxLength;
   }
@@ -1457,140 +1404,222 @@ export function validateConfig(config: HindsightConfig): {
     toolResult: ["text"],
   };
 
-  // Validate retainContent - ensure all sub-properties exist and are valid arrays of allowed types
-  for (const role of ["user", "assistant", "toolResult"] as const) {
-    const items = config.retainContent?.[role];
-    if (!items || !Array.isArray(items)) {
-      warnings.push(
-        `retainContent.${role} is missing or not an array. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
-      );
-      // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
-      config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
-    } else if (items.length === 0 && (role === "user" || role === "assistant")) {
-      warnings.push(
-        `retainContent.${role} cannot be empty. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
-      );
-      // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
-      config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
-    } else {
-      const allowed = VALID_RETAIN_CONTENT[role] as string[];
-      const invalid = items.filter((item) => typeof item !== "string" || !allowed.includes(item));
-      if (invalid.length > 0) {
-        warnings.push(
-          `retainContent.${role} contains invalid values: ${invalid.map((v) => JSON.stringify(v)).join(", ")}. Valid: ${allowed.join(", ")}. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
+  // Validate retainContent - ensure all sub-properties exist and are valid
+  // arrays of allowed types. Structural malformation fails closed; duplicates
+  // are deduplicated and warned (redundant, not malformed).
+  if (
+    typeof config.retainContent !== "object" ||
+    config.retainContent === null ||
+    Array.isArray(config.retainContent)
+  ) {
+    errors.push(
+      `retainContent must be an object. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent)}.`
+    );
+    config.retainContent = {
+      user: [...DEFAULT_CONFIG.retainContent.user],
+      assistant: [...DEFAULT_CONFIG.retainContent.assistant],
+      toolResult: [...DEFAULT_CONFIG.retainContent.toolResult],
+    };
+  } else {
+    for (const role of ["user", "assistant", "toolResult"] as const) {
+      const items = config.retainContent[role];
+      if (!items || !Array.isArray(items)) {
+        errors.push(
+          `retainContent.${role} is missing or not an array. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
+        );
+        // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
+        config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
+      } else if (items.length === 0 && (role === "user" || role === "assistant")) {
+        errors.push(
+          `retainContent.${role} cannot be empty. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
         );
         // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
         config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
       } else {
-        // Check for duplicates
-        const unique = new Set(items);
-        if (unique.size !== items.length) {
-          // biome-ignore lint/suspicious/noExplicitAny: Set dedup requires any cast due to union tuple types
-          config.retainContent[role] = [...unique] as any;
-          warnings.push(
-            `retainContent.${role} contains duplicate values. Using deduplicated value.`
+        const allowed = VALID_RETAIN_CONTENT[role] as string[];
+        const invalid = items.filter((item) => typeof item !== "string" || !allowed.includes(item));
+        if (invalid.length > 0) {
+          errors.push(
+            `retainContent.${role} contains invalid values: ${invalid.map((v) => JSON.stringify(v)).join(", ")}. Valid: ${allowed.join(", ")}. Using default: ${JSON.stringify(DEFAULT_CONFIG.retainContent[role])}.`
           );
+          // biome-ignore lint/suspicious/noExplicitAny: retainContent role assignment requires any due to union tuple types
+          config.retainContent[role] = [...DEFAULT_CONFIG.retainContent[role]] as any;
+        } else {
+          // Duplicates are redundant but valid — warn + dedupe.
+          const unique = new Set(items);
+          if (unique.size !== items.length) {
+            // biome-ignore lint/suspicious/noExplicitAny: Set dedup requires any cast due to union tuple types
+            config.retainContent[role] = [...unique] as any;
+            warnings.push(
+              `retainContent.${role} contains duplicate values. Using deduplicated value.`
+            );
+          }
         }
       }
     }
   }
 
-  // Validate strip - ensure all sub-properties exist and are valid string arrays
-  for (const field of ["topLevel", "message"] as const) {
-    const items = config.strip?.[field];
-    if (!items || !Array.isArray(items)) {
-      warnings.push(
-        `strip.${field} is missing or not an array. Using default: ${JSON.stringify(DEFAULT_CONFIG.strip[field])}.`
-      );
-      config.strip[field] = [...DEFAULT_CONFIG.strip[field]];
-    } else {
-      const invalid = items.filter((item) => typeof item !== "string");
-      if (invalid.length > 0) {
-        warnings.push(
-          `strip.${field} contains non-string values. Using default: ${JSON.stringify(DEFAULT_CONFIG.strip[field])}.`
+  // Validate strip - ensure all sub-properties exist and are valid string
+  // arrays. Structural malformation fails closed; duplicates are warned.
+  if (typeof config.strip !== "object" || config.strip === null || Array.isArray(config.strip)) {
+    errors.push(`strip must be an object. Using default: ${JSON.stringify(DEFAULT_CONFIG.strip)}.`);
+    config.strip = {
+      topLevel: [...DEFAULT_CONFIG.strip.topLevel],
+      message: [...DEFAULT_CONFIG.strip.message],
+    };
+  } else {
+    for (const field of ["topLevel", "message"] as const) {
+      const items = config.strip[field];
+      if (!items || !Array.isArray(items)) {
+        errors.push(
+          `strip.${field} is missing or not an array. Using default: ${JSON.stringify(DEFAULT_CONFIG.strip[field])}.`
         );
         config.strip[field] = [...DEFAULT_CONFIG.strip[field]];
       } else {
-        const unique = new Set(items);
-        if (unique.size !== items.length) {
-          config.strip[field] = [...unique] as typeof items;
-          warnings.push(`strip.${field} contains duplicate values. Using deduplicated value.`);
+        const invalid = items.filter((item) => typeof item !== "string");
+        if (invalid.length > 0) {
+          errors.push(
+            `strip.${field} contains non-string values. Using default: ${JSON.stringify(DEFAULT_CONFIG.strip[field])}.`
+          );
+          config.strip[field] = [...DEFAULT_CONFIG.strip[field]];
+        } else {
+          const unique = new Set(items);
+          if (unique.size !== items.length) {
+            config.strip[field] = [...unique] as typeof items;
+            warnings.push(`strip.${field} contains duplicate values. Using deduplicated value.`);
+          }
         }
       }
     }
   }
 
-  // Validate toolFilter - reset sub-filter to default on any structural issue
-  for (const subKey of ["toolCall", "toolResult"] as const) {
-    const filter = config.toolFilter[subKey];
-    // null or non-object sub-filters are invalid — reset to default
-    if (!filter || typeof filter !== "object" || Array.isArray(filter)) {
-      if (filter !== undefined) {
+  // Validate toolFilter - fail closed on any structural issue.
+  if (
+    typeof config.toolFilter !== "object" ||
+    config.toolFilter === null ||
+    Array.isArray(config.toolFilter)
+  ) {
+    errors.push(
+      `toolFilter must be an object. Using default: ${JSON.stringify(DEFAULT_CONFIG.toolFilter)}.`
+    );
+    config.toolFilter = {
+      ...DEFAULT_CONFIG.toolFilter,
+      toolCall: DEFAULT_CONFIG.toolFilter.toolCall
+        ? { ...DEFAULT_CONFIG.toolFilter.toolCall }
+        : undefined,
+      toolResult: DEFAULT_CONFIG.toolFilter.toolResult
+        ? { ...DEFAULT_CONFIG.toolFilter.toolResult }
+        : undefined,
+    };
+  } else {
+    for (const subKey of ["toolCall", "toolResult"] as const) {
+      const filter = config.toolFilter[subKey];
+      // null or non-object sub-filters are invalid — reset to default
+      if (!filter || typeof filter !== "object" || Array.isArray(filter)) {
+        if (filter !== undefined) {
+          const defaultFilter = DEFAULT_CONFIG.toolFilter[subKey];
+          if (defaultFilter) {
+            config.toolFilter[subKey] = structuredClone(defaultFilter);
+          } else {
+            delete config.toolFilter[subKey];
+          }
+          errors.push(
+            `toolFilter.${subKey} must be an object. Using default: ${JSON.stringify(defaultFilter)}.`
+          );
+        }
+        continue;
+      }
+
+      const reasons: string[] = [];
+      const hasInclude = "include" in filter;
+      const hasExclude = "exclude" in filter;
+
+      // Must have at least one of include/exclude
+      if (!hasInclude && !hasExclude) {
+        reasons.push(`toolFilter.${subKey} must have either 'include' or 'exclude'`);
+      }
+
+      if (hasInclude && hasExclude) {
+        reasons.push(`toolFilter.${subKey} cannot have both 'include' and 'exclude'`);
+      }
+
+      // Check for empty or non-array include/exclude, or non-string elements
+      if (hasInclude) {
+        if (!Array.isArray(filter.include)) {
+          reasons.push(`toolFilter.${subKey}.include must be a string array`);
+        } else if (filter.include.length === 0) {
+          reasons.push(`toolFilter.${subKey}.include cannot be empty`);
+        } else if (!filter.include.every((v) => typeof v === "string")) {
+          reasons.push(`toolFilter.${subKey}.include must contain only strings`);
+        }
+      }
+      if (hasExclude) {
+        if (!Array.isArray(filter.exclude)) {
+          reasons.push(`toolFilter.${subKey}.exclude must be a string array`);
+        } else if (filter.exclude.length === 0) {
+          reasons.push(`toolFilter.${subKey}.exclude cannot be empty`);
+        } else if (!filter.exclude.every((v) => typeof v === "string")) {
+          reasons.push(`toolFilter.${subKey}.exclude must contain only strings`);
+        }
+      }
+
+      // Check for unknown keys
+      const allowedKeys = new Set(["include", "exclude"]);
+      for (const key of Object.keys(filter)) {
+        if (!allowedKeys.has(key)) {
+          reasons.push(`toolFilter.${subKey} has unknown key '${key}'`);
+        }
+      }
+
+      if (reasons.length > 0) {
         const defaultFilter = DEFAULT_CONFIG.toolFilter[subKey];
         if (defaultFilter) {
           config.toolFilter[subKey] = structuredClone(defaultFilter);
         } else {
           delete config.toolFilter[subKey];
         }
-        warnings.push(
-          `toolFilter.${subKey} must be an object. Using default: ${JSON.stringify(defaultFilter)}.`
-        );
-      }
-      continue;
-    }
-
-    const reasons: string[] = [];
-    const hasInclude = "include" in filter;
-    const hasExclude = "exclude" in filter;
-
-    // Must have at least one of include/exclude
-    if (!hasInclude && !hasExclude) {
-      reasons.push(`toolFilter.${subKey} must have either 'include' or 'exclude'`);
-    }
-
-    if (hasInclude && hasExclude) {
-      reasons.push(`toolFilter.${subKey} cannot have both 'include' and 'exclude'`);
-    }
-
-    // Check for empty or non-array include/exclude, or non-string elements
-    if (hasInclude) {
-      if (!Array.isArray(filter.include)) {
-        reasons.push(`toolFilter.${subKey}.include must be a string array`);
-      } else if (filter.include.length === 0) {
-        reasons.push(`toolFilter.${subKey}.include cannot be empty`);
-      } else if (!filter.include.every((v) => typeof v === "string")) {
-        reasons.push(`toolFilter.${subKey}.include must contain only strings`);
+        for (const reason of reasons) {
+          errors.push(`${reason}. Using default: ${JSON.stringify(defaultFilter)}.`);
+        }
       }
     }
-    if (hasExclude) {
-      if (!Array.isArray(filter.exclude)) {
-        reasons.push(`toolFilter.${subKey}.exclude must be a string array`);
-      } else if (filter.exclude.length === 0) {
-        reasons.push(`toolFilter.${subKey}.exclude cannot be empty`);
-      } else if (!filter.exclude.every((v) => typeof v === "string")) {
-        reasons.push(`toolFilter.${subKey}.exclude must contain only strings`);
-      }
-    }
+  }
 
-    // Check for unknown keys
-    const allowedKeys = new Set(["include", "exclude"]);
-    for (const key of Object.keys(filter)) {
-      if (!allowedKeys.has(key)) {
-        reasons.push(`toolFilter.${subKey} has unknown key '${key}'`);
+  // Validate constantTags - fail closed on non-array or non-string elements.
+  // Duplicates are deduplicated and warned (redundant, not malformed).
+  if (!Array.isArray(config.constantTags)) {
+    errors.push(
+      `constantTags must be a string array, got ${typeof config.constantTags}. Using default: ${JSON.stringify(DEFAULT_CONFIG.constantTags)}.`
+    );
+    config.constantTags = [...DEFAULT_CONFIG.constantTags];
+  } else {
+    const invalid = config.constantTags.filter((item) => typeof item !== "string");
+    if (invalid.length > 0) {
+      errors.push(
+        `constantTags must contain only strings. Invalid: ${invalid.map((v) => JSON.stringify(v)).join(", ")}. Using default: ${JSON.stringify(DEFAULT_CONFIG.constantTags)}.`
+      );
+      config.constantTags = [...DEFAULT_CONFIG.constantTags];
+    } else {
+      const unique = new Set(config.constantTags);
+      if (unique.size !== config.constantTags.length) {
+        config.constantTags = [...unique];
+        warnings.push("constantTags contains duplicate values. Using deduplicated value.");
       }
     }
+  }
 
-    if (reasons.length > 0) {
-      const defaultFilter = DEFAULT_CONFIG.toolFilter[subKey];
-      if (defaultFilter) {
-        config.toolFilter[subKey] = structuredClone(defaultFilter);
-      } else {
-        delete config.toolFilter[subKey];
-      }
-      for (const reason of reasons) {
-        warnings.push(`${reason}. Using default: ${JSON.stringify(defaultFilter)}.`);
-      }
-    }
+  // Validate entities - fail closed on non-array or malformed entries
+  // (each entry must be an object with a string 'text' property).
+  if (!Array.isArray(config.entities)) {
+    errors.push(
+      `entities must be an array of objects with a string 'text' property, got ${typeof config.entities}. Using default: ${JSON.stringify(DEFAULT_CONFIG.entities)}.`
+    );
+    config.entities = [...DEFAULT_CONFIG.entities];
+  } else if (!validateEntities(config.entities)) {
+    errors.push(
+      `entities must be an array of objects with a string 'text' property. Using default: ${JSON.stringify(DEFAULT_CONFIG.entities)}.`
+    );
+    config.entities = [...DEFAULT_CONFIG.entities];
   }
 
   // Check for duplicates in autoRecallTypes (null means all types, no validation needed)
@@ -1664,12 +1693,11 @@ export function validateConfig(config: HindsightConfig): {
   }
 
   if (observationScopesInvalid) {
-    warnings.push(`${observationScopesReason}. Using default (null).`);
+    errors.push(`${observationScopesReason}. Using default (null).`);
     config.observationScopes = DEFAULT_CONFIG.observationScopes;
-  }
-
-  // observationScopes null is required - produces error
-  if (config.observationScopes === null) {
+  } else if (config.observationScopes === null) {
+    // Only push the generic "is required" error when it was genuinely unset,
+    // not when a specific reason was already surfaced above.
     errors.push(
       "observationScopes is required (must be a preset string or an array of tag arrays)"
     );
