@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/noctuid/epimetheus/main/static/images/epimetheus-logo.png" alt="Epimetheus logo" width="33%" />
+  <img src="https://raw.githubusercontent.com/noctuid/epimetheus/refs/heads/main/static/images/epimetheus-logo.png" alt="Epimetheus logo" width="33%" />
 </p>
 
 # About
