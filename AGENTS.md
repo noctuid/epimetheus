@@ -1,10 +1,11 @@
 # General Instructions
 - Use conventional commit messages, always include a scope
-- Prefer keeping commit subjects under ~50 chars and body lines at ~72 chars; commitlint enforces 72/72
+- Commit subjects and body lines must not exceed 72 characters; prefer subjects under ~50 characters.
+- Before committing, verify every line of the complete message. After committing, run `bun run commitlint --last` and do not report success unless it passes.
 - Update CHANGELOG.md under the Pending section for any user-facing or internal changes. Since changes land on a feature branch before main, describe fixes relative to main — do not include fixes to issues that were never on main in the changelog.
 - Do not use import aliases unless there is genuine naming conflict
 - The function that has enough context to produce the most accurate, non-duplicated user message should notify. Lower layers should return enough information to make that possible.
-- Update the ToC when adding new documentation headings
+- Update the ToC when adding new documentation headings; don't include anything above the ToC in the ToC
 - When adding `/hindsight` subcommands, add any command that does non-diagnostic or non-setup network work to `OPERATIONAL_SUBCOMMANDS` (so it's blocked until healthy startup)
 
 # Testing
@@ -12,3 +13,9 @@
 - **Test behavior, not implementation**: Test descriptions and assertions should describe observable behavior (e.g. "recall works on first message") not implementation details (e.g. "uses event.prompt").
 - **Never modify the user's actual pi agent directory in tests**: Use `setupTempAgentDir()` from `fixtures.ts`. Use `makeCtx()` with an explicit session ID so queue/file operations target the test session.
 - **Run `bun run ci` after completing tasks**
+
+# Doc comments
+- The current doccomments are too bloated in some cases. When possible try to simplify when adding or editing (*without* losing clarity)
+
+# Release
+- Version bumps should update the package version, changelog, and suggested version to install in README.md

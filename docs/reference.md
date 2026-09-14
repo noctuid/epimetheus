@@ -62,23 +62,27 @@ Configuration is stored in `<getAgentDir()>/epimetheus/config.json` or `config.j
 | `debug` | `false` | Enable verbose diagnostics. Parse timings and session-start phase failures are written to `<agentdir>/epimetheus/debug.log` and mirrored to the console; auto-flush block notifications otherwise suppressed are shown. See [Debug Mode](#debug-mode). |
 
 ### Disabled Mode
-When `enabled: false`, epimetheus runs in a lightweight disabled mode. No tools, commands, API client, auto-recall, auto-retain, or status indicator are registered. However, two things are still handled:
+When `enabled: false`, epimetheus runs in a lightweight disabled mode. No tools, commands, API client, auto-recall, auto-retain, or status indicator are registered. This functionality is still supported:
 
-1. **Context filtering**: `hindsight-recall` custom messages are filtered from the LLM context, preventing stale recall messages from being sent to the model. This only matters for sessions where `autoRecallPersist` was enabled (the default is false) and those sessions are resumed.
+1. **Context filtering**: legacy `hindsight-recall` `custom_message` entries are filtered from the LLM context, preventing stale recall data from being sent to the model. This only matters when resuming old sessions where `autoRecallPersist` was enabled (the default is false) on older epimetheus versions. Recalls persisted by Epimetheus 0.7.0+ on Pi 0.80.5+ are stored as `custom` entries (see [Auto-Recall Settings](#auto-recall-settings)), which pi never projects into LLM context, so they need no filtering.
 
-2. **Custom message renderer**: The `hindsight-recall` renderer is still registered based on `autoRecallDisplay`:
-   - **`autoRecallDisplay: true`** — Persisted recall messages render with their formatted content (collapsed/expanded), so they display nicely in the TUI even though the extension is disabled.
-   - **`autoRecallDisplay: false`** (default) — The renderer hides recall messages from the chat (returns empty lines), preventing raw custom message data from appearing.
+2. **Recall renderers**: On supported Pi versions, both the legacy `custom_message` renderer and the `custom` entry renderer for `hindsight-recall` are registered based on `autoRecallDisplay`:
+   - **`autoRecallDisplay: true`** — Persisted recall renders with its formatted content (collapsed/expanded), so it displays nicely in the TUI even though the extension is disabled.
+   - **`autoRecallDisplay: false`** (default) — The renderers hide recall from the chat (return empty lines), preventing raw recall data from appearing.
 
 > **Note:** When disabled, the `/hindsight toggle-display` command is not available, so `autoRecallDisplay` can only be controlled via the config file or `EPIMETHEUS_AUTO_RECALL_DISPLAY` environment variable.
 
-This ensures that disabling the extension does not leave stale data in your sessions — recall messages are both filtered from the LLM context and properly rendered (or hidden) in the UI.
+If you have only used epimetheus 0.7.0+ and don't care about UI display, you can just completely uninstall it if you stop using it.
 
-**If you stop using Hindsight entirely** and have sessions with persisted recall entries, you have two options:
-1. Keep epimetheus installed with `enabled: false` (this disabled mode) — recall messages will continue to be filtered from context and rendered/hidden in the UI
-2. Uninstall epimetheus and manually remove all `hindsight-recall` entries from your session files — without the extension, `custom_message` entries would otherwise be sent to the LLM as regular user messages (`hindsight-meta` entries are safe to leave since they are `custom` entries, not messages, and won't appear in the LLM context)
+**If you stop using Epimetheus entirely** and have sessions with persisted recall entries:
+- For **legacy sessions** containing recall stored by Epimetheus 0.6.1 or earlier as `custom_message` entries, you have two options:
+  1. Keep epimetheus installed with `enabled: false` (this disabled mode) — those legacy `custom_message` entries will continue to be filtered from context and rendered/hidden in the UI.
+  2. Uninstall epimetheus and manually remove all legacy `hindsight-recall` `custom_message` entries from session files you want to reuse — without the extension, `custom_message` entries would otherwise be sent to the LLM as regular user messages.
+- For **sessions whose persisted recalls were all created by epimetheus 0.7.0+ on Pi 0.80.5+**, you can just uninstall epimetheus.
 
-> **Pi limitation:** The core issue is that pi has no way to render `custom_message` entries as UI-only (without sending them to the LLM), nor does it support rendering `custom` entries at all. If either were supported, the `autoRecallPersist` tradeoff would disappear — recall could be stored as display-only data that never enters the LLM context. Pi sessions are supposed to be append-only, so while you could technically delete or update these old entries, I won't support that as part of this extension directly.
+**If you run an older Pi (< 0.80.5; not supported)** without `registerEntryRenderer()`, epimetheus automatically enters a restricted mode equivalent to the disabled-mode behavior above (legacy recall filtering + rendering only).
+
+> Pi sessions are append-only, so epimetheus does not automatically delete or rewrite old entries; legacy `custom_message` recall entries created by Epimetheus 0.6.1 or earlier are still filtered and rendered for backward compatibility.
 
 ### Debug Mode
 
@@ -116,8 +120,8 @@ Two settings control which session lifecycle events automatically flush pending 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `autoRecallShowDateTime` | `true` | Include current date/time above recalled memories |
-| `autoRecallDisplay` | `false` | Show recalled messages in the UI. With `autoRecallPersist: true`, controls whether new recall messages are visible in chat. Also affects rendering of previously persisted recall messages (e.g. when `enabled: false`, see [Disabled Mode](#disabled-mode)). |
-| `autoRecallPersist` | `false` | Save recall messages to session file (visible in TUI after restart). Both persist modes use `before_agent_start` for recall and the `context` handler for re-injection as the configured role; the difference is whether the recall is also persisted to the session file. See [autoRecallPersist Tradeoffs](#autorecallpersist-tradeoffs). |
+| `autoRecallDisplay` | `false` | Show recalled memories in the UI. With `autoRecallPersist: true`, controls whether new recall entries are visible in chat. Also affects rendering of previously persisted recall entries (e.g. when `enabled: false`, see [Disabled Mode](#disabled-mode)). |
+| `autoRecallPersist` | `false` | Persist recall display data to the session file (visible in TUI after restart). Both persist modes use `before_agent_start` for recall and the `context` handler for ephemeral re-injection as the configured role; the difference is whether the recall display data is also persisted to the session file. See [autoRecallPersist Tradeoffs](#autorecallpersist-tradeoffs). |
 | `autoRecallRole` | `"user"` | Role to use when injecting recall memories. The default is `"user"` because some providers require the last message to be user-role. `"assistant"` may also cause issues with other extensions that inject messages via the `context` event, since injection order cannot be controlled and mixed roles may confuse the LLM. |
 | `autoRecallTypes` | `["observation"]` | Memory types to recall. Set to `null` or `[]` to recall all types. |
 | `autoRecallTags` | `null` | Tags to filter by during auto-recall. Supports same placeholders as observation scopes (`{session}`, `{parent}`, `{cwd}`, `{basedir}`, `{project}`). `null` means no tag filtering (recall from entire bank). See [autoRecallTags](#autorecalltags). |
@@ -128,19 +132,18 @@ Two settings control which session lifecycle events automatically flush pending 
 
 ### autoRecallPersist Tradeoffs
 
-Both modes use the same flow: `before_agent_start` always performs recall and caches the result; the `context` handler then re-injects the cached recall as the configured role (`user` or `assistant`, per `autoRecallRole`).
-
-When `autoRecallPersist: true`:
-- Recall messages are also persisted to the session file as `custom_message` entries (visible in the TUI after restart)
-- The `context` handler filters out these persisted `hindsight-recall` entries from the LLM context, preventing old recall messages from being re-sent to the model
-- `autoRecallDisplay: true` can be used to show recall messages to the user in the TUI
-
 When `autoRecallPersist: false` (default):
-- Recall messages are ephemeral — sent to the LLM via the `context` handler but not persisted or displayed in the TUI
+- Recall is ephemeral — sent to the LLM via the `context` handler but not persisted or displayed in the TUI
 - The most recent recall is available via `/hindsight popup`
-- `autoRecallDisplay: true` has no effect on new messages (memories are not stored and cannot be shown in chat) but still affects rendering of any previously persisted recall messages
+- `autoRecallDisplay: true` has no effect on new recall (not stored and cannot be shown in chat) but still affects rendering of any previously persisted recall entries
 
-If you stop using Hindsight and have sessions with persisted recall entries, you can keep epimetheus installed with `enabled: false` to continue filtering them from context, or manually remove them from session files. See [Disabled Mode](#disabled-mode) for details and the underlying pi limitation.
+When `autoRecallPersist: true` (Pi 0.80.5+):
+- Recall display data is persisted to the session file as a display-only `custom` entry (`customType: "hindsight-recall"`) via `pi.appendEntry()`, and an entry renderer is registered so it renders with the same collapsed/expanded components.
+- `autoRecallDisplay: true` can be used to show the recall entries to the user in the TUI.
+
+On old versions of epimetheus, the downside of autoRecallPersist was old recall messages would be incorrectly sent in requests if epimetheus was uninstalled and older sessions were resumed. On the current version of epimetheus, the only potential downside of `autoRecallPersist: true` is visual noise. If you ever want to view past recalls, you should set it true.
+
+If you stop using Hindsight and have sessions with persisted recall entries, you can keep epimetheus installed with `enabled: false` to continue filtering **legacy `custom_message`** entries from context, or manually remove them from session files. This only matters for recall persisted by epimetheus 0.6.1 or earlier and is no longer a concern for the current extension. See [Disabled Mode](#disabled-mode) for details.
 
 ## Status Bar Indicator
 The extension shows a health indicator in pi's status bar:

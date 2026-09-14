@@ -46,7 +46,7 @@ import { getHindsightCompatibilityError } from "./version";
 // Runtime toggle for recall display (overrides config)
 let autoRecallDisplayOverride: boolean | null = null;
 
-// Cache last recall message for context handler re-injection (autoRecallPersist: true)
+// Cache the current formatted recall for context-handler injection.
 // Consumed once per turn by the context handler.
 let lastRecallMessage: ReturnType<typeof formatRecallMessage> | null = null;
 
@@ -76,19 +76,14 @@ export function _resetState(): void {
 }
 
 /**
- * Register a context handler that filters hindsight-recall messages from
- * being sent to the LLM. Only used in disabled mode.
+ * Register a context handler that filters legacy hindsight-recall
+ * `custom_message` entries from LLM context. Used in disabled, invalid-config,
+ * and unsupported-Pi modes; the enabled-mode context handler applies the same
+ * filter while re-injecting the current recall.
  *
- * In enabled mode, the main context handler performs filtering as part of
- * recall re-injection.
- *
- * This only matters when autoRecallPersist is true (the default is false) and
- * old sessions with persisted entries are resumed. It is not a huge deal for
- * sessions that are not resumed, but autoRecallPersist is off by default for
- * this reason.
- *
- * If pi provided a way to render custom entries or to exclude custom_message
- * entries from convertToLlm, this filter would not be needed.
+ * New recalls are persisted as `custom` entries, which Pi never projects into
+ * LLM context. This filter remains so sessions containing entries created by
+ * Epimetheus 0.6.1 or earlier can still be resumed safely.
  */
 function registerRecallFilter(pi: ExtensionAPI): void {
   pi.on("context", async (event) => {
@@ -101,9 +96,36 @@ function registerRecallFilter(pi: ExtensionAPI): void {
 }
 
 /**
- * Register the custom message renderer for hindsight-recall messages.
- * The getDisplay callback is consulted on every render() call, enabling
- * dynamic show/hide when the user toggles display at runtime.
+ * True when the running Pi exposes `registerEntryRenderer()`. Newer Pi
+ * versions (>= 0.80.5) support display-only `custom` session entries via
+ * `pi.appendEntry()` + `registerEntryRenderer()`, which are never projected
+ * into LLM context. Older Pi lacks this API and can only persist
+ * `custom_message` entries (which DO enter LLM context and must be filtered).
+ */
+function supportsEntryRenderer(pi: ExtensionAPI): boolean {
+  return typeof (pi as { registerEntryRenderer?: unknown }).registerEntryRenderer === "function";
+}
+
+/**
+ * Data persisted in a display-only `hindsight-recall` custom entry. Only the
+ * details needed to render are stored; the full fenced content and timestamp
+ * are cached in memory for ephemeral re-injection each turn.
+ */
+interface RecallEntryData {
+  details: RecallMessageDetails;
+}
+
+/**
+ * Register the renderers for hindsight-recall display data.
+ *
+ * - The `custom_message` renderer renders legacy persisted recall messages from
+ *   older sessions / older Pi versions.
+ * - The `custom` entry renderer (only when Pi supports it) renders new
+ *   display-only recall entries persisted via `pi.appendEntry()`.
+ *
+ * Both reuse the same collapsed/expanded components. The getDisplay callback
+ * is consulted on every render() call, enabling dynamic show/hide when the
+ * user toggles display at runtime.
  *
  * @param getDisplay - Returns whether recall messages should be visible
  */
@@ -121,6 +143,19 @@ function registerRecallRenderer(pi: ExtensionAPI, getDisplay: () => boolean): vo
       return new RecallCollapsedComponent(details, theme, getDisplay);
     }
   );
+
+  if (supportsEntryRenderer(pi)) {
+    pi.registerEntryRenderer<RecallEntryData>("hindsight-recall", (entry, { expanded }, theme) => {
+      const details = entry.data?.details;
+      if (!details) return undefined;
+
+      if (expanded) {
+        return new RecallExpandedComponent(details, theme, getDisplay);
+      }
+
+      return new RecallCollapsedComponent(details, theme, getDisplay);
+    });
+  }
 }
 
 export default function (pi: ExtensionAPI) {
@@ -139,6 +174,9 @@ export default function (pi: ExtensionAPI) {
   //   - the module-level runtime-state (registered tool names, readiness
   //     latches, degraded reason) is reset on entry so this instance never
   //     claims a registration/readiness recorded by an older runtime.
+  autoRecallDisplayOverride = null;
+  lastRecallMessage = null;
+  lastRecallDetails = null;
   resetRuntimeState();
   let toolsRegistered = false;
   let startupReadyPromise: Promise<boolean> | null = null;
@@ -164,24 +202,47 @@ export default function (pi: ExtensionAPI) {
   const { config, configPath, warning, envVars } = loadConfig();
   const validation = validateConfig(config);
 
+  // Unsupported-Pi safety (feature-detected before any config handling).
+  //
+  // Pi versions before 0.80.5 lack `registerEntryRenderer()`, so they can only
+  // persist `custom_message` entries — which ARE projected into LLM context. To
+  // guarantee new auto-recall is NEVER persisted as a `custom_message` entry
+  // (which would leak into context and require manual cleanup after uninstall),
+  // we become disabled-mode-like on such Pi: only legacy recall filtering +
+  // rendering are registered, with no tools, commands, client, retention, or
+  // auto-recall. A session_start notification clearly warns that Pi >= 0.80.5
+  // is required.
+  if (!supportsEntryRenderer(pi)) {
+    const unsupportedMsg =
+      "Pi >= 0.80.5 is required for registerEntryRenderer support. " +
+      "Running in a restricted mode: legacy hindsight-recall entries are still " +
+      "filtered from LLM context and rendered, but tools, commands, retention, " +
+      "and auto-recall are disabled.";
+    debugWarn(prefixLog(unsupportedMsg));
+    // Legacy recall filtering/rendering still register so old persisted
+    // `custom_message` recall entries are kept out of context and displayed.
+    registerRecallFilter(pi);
+    registerRecallRenderer(pi, () => config.autoRecallDisplay);
+    pi.on("session_start", async (_event, ctx) => {
+      ctx.ui.setStatus(STATUS_ID, config.statusUnhealthy);
+      ctx.ui.notify(prefixLog(unsupportedMsg), "warning");
+    });
+    return;
+  }
+
   // Global disable check
   // Even when disabled, we register handlers to ensure:
-  // 1. hindsight-recall messages are filtered from LLM context (prevents stale
-  //    recalls from reaching the model)
-  // 2. The custom message renderer is registered so persisted recall messages
-  //    display correctly based on autoRecallDisplay:
-  //    - autoRecallDisplay: true  → messages render with formatted content
-  //    - autoRecallDisplay: false → renderer hides messages from the chat
-  //      (returns empty lines), preventing raw custom message data from showing
+  // 1. Legacy hindsight-recall custom messages are filtered from LLM context.
+  // 2. Legacy message and modern custom-entry renderers display or hide persisted
+  //    recall based on autoRecallDisplay.
   if (!config.enabled) {
     debugLog(prefixLog("disabled via config"));
 
     // Filter hindsight-recall messages from context
     registerRecallFilter(pi);
 
-    // Register custom message renderer. autoRecallDisplayOverride is not
-    // consulted because the toggle-display command is not registered in
-    // disabled mode, so the override can never be set.
+    // Register both recall renderers. autoRecallDisplayOverride is not consulted
+    // because the toggle-display command is not registered in disabled mode.
     registerRecallRenderer(pi, () => config.autoRecallDisplay);
 
     return;
@@ -538,14 +599,15 @@ ${details}`)
   // show/hide when the user toggles display.
   const getRecallDisplay = () => autoRecallDisplayOverride ?? config.autoRecallDisplay;
 
-  // Register custom message renderer for hindsight-recall messages.
-  // Uses dynamic components that check the runtime toggle on every render()
-  // call, so toggling display immediately shows/hides existing messages.
+  // Register legacy-message and custom-entry recall renderers. Their dynamic
+  // components check the runtime toggle on every render pass.
   registerRecallRenderer(pi, getRecallDisplay);
 
   // Auto-recall on before_agent_start.
-  // Always performs recall and caches the result for the context handler to re-inject.
-  // Only returns the message (persisting it to session) when autoRecallPersist is true.
+  // Always performs recall and caches the result (recallMessage + details) for the
+  // context handler to re-inject. Persistence happens there, not here: on Pi with
+  // entry-renderer support the context handler appends a display-only custom entry,
+  // so before_agent_start never returns a custom_message to persist.
   pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
     if (!client || !config.autoRecallEnabled) return;
 
@@ -564,17 +626,6 @@ ${details}`)
     // persisted to the session (fixes first-message recall).
     const query = event.prompt;
     if (!query) return;
-
-    // display controls whether the recall message is shown in the TUI.
-    // When autoRecallPersist is true, always use display: true so the message is
-    // added to the TUI chat container. The custom renderer dynamically checks
-    // the runtime toggle on every render() call to show/hide the content.
-    // When autoRecallPersist is false, the message is ephemeral (re-injected only
-    // by the context handler), so display controls the context handler's
-    // message visibility directly.
-    const displayValue = config.autoRecallPersist
-      ? true
-      : (autoRecallDisplayOverride ?? config.autoRecallDisplay);
 
     // Call shared recall helper
     const header = ctx.sessionManager.getHeader();
@@ -604,7 +655,6 @@ ${details}`)
     const result = await doAutoRecall(
       query,
       ctx.signal,
-      displayValue,
       sessionId,
       sessionCwd,
       projectNameResolution.projectName,
@@ -613,41 +663,42 @@ ${details}`)
     if (result) {
       lastRecallMessage = result.recallMessage;
       lastRecallDetails = result.recallMessage.details;
-      // Only persist to session file when autoRecallPersist is true
-      if (config.autoRecallPersist) {
-        return { message: result.recallMessage };
-      }
+      // The context handler consumes this cache, optionally persists its display
+      // details, and injects its fenced content for the current turn.
     }
   });
 
-  // Context event handler:
-  // 1. Always filter out hindsight-recall custom messages from being sent to the LLM
-  //    (only matters when autoRecallPersist is true and old sessions are resumed)
-  // 2. Re-inject cached recall from before_agent_start as the configured role
-  //    (user or assistant, per autoRecallRole config)
-  pi.on("context", async (event, _ctx: ExtensionContext) => {
+  // Filter legacy persisted recalls, optionally persist current display data,
+  // and inject the current recall as the configured role for this turn.
+  pi.on("context", async (event, ctx: ExtensionContext) => {
     const messages = event.messages as Array<{
       role: string;
       content?: unknown;
       customType?: string;
     }>;
 
-    // Always filter out existing hindsight-recall messages from the messages array.
-    // This is critical to prevent old recall messages from being sent to the LLM
+    // Keep legacy persisted recall messages out of LLM context.
     const filteredMessages = messages.filter((msg) => msg.customType !== "hindsight-recall");
     const hadRecallMessages = filteredMessages.length !== messages.length;
 
-    // Re-inject the cached recall from before_agent_start.
-    // before_agent_start always does the recall and caches the message here.
-    // When autoRecallPersist: true, the message was also persisted to the session file
-    // (as a custom_message for TUI display); when autoRecallPersist: false, it's
-    // ephemeral (re-injected here only for this turn).
-    // The recall is injected as the configured role (user or assistant) so the LLM
-    // receives it as a proper conversation message, not a custom message.
+    // Consume once so repeated context events cannot duplicate persistence or injection.
     const cachedRecall = lastRecallMessage;
     lastRecallMessage = null; // Clear after reading (consume once per turn)
     if (cachedRecall) {
       lastRecallDetails = cachedRecall.details;
+      if (config.autoRecallPersist) {
+        const entryData: RecallEntryData = { details: cachedRecall.details };
+        try {
+          pi.appendEntry("hindsight-recall", entryData);
+        } catch (error) {
+          const details = error instanceof Error ? error.message : String(error);
+          debugError(prefixLog(`failed to persist auto-recall display entry: ${details}`));
+          ctx.ui.notify(
+            prefixLog("could not persist auto-recall display; recall is still active this turn"),
+            "warning"
+          );
+        }
+      }
       // Content must be in the format expected by the provider:
       // - user role: string or content array (pi's convertToLlm handles both)
       // - assistant role: content array [{ type: "text", text: "..." }] (plain string
@@ -909,18 +960,15 @@ ${details}`)
   });
 
   /**
-   * Perform auto-recall with the given query.
-   * Shared by before_agent_start and context handlers.
+   * Perform auto-recall with the given query for before_agent_start.
    *
    * @param query - The user's query text (will be truncated)
    * @param signal - AbortSignal for cancellation
-   * @param display - Whether the recall message should be visible in TUI
    * @returns Object with recallMessage if results found, null otherwise
    */
   async function doAutoRecall(
     query: string,
     signal: AbortSignal | undefined,
-    display: boolean,
     sessionId: string,
     sessionCwd: string,
     projectName: string,
@@ -948,7 +996,7 @@ ${details}`)
       autoRecallTagGroups: expandedTagGroups,
     };
     // Clear stale recall on error/no-results (doAutoRecallImpl calls cacheDetails(null))
-    return doAutoRecallImpl(client, query, signal, display, recallConfig, (details) => {
+    return doAutoRecallImpl(client, query, signal, recallConfig, (details) => {
       lastRecallMessage = null;
       lastRecallDetails = details;
     });
@@ -1026,7 +1074,7 @@ class RecallExpandedComponent implements Component {
 }
 
 /**
- * Details included in hindsight-recall messages for the custom renderer.
+ * Recall details stored in display entries and used by the popup.
  * Exported for testing.
  */
 export interface RecallMessageDetails {
@@ -1036,18 +1084,8 @@ export interface RecallMessageDetails {
 }
 
 /**
- * Format recall results into a custom message with hindsight_memories fencing.
+ * Format recall results for ephemeral injection and persisted display details.
  * Precondition: results must be non-empty (caller checks results.length > 0).
- *
- * The `display` parameter controls TUI visibility:
- * - When autoRecallPersist is true, display is always true (message is persisted to
- *   session and added to chat container; the custom renderer dynamically checks
- *   the runtime toggle to show/hide content).
- * - When autoRecallPersist is false, the caller passes the current
- *   autoRecallDisplay/override value, which may be true or false. However, since
- *   the message is ephemeral (not added to the TUI chat container), the
- *   display value has no practical effect on rendering — it only controls
- *   whether pi's addMessageToChat adds a CustomMessageComponent.
  *
  * Memory context fencing format inspired by Hermes + Hindsight:
  * <hindsight_memories>
@@ -1065,13 +1103,9 @@ export interface RecallMessageDetails {
 export function formatRecallMessage(
   results: RecallResponse["results"],
   preamble: string,
-  showDateTime: boolean,
-  display: boolean = false
+  showDateTime: boolean
 ): {
-  role: "custom";
-  customType: string;
   content: string;
-  display: boolean;
   timestamp: number;
   details: RecallMessageDetails;
 } {
@@ -1121,10 +1155,7 @@ ${innerParts.join("\n\n")}
   );
 
   return {
-    role: "custom",
-    customType: "hindsight-recall",
     content,
-    display,
     timestamp: Date.now(),
     details: { count, snippet, memories },
   };
@@ -1166,12 +1197,10 @@ export interface AutoRecallConfig {
 
 /**
  * Perform auto-recall with the given query.
- * This is the core implementation shared by event handlers.
  *
  * @param client - The Hindsight client wrapper (or mock for testing)
  * @param query - The user's query text (will be truncated)
  * @param signal - AbortSignal for cancellation
- * @param display - Whether the recall message should be visible in TUI
  * @param config - Recall configuration
  * @param cacheDetails - Callback to cache recall details (receives null on no results)
  * @returns Object with recallMessage if results found, null otherwise
@@ -1182,7 +1211,6 @@ export async function doAutoRecallImpl(
   client: RecallClient | null,
   query: string,
   signal: AbortSignal | undefined,
-  display: boolean,
   config: AutoRecallConfig,
   cacheDetails: (details: RecallMessageDetails | null) => void
 ): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
@@ -1221,8 +1249,7 @@ export async function doAutoRecallImpl(
       const recallMessage = formatRecallMessage(
         results,
         config.recallPromptPreamble,
-        config.autoRecallShowDateTime,
-        display
+        config.autoRecallShowDateTime
       );
       // Cache recall details for show-recall command
       cacheDetails(recallMessage.details);

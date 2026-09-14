@@ -110,12 +110,14 @@ Additionally:
 It is recommended to install the extension through npm to get a stable version and to pin to a specific tag. When updating it is recommend to check (or have your agent check) the changelog for any breaking changes.
 
 ```bash
-pi install @noctuid/epimetheus@<latest tag>
+pi install @noctuid/epimetheus@0.7.0
 ```
 
 If you really need to a test a newer commit before a tag is published, you can install as a git extension.
 
 It is recommended to use the latest version of hindsight, and this extension enforces a minimum version (will get an error if not met).
+
+This extension requires **Pi 0.80.5 or newer**. On older Pi versions, epimetheus runs in a restricted mode: legacy persisted recall entries are still filtered from the LLM context and rendered, but it warns, and all other functionality is disabled. See [Auto-Recall Settings](docs/reference.md#auto-recall-settings) for how `autoRecallPersist` behaves on supported vs. older Pi.
 
 If you want to run hindsight on your own server or using [hindsight cloud](https://ui.hindsight.vectorize.io/signup), ignore the hindsight-embed commands. `uvx` is the only needed dependency if you don't plan on running it with docker or on a separate server.
 

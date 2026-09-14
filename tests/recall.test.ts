@@ -26,9 +26,6 @@ describe("formatRecallMessage", () => {
 
     const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true);
 
-    expect(message.role).toBe("custom");
-    expect(message.customType).toBe("hindsight-recall");
-    expect(message.display).toBe(false);
     expect(message.content).toContain("<hindsight_memories>");
     expect(message.content).toContain("</hindsight_memories>");
   });
@@ -211,81 +208,6 @@ describe("formatRecallMessage", () => {
     expect(message.details.snippet).toBe("Single memory");
     expect(message.details.memories).toBe("Single memory");
   });
-
-  it("formatRecallMessage uses display parameter", () => {
-    const results: RecallResponse["results"] = [{ id: "1", text: "User prefers dark mode" }];
-
-    const messageHidden = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
-    const messageShown = formatRecallMessage(results, DEFAULT_PREAMBLE, true, true);
-
-    expect(messageHidden.display).toBe(false);
-    expect(messageShown.display).toBe(true);
-  });
-
-  it("display: false hides message from TUI", () => {
-    const results: RecallResponse["results"] = [{ id: "1", text: "User prefers dark mode" }];
-
-    const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
-
-    expect(message.display).toBe(false);
-    expect(message.role).toBe("custom");
-    expect(message.customType).toBe("hindsight-recall");
-  });
-
-  it("display: true shows message in TUI", () => {
-    const results: RecallResponse["results"] = [{ id: "1", text: "User prefers dark mode" }];
-
-    const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, true);
-
-    expect(message.display).toBe(true);
-    expect(message.role).toBe("custom");
-    expect(message.customType).toBe("hindsight-recall");
-  });
-});
-
-// ============================================
-// autoRecallPersist behavior tests
-// ============================================
-
-describe("autoRecallPersist behavior", () => {
-  describe("when autoRecallPersist: true", () => {
-    it("recall message has display: false by default", () => {
-      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
-      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
-      expect(message.display).toBe(false);
-      expect(message.role).toBe("custom");
-      expect(message.customType).toBe("hindsight-recall");
-    });
-
-    it("recall message can have display: true when autoRecallDisplay is true", () => {
-      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
-      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, true);
-      expect(message.display).toBe(true);
-    });
-  });
-
-  describe("when autoRecallPersist: false", () => {
-    it("recall message always has display: false", () => {
-      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
-      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
-      expect(message.display).toBe(false);
-    });
-
-    it("recall message is injected into context but not persisted", () => {
-      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
-      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
-      expect(message.display).toBe(false);
-      expect(message.customType).toBe("hindsight-recall");
-    });
-  });
-
-  describe("context filtering", () => {
-    it("recall messages are identified by customType hindsight-recall", () => {
-      const results: RecallResponse["results"] = [{ id: "1", text: "Memory" }];
-      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true);
-      expect(message.customType).toBe("hindsight-recall");
-    });
-  });
 });
 // ============================================
 // /hindsight popup command tests (real handler)
@@ -456,7 +378,7 @@ describe("hindsight-popup command", () => {
         { id: "1", text: "Memory from before_agent_start" },
       ];
 
-      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, true);
+      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true);
       recallDetails = message.details;
 
       expect(recallDetails?.count).toBe(1);
@@ -465,7 +387,7 @@ describe("hindsight-popup command", () => {
     it("works with autoRecallPersist: false scenario", () => {
       const results: RecallResponse["results"] = [{ id: "1", text: "Memory from context event" }];
 
-      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true, false);
+      const message = formatRecallMessage(results, DEFAULT_PREAMBLE, true);
       recallDetails = message.details;
 
       expect(recallDetails?.count).toBe(1);
@@ -767,7 +689,6 @@ describe("doAutoRecallImpl", () => {
         null,
         "test query",
         mockSignal,
-        false,
         defaultConfig,
         (details) => {
           cachedDetails = details;
@@ -793,7 +714,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         defaultConfig,
         (details) => {
           cachedDetails = details;
@@ -821,7 +741,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         defaultConfig,
         (details) => {
           cachedDetails = details;
@@ -846,7 +765,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         defaultConfig,
         (details) => {
           cachedDetails = details;
@@ -872,7 +790,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         defaultConfig,
         (details) => {
           cachedDetails = details;
@@ -895,43 +812,14 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         defaultConfig,
         (_details) => {}
       );
 
       expect(result).not.toBeNull();
-      expect(result?.recallMessage.role).toBe("custom");
-      expect(result?.recallMessage.customType).toBe("hindsight-recall");
-      expect(result?.recallMessage.display).toBe(false);
       expect(result?.recallMessage.content).toContain("<hindsight_memories>");
       expect(result?.recallMessage.content).toContain("User prefers dark mode");
       expect(result?.recallMessage.content).toContain("User uses VS Code");
-    });
-
-    it("passes display parameter to recall message", async () => {
-      const results: RecallResponse["results"] = [{ id: "1", text: "Test memory" }];
-      const mockClient = createMockClient({ success: true, results });
-      const resultHidden = await doAutoRecallImpl(
-        mockClient,
-        "test query",
-        mockSignal,
-        false,
-        defaultConfig,
-        (_details) => {}
-      );
-
-      const resultShown = await doAutoRecallImpl(
-        mockClient,
-        "test query",
-        mockSignal,
-        true,
-        defaultConfig,
-        (_details) => {}
-      );
-
-      expect(resultHidden?.recallMessage.display).toBe(false);
-      expect(resultShown?.recallMessage.display).toBe(true);
     });
 
     it("includes date/time when showDateTime is true", async () => {
@@ -941,7 +829,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallShowDateTime: true },
         (_details) => {}
       );
@@ -956,7 +843,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallShowDateTime: false },
         (_details) => {}
       );
@@ -974,16 +860,9 @@ describe("doAutoRecallImpl", () => {
       const mockClient = createMockClient({ success: true, results });
       const cacheState: { details: RecallMessageDetails | null } = { details: null };
 
-      await doAutoRecallImpl(
-        mockClient,
-        "test query",
-        mockSignal,
-        false,
-        defaultConfig,
-        (details) => {
-          cacheState.details = details;
-        }
-      );
+      await doAutoRecallImpl(mockClient, "test query", mockSignal, defaultConfig, (details) => {
+        cacheState.details = details;
+      });
 
       expect(cacheState.details).not.toBeNull();
       expect(cacheState.details?.count).toBe(2);
@@ -999,16 +878,9 @@ describe("doAutoRecallImpl", () => {
         memories: "prev",
       };
 
-      await doAutoRecallImpl(
-        mockClient,
-        "test query",
-        mockSignal,
-        false,
-        defaultConfig,
-        (details) => {
-          cachedDetails = details;
-        }
-      );
+      await doAutoRecallImpl(mockClient, "test query", mockSignal, defaultConfig, (details) => {
+        cachedDetails = details;
+      });
 
       expect(cachedDetails).toBeNull();
     });
@@ -1021,16 +893,9 @@ describe("doAutoRecallImpl", () => {
         memories: "prev",
       };
 
-      await doAutoRecallImpl(
-        mockClient,
-        "test query",
-        mockSignal,
-        false,
-        defaultConfig,
-        (details) => {
-          cachedDetails = details;
-        }
-      );
+      await doAutoRecallImpl(mockClient, "test query", mockSignal, defaultConfig, (details) => {
+        cachedDetails = details;
+      });
 
       expect(cachedDetails).toBeNull();
     });
@@ -1059,7 +924,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         longQuery,
         mockSignal,
-        false,
         { ...defaultConfig, recallMaxQueryChars: 100 },
         () => {}
       );
@@ -1091,7 +955,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         shortQuery,
         mockSignal,
-        false,
         { ...defaultConfig, recallMaxQueryChars: 800 },
         () => {}
       );
@@ -1122,7 +985,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         unicodeQuery,
         mockSignal,
-        false,
         { ...defaultConfig, recallMaxQueryChars: 20 },
         () => {}
       );
@@ -1153,7 +1015,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallTypes: ["world", "experience"] },
         () => {}
       );
@@ -1181,7 +1042,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallTypes: null },
         () => {}
       );
@@ -1209,7 +1069,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallTypes: [] as ("world" | "experience" | "observation")[] },
         () => {}
       );
@@ -1230,7 +1089,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, recallPromptPreamble: customPreamble },
         () => {}
       );
@@ -1263,7 +1121,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallTags: ["project:myapp"], autoRecallTagsMatch: "any_strict" },
         () => {}
       );
@@ -1294,7 +1151,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallTags: null, autoRecallTagsMatch: "any" },
         () => {}
       );
@@ -1324,7 +1180,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallTags: null, autoRecallTagsMatch: "all_strict" },
         () => {}
       );
@@ -1355,7 +1210,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         {
           ...defaultConfig,
           autoRecallTagGroups: [
@@ -1393,7 +1247,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         { ...defaultConfig, autoRecallTagGroups: null },
         () => {}
       );
@@ -1427,7 +1280,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         {
           ...defaultConfig,
           autoRecallTags: ["project:myapp"],
@@ -1465,7 +1317,6 @@ describe("doAutoRecallImpl", () => {
         mockClient,
         "test query",
         mockSignal,
-        false,
         {
           ...defaultConfig,
           autoRecallTags: ["project:myapp"],
