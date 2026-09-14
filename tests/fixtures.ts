@@ -539,6 +539,7 @@ export interface CapturedExtension {
   tools: Array<{ name: string; execute: (...args: unknown[]) => unknown; parameters: unknown }>;
   commands: Map<string, unknown>;
   renderers: Map<string, unknown>;
+  entryRenderers: Map<string, unknown>;
   appendedEntries: { customType: string; data?: unknown }[];
   /** Current active tool names, or null if all tools are active (default). */
   activeToolNames: string[] | null;
@@ -556,7 +557,20 @@ export class MockPiBuilder {
   }> = [];
   private commands = new Map<string, unknown>();
   private renderers = new Map<string, unknown>();
+  private entryRenderers = new Map<string, unknown>();
   private appendedEntries: { customType: string; data?: unknown }[] = [];
+  // Whether the mock exposes registerEntryRenderer(). Newer Pi versions
+  // (>= 0.80.5) support entry renderers; older Pi does not. Defaults to true
+  // so the suite exercises the modern display-only custom-entry path; use
+  // withoutEntryRenderer() to simulate legacy Pi and test the unsupported-Pi
+  // safety/legacy behavior (and confirm no custom_message fallback).
+  private hasEntryRenderer = true;
+
+  /** Omit registerEntryRenderer() to simulate older Pi (unsupported-Pi mode). */
+  withoutEntryRenderer(): this {
+    this.hasEntryRenderer = false;
+    return this;
+  }
 
   private state = {
     activeToolNames: null as string[] | null,
@@ -570,6 +584,7 @@ export class MockPiBuilder {
       tools: this.tools,
       commands: this.commands,
       renderers: this.renderers,
+      entryRenderers: this.entryRenderers,
       appendedEntries: this.appendedEntries,
       get activeToolNames() {
         return state.activeToolNames;
@@ -592,6 +607,13 @@ export class MockPiBuilder {
       registerMessageRenderer: mock((type: string, renderer: unknown) => {
         this.renderers.set(type, renderer);
       }),
+      ...(this.hasEntryRenderer
+        ? {
+            registerEntryRenderer: mock((type: string, renderer: unknown) => {
+              this.entryRenderers.set(type, renderer);
+            }),
+          }
+        : {}),
       appendEntry: mock((customType: string, data?: unknown) => {
         this.appendedEntries.push({ customType, data });
       }),

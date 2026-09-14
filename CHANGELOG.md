@@ -1,5 +1,26 @@
 # Changelog
 
+## Pending
+
+## 0.7.0
+
+### Features
+
+- **Display-only auto-recall persistence** — On Pi 0.80.5+, persisted auto-recall is now stored as a display-only custom session entry that never enters LLM context. Recall is still injected ephemerally each turn as the configured user or assistant role.
+
+### Compatibility
+
+- **Pi 0.80.5+ is required for full operation** — On older Pi versions, Epimetheus warns and runs in a restricted legacy-filtering/rendering mode rather than creating context-bearing recall entries.
+- **Legacy recall handling is retained** — Entries created by Epimetheus 0.6.1 or earlier are still filtered from LLM context and rendered in the TUI.
+
+### Documentation
+
+- Documented Pi 0.80.5+ as the requirement and Epimetheus 0.7.0 as the first version whose newly persisted recalls remain out of model context after uninstall. Entries created by 0.6.1 or earlier still require filtering or manual removal.
+
+### Internal
+
+- Local development and tests now use Pi's custom-entry-renderer APIs; published Pi peer dependencies remain `"*"`.
+
 ## 0.6.1
 
 ### Fixed

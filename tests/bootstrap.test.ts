@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 // Import the real config module BEFORE mocking to preserve exports
 import * as realConfig from "../src/config";
 
@@ -20,6 +20,7 @@ import {
   createMockContext,
   createMockPi,
   HINDSIGHT_ENV_KEYS,
+  MockPiBuilder,
   readToolQueueFromDisk,
   saveEnvKeys,
   setupTempAgentDir,
@@ -1568,7 +1569,8 @@ describe("real entrypoint bootstrap", () => {
 
     expect(pi.handlers.has("context")).toBe(true);
     expect(pi.renderers.has("hindsight-recall")).toBe(true);
-    // Only context handler (renderer is tracked separately)
+    expect(pi.entryRenderers.has("hindsight-recall")).toBe(true);
+    // Only context handler (renderers are tracked separately)
     expect(pi.handlers.size).toBe(1);
   });
 
@@ -2186,6 +2188,7 @@ describe("real entrypoint bootstrap", () => {
     // /hindsight remains available for diagnostics.
     expect(pi.commands.has("hindsight")).toBe(true);
     expect(pi.renderers.has("hindsight-recall")).toBe(true);
+    expect(pi.entryRenderers.has("hindsight-recall")).toBe(true);
 
     // session_start only sets the unhealthy status.
     const ctx = createMockContext({ _sessionId: BOOTSTRAP_SESSION });
@@ -2998,8 +3001,8 @@ describe("real entrypoint bootstrap", () => {
     expect(ctx.ui.setStatus).toHaveBeenCalledWith("epimetheus", "🧠");
   });
 
-  it("before_agent_start handler returns recall message when autoRecallPersist is true", async () => {
-    activeConfig = { ...testConfig, autoRecallPersist: true };
+  it("keeps persisted recall visible after reload without adding it to model context", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true, autoRecallDisplay: true };
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -3013,40 +3016,87 @@ describe("real entrypoint bootstrap", () => {
       reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
     });
 
-    const pi = createMockPi();
-    const extension = await import("../src/index");
-    extension.default(pi);
-    await runHealthySessionStart(pi);
+    const sessionDir = mkdtempSync(join(tmpdir(), "epimetheus-recall-reload-"));
+    try {
+      const sessionManager = SessionManager.create(process.cwd(), sessionDir);
+      sessionManager.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "What do I prefer?" }],
+        timestamp: Date.now(),
+      });
 
-    const handler = pi.handlers.get("before_agent_start")!;
-    const ctx = createMockContext({
-      sessionManager: {
-        ...createMockContext().sessionManager,
-        getEntries: mock(() => [
-          {
-            type: "message",
-            message: { role: "user", content: [{ type: "text", text: "What do I prefer?" }] },
-          },
-        ]),
-      },
-    });
+      const pi = createMockPi();
+      const extension = await import("../src/index");
+      extension.default(pi);
+      await runHealthySessionStart(pi);
+      let recallEntryId: string | undefined;
+      pi.appendEntry = mock((customType: string, data?: unknown) => {
+        recallEntryId = sessionManager.appendCustomEntry(customType, data);
+      });
 
-    const result = (await handler(
-      { type: "before_agent_start", prompt: "What do I prefer?" },
-      ctx
-    )) as Record<string, unknown> | undefined;
+      await pi.handlers.get("before_agent_start")!(
+        { type: "before_agent_start", prompt: "What do I prefer?" },
+        createMockContext({ sessionManager })
+      );
+      await pi.handlers.get("context")!(
+        { type: "context", messages: sessionManager.buildSessionContext().messages },
+        createMockContext({ sessionManager })
+      );
+      sessionManager.appendMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "Understood." }],
+        api: "test",
+        provider: "test",
+        model: "test",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      });
 
-    expect(result).toBeDefined();
-    expect(result?.message).toBeDefined();
-    const msg = result?.message as Record<string, unknown>;
-    expect(msg.customType).toBe("hindsight-recall");
-    // When autoRecallPersist: true, display is always true so the message is added
-    // to the TUI chat container (renderer dynamically controls visibility)
-    expect(msg.display).toBe(true);
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile) throw new Error("Expected a persisted test session");
+      const reloadedSession = SessionManager.open(sessionFile);
+
+      const replacementPi = createMockPi();
+      extension.default(replacementPi);
+      const persistedModelContext = reloadedSession.buildSessionContext().messages;
+      const transformed = (await replacementPi.handlers.get("context")!(
+        { type: "context", messages: persistedModelContext },
+        createMockContext({ sessionManager: reloadedSession })
+      )) as { messages?: unknown[] } | undefined;
+      const modelMessages = transformed?.messages ?? persistedModelContext;
+      expect(JSON.stringify(modelMessages)).not.toContain("User prefers dark mode");
+
+      const entryRenderer = replacementPi.entryRenderers.get("hindsight-recall") as (
+        entry: unknown,
+        options: { expanded: boolean },
+        theme: Record<string, unknown>
+      ) => { render: (width: number) => string[] } | undefined;
+      const persistedEntry = recallEntryId ? reloadedSession.getEntry(recallEntryId) : undefined;
+      expect(persistedEntry).toBeDefined();
+      const component = entryRenderer(
+        persistedEntry,
+        { expanded: true },
+        {
+          fg: (_color: unknown, text: string) => text,
+          bg: (_color: unknown, text: string) => text,
+        }
+      );
+      expect(component?.render(80).join("\n")).toContain("User prefers dark mode");
+    } finally {
+      rmSync(sessionDir, { recursive: true, force: true });
+    }
   });
 
-  it("before_agent_start uses display: true even when autoRecallDisplay: false and autoRecallPersist: true", async () => {
-    activeConfig = { ...testConfig, autoRecallPersist: true, autoRecallDisplay: false };
+  it("still injects recall when display persistence fails", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
     activeClientFactory = () => ({
       healthCheck: mock(() => Promise.resolve({ success: true })),
       retain: mock(() => Promise.resolve({ success: true })),
@@ -3054,7 +3104,97 @@ describe("real entrypoint bootstrap", () => {
       recall: mock(() =>
         Promise.resolve({
           success: true,
-          response: { results: [{ id: "1", text: "Memory" }] },
+          response: { results: [{ id: "1", text: "Recall despite write failure" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+    await runHealthySessionStart(pi);
+    pi.appendEntry = mock(() => {
+      throw new Error("session write failed");
+    });
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    await basHandler(
+      { type: "before_agent_start", prompt: "Hello" },
+      createMockContext({
+        sessionManager: { ...createMockContext().sessionManager, getEntries: mock(() => []) },
+      })
+    );
+
+    const contextHandler = pi.handlers.get("context")!;
+    const ctx = createMockContext();
+    const result = (await contextHandler(
+      { type: "context", messages: [{ role: "user", content: "Hello" }] },
+      ctx
+    )) as { messages: Array<{ content?: unknown }> };
+
+    expect(
+      result.messages.some(
+        (message) =>
+          typeof message.content === "string" &&
+          message.content.includes("Recall despite write failure")
+      )
+    ).toBe(true);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("could not persist auto-recall display"),
+      "warning"
+    );
+  });
+
+  it("does not carry an unconsumed recall into a replacement runtime", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Old runtime recall" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const extension = await import("../src/index");
+    const firstPi = createMockPi();
+    extension.default(firstPi);
+    await runHealthySessionStart(firstPi);
+    await firstPi.handlers.get("before_agent_start")!(
+      { type: "before_agent_start", prompt: "Hello" },
+      createMockContext({
+        sessionManager: { ...createMockContext().sessionManager, getEntries: mock(() => []) },
+      })
+    );
+
+    const replacementPi = createMockPi();
+    extension.default(replacementPi);
+    const result = await replacementPi.handlers.get("context")!(
+      { type: "context", messages: [{ role: "user", content: "New session" }] },
+      createMockContext()
+    );
+
+    expect(result).toBeUndefined();
+    expect(
+      replacementPi.appendedEntries.filter((entry) => entry.customType === "hindsight-recall")
+    ).toHaveLength(0);
+  });
+
+  it("does not persist a duplicate custom entry on a repeated context call", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Single persist memory" }] },
         })
       ),
       reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
@@ -3065,24 +3205,233 @@ describe("real entrypoint bootstrap", () => {
     extension.default(pi);
     await runHealthySessionStart(pi);
 
-    const handler = pi.handlers.get("before_agent_start")!;
-    const ctx = createMockContext({
-      sessionManager: {
-        ...createMockContext().sessionManager,
-        getEntries: mock(() => [
-          {
-            type: "message",
-            message: { role: "user", content: [{ type: "text", text: "Hello" }] },
-          },
-        ]),
-      },
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+
+    const ctxBas = createMockContext({
+      sessionManager: { ...createMockContext().sessionManager, getEntries: mock(() => []) },
+    });
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
+    const messages = [
+      { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+    ];
+
+    // First context call consumes the cache and persists exactly once.
+    await contextHandler({ type: "context", messages: messages.slice() }, createMockContext());
+    // After consuming lastRecallMessage, repeated context calls inject/persist nothing.
+    await contextHandler({ type: "context", messages: messages.slice() }, createMockContext());
+    await contextHandler({ type: "context", messages: messages.slice() }, createMockContext());
+
+    const recallEntries = pi.appendedEntries.filter((e) => e.customType === "hindsight-recall");
+    expect(recallEntries).toHaveLength(1);
+  });
+
+  it("does not persist any recall entry when autoRecallPersist is false", async () => {
+    // autoRecallPersist: false is the default — recall is injected ephemerally
+    // only, never persisted as a custom entry or a custom_message.
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Ephemeral only" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
     });
 
-    const result = (await handler({ type: "before_agent_start", prompt: "Hello" }, ctx)) as
-      | Record<string, unknown>
-      | undefined;
-    const msg = result?.message as Record<string, unknown>;
-    expect(msg.display).toBe(true);
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+    await runHealthySessionStart(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+
+    const ctxBas = createMockContext({
+      sessionManager: { ...createMockContext().sessionManager, getEntries: mock(() => []) },
+    });
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
+
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+        ],
+      },
+      createMockContext()
+    )) as Record<string, unknown> | undefined;
+
+    // No custom entry is persisted, but recall is still injected for this turn.
+    expect(pi.appendedEntries.filter((e) => e.customType === "hindsight-recall")).toHaveLength(0);
+    const messages = contextResult?.messages as Array<{ role?: string; content?: unknown }>;
+    expect(
+      messages.some((m) => typeof m.content === "string" && m.content.includes("Ephemeral only"))
+    ).toBe(true);
+  });
+
+  it("ephemeral injection uses the configured assistant role", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true, autoRecallRole: "assistant" };
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Assistant role memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+    await runHealthySessionStart(pi);
+
+    const basHandler = pi.handlers.get("before_agent_start")!;
+    const contextHandler = pi.handlers.get("context")!;
+
+    const ctxBas = createMockContext({
+      sessionManager: { ...createMockContext().sessionManager, getEntries: mock(() => []) },
+    });
+    await basHandler({ type: "before_agent_start", prompt: "Hello" }, ctxBas);
+
+    const contextResult = (await contextHandler(
+      {
+        type: "context",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Hello" }], customType: undefined },
+        ],
+      },
+      createMockContext()
+    )) as Record<string, unknown> | undefined;
+
+    // The re-injected recall uses the assistant role with a content array.
+    const messages = contextResult?.messages as Array<{
+      role?: string;
+      content?: Array<{ type: string; text: string }>;
+    }>;
+    const recallMsg = messages.find(
+      (m) =>
+        Array.isArray(m.content) && m.content.some((c) => c.text.includes("Assistant role memory"))
+    );
+    expect(recallMsg).toBeDefined();
+    expect(recallMsg?.role).toBe("assistant");
+  });
+
+  it("registers an entry renderer for persisted auto-recall display", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true, autoRecallDisplay: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    expect(pi.entryRenderers.has("hindsight-recall")).toBe(true);
+  });
+
+  it("entry renderer returns dynamic components that respect the display toggle and expanded state", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true, autoRecallDisplay: false };
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    const entryRenderer = pi.entryRenderers.get("hindsight-recall") as (
+      entry: { data?: { details?: Record<string, unknown> } },
+      options: { expanded: boolean },
+      theme: Record<string, unknown>
+    ) => { render: (width: number) => string[] } | undefined;
+    expect(entryRenderer).toBeDefined();
+
+    const mockTheme = { fg: (_n: unknown, t: string) => t, bg: (_n: unknown, t: string) => t };
+    const data = {
+      details: { count: 2, snippet: "Memory 1 · Memory 2", memories: "Memory 1\n\nMemory 2" },
+    };
+
+    // autoRecallDisplay: false → hidden in both collapsed and expanded states.
+    const collapsed = entryRenderer({ data }, { expanded: false }, mockTheme)!;
+    const expanded = entryRenderer({ data }, { expanded: true }, mockTheme)!;
+    expect(collapsed.render(80)).toEqual([]);
+    expect(expanded.render(80)).toEqual([]);
+
+    // Toggle display ON via the command handler — same component instances now render.
+    const commandHandler = pi.commands.get("hindsight") as {
+      handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+    };
+    await commandHandler!.handler("toggle-display", createMockContext());
+    const collapsedLines = collapsed.render(80);
+    expect(collapsedLines.join("\n")).toContain("Hindsight recalled");
+    const expandedLines = expanded.render(80);
+    expect(expandedLines.join("\n")).toContain("Hindsight recalled");
+    expect(expandedLines.join("\n")).toContain("Memory 1");
+
+    // Toggle OFF → hidden again.
+    await commandHandler!.handler("toggle-display", createMockContext());
+    expect(collapsed.render(80)).toEqual([]);
+    expect(expanded.render(80)).toEqual([]);
+  });
+
+  it("unsupported Pi (no registerEntryRenderer) runs legacy-only mode and never persists new recall as custom_message", async () => {
+    activeConfig = { ...testConfig, autoRecallPersist: true };
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall: mock(() =>
+        Promise.resolve({
+          success: true,
+          response: { results: [{ id: "1", text: "Legacy memory" }] },
+        })
+      ),
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    // Simulate an older Pi without registerEntryRenderer().
+    const pi = new MockPiBuilder().withoutEntryRenderer().build();
+    const extension = await import("../src/index");
+    extension.default(pi);
+
+    // Legacy recall filtering + message renderer still register...
+    expect(pi.renderers.has("hindsight-recall")).toBe(true);
+    expect(pi.entryRenderers.has("hindsight-recall")).toBe(false);
+    expect(pi.handlers.has("context")).toBe(true);
+
+    // ...but no tools, commands, client-dependent handlers, or auto-recall.
+    expect(pi.tools).toHaveLength(0);
+    expect(pi.commands.has("hindsight")).toBe(false);
+    expect(pi.handlers.has("before_agent_start")).toBe(false);
+    expect(pi.handlers.has("message_end")).toBe(false);
+    expect(pi.handlers.has("session_shutdown")).toBe(false);
+
+    // session_start clearly warns that Pi >= 0.80.5 is required.
+    const sessionStart = pi.handlers.get("session_start")!;
+    const ctx = createMockContext();
+    await sessionStart({ type: "session_start" }, ctx);
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("epimetheus", "🤯");
+    const notify = (ctx.ui.notify as ReturnType<typeof mock>).mock.calls.map((c) => String(c[0]));
+    expect(notify.some((m) => m.includes("0.80.5"))).toBe(true);
+
+    // No recall entry is ever appended (no custom_message fallback to context).
+    expect(pi.appendedEntries).toHaveLength(0);
+    // Legacy recall filtering still works.
+    const filterHandler = pi.handlers.get("context")!;
+    const result = (await filterHandler(
+      {
+        messages: [
+          { role: "user", content: "Hello" },
+          { role: "custom", customType: "hindsight-recall", content: "Old recall" },
+        ],
+      },
+      createMockContext()
+    )) as Record<string, unknown> | undefined;
+    const msgs = result?.messages as Array<{ customType?: string }>;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.customType).toBeUndefined();
   });
 
   it("before_agent_start caches recall but does not persist when autoRecallPersist is false", async () => {
@@ -3426,12 +3775,9 @@ describe("real entrypoint bootstrap", () => {
   // autoRecallPersist context filtering regression (integration)
   // ============================================
   //
-  // Bug: When autoRecallPersist: true, before_agent_start injects a hindsight-recall
-  // message into the session, but the context handler stripped ALL hindsight-recall
-  // messages and never re-injected, so the LLM never saw recalled memories.
-  //
-  // Fix: before_agent_start always does recall and caches the message.
-  // The context handler strips stale recalls and re-injects the cached recall.
+  // Regression: persisted display and ephemeral LLM injection are separate paths.
+  // before_agent_start caches current recall; the context handler filters legacy
+  // persisted messages, stores display-only data, and injects the current recall.
   // These tests exercise the real handler flow (before_agent_start → context).
 
   it("autoRecallPersist: true - recall survives before_agent_start → context handler flow", async () => {
@@ -3469,18 +3815,18 @@ describe("real entrypoint bootstrap", () => {
       },
     });
 
-    // Step 1: before_agent_start should return message (persisted) and cache it
+    // Step 1: before_agent_start caches recall but must NOT return a custom_message
+    // (new recalls are never persisted as custom_message entries).
     const basResult = (await basHandler(
       { type: "before_agent_start", prompt: "What do I prefer?" },
       ctxBas
     )) as Record<string, unknown> | undefined;
-    expect(basResult).toBeDefined();
-    const basMsg = basResult?.message as Record<string, unknown>;
-    expect(basMsg.customType).toBe("hindsight-recall");
-    expect(basMsg.content).toContain("Important memory");
+    expect(basResult).toBeUndefined();
 
-    // Step 2: context handler should filter the persisted recall and re-inject it
+    // Step 2: the context handler appends a display-only custom entry, filters any
+    // legacy custom_message recall from context, and re-injects the recall.
     const ctxContext = createMockContext();
+    pi.appendedEntries.length = 0; // ignore hindsight-meta entries from session_start
     const contextResult = (await contextHandler(
       {
         type: "context",
@@ -3490,7 +3836,7 @@ describe("real entrypoint bootstrap", () => {
             content: [{ type: "text", text: "What do I prefer?" }],
             customType: undefined,
           },
-          // The persisted recall message is in the session, so it appears here
+          // A legacy persisted custom_message recall from an older session
           { role: "custom", customType: "hindsight-recall", content: "Important memory" },
         ],
       },
@@ -3498,12 +3844,19 @@ describe("real entrypoint bootstrap", () => {
     )) as Record<string, unknown> | undefined;
 
     expect(contextResult).toBeDefined();
+    // A display-only custom entry was appended (never sent to the LLM).
+    const recallEntries = pi.appendedEntries.filter((e) => e.customType === "hindsight-recall");
+    expect(recallEntries).toHaveLength(1);
+    expect(
+      (recallEntries[0]?.data as { details?: { memories: string } })?.details?.memories
+    ).toContain("Important memory");
+
     const messages = contextResult?.messages as Array<{
       role?: string;
       customType?: string;
       content?: unknown;
     }>;
-    // Exactly 2 messages: user + one re-injected recall (stale persisted recall was filtered)
+    // Exactly 2 messages: user + one re-injected recall (legacy custom_message was filtered)
     expect(messages).toHaveLength(2);
     // The re-injected recall is a proper role message (not a custom message)
     const recallMsg = messages.find(
