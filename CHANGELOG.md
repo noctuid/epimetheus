@@ -6,6 +6,10 @@
 
 - **`recallTimeoutMs` config** — Recall request timeouts are now configurable (previously hard-coded to 10 seconds). The new `recallTimeoutMs` setting (milliseconds, default `10000`) applies to both auto-recall and the `hindsight_recall` tool, which shared the same hard-coded timeout. On timeout, recall fails as before — there is no retry or degraded fallback, so tune `recallTimeoutMs` together with `autoRecallBudget`/`maxRecallTokens` for large memory banks (e.g. `30000`). Invalid values warn and fall back to the default. Env vars: `EPIMETHEUS_RECALL_TIMEOUT_MS` (legacy fallback: `PI_HINDSIGHT_RECALL_TIMEOUT_MS`).
 
+### Fixed
+
+- **Visible auto-recall failures** — Auto-recall failures now use TUI warning notifications instead of relying only on console warnings that are overwritten during redraw. Failures still inject no memory context and are recorded in the debug log.
+
 ## 0.7.0
 
 ### Features

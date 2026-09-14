@@ -660,7 +660,9 @@ ${details}`)
       projectNameResolution.projectName,
       parentSessionId
     );
-    if (result) {
+    if (result?.error) {
+      ctx.ui.notify(prefixLog(`auto-recall failed: ${result.error}`), "warning");
+    } else if (result?.recallMessage) {
       lastRecallMessage = result.recallMessage;
       lastRecallDetails = result.recallMessage.details;
       // The context handler consumes this cache, optionally persists its display
@@ -964,7 +966,7 @@ ${details}`)
    *
    * @param query - The user's query text (will be truncated)
    * @param signal - AbortSignal for cancellation
-   * @returns Object with recallMessage if results found, null otherwise
+   * @returns Recall message, failure details, or null when no results are found
    */
   async function doAutoRecall(
     query: string,
@@ -973,7 +975,7 @@ ${details}`)
     sessionCwd: string,
     projectName: string,
     parentSessionId?: string
-  ): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
+  ): Promise<AutoRecallResult> {
     // Expand recall tag placeholders with the same project name used for flushing.
     const placeholderParams = {
       sessionId,
@@ -1195,6 +1197,11 @@ export interface AutoRecallConfig {
   autoRecallTagGroups: TagGroupInput[] | null;
 }
 
+type AutoRecallResult =
+  | { recallMessage: ReturnType<typeof formatRecallMessage>; error?: undefined }
+  | { recallMessage?: undefined; error: string }
+  | null;
+
 /**
  * Perform auto-recall with the given query.
  *
@@ -1203,7 +1210,7 @@ export interface AutoRecallConfig {
  * @param signal - AbortSignal for cancellation
  * @param config - Recall configuration
  * @param cacheDetails - Callback to cache recall details (receives null on no results)
- * @returns Object with recallMessage if results found, null otherwise
+ * @returns Recall message, failure details, or null when no results are found
  *
  * Exported for testing.
  */
@@ -1213,7 +1220,7 @@ export async function doAutoRecallImpl(
   signal: AbortSignal | undefined,
   config: AutoRecallConfig,
   cacheDetails: (details: RecallMessageDetails | null) => void
-): Promise<{ recallMessage: ReturnType<typeof formatRecallMessage> } | null> {
+): Promise<AutoRecallResult> {
   if (!client) return null;
 
   // Truncate query safely (handles multi-byte Unicode)
@@ -1239,7 +1246,7 @@ export async function doAutoRecallImpl(
     if (!result.success) {
       debugWarn("Auto-recall failed:", result.error);
       cacheDetails(null);
-      return null;
+      return { error: result.error ?? "unknown error" };
     }
 
     const response = result.response;
@@ -1261,6 +1268,6 @@ export async function doAutoRecallImpl(
   } catch (e) {
     debugWarn("Auto-recall error:", e);
     cacheDetails(null);
-    return null;
+    return { error: e instanceof Error ? e.message : String(e) };
   }
 }
