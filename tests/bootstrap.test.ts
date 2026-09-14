@@ -3495,6 +3495,52 @@ describe("real entrypoint bootstrap", () => {
     expect(recallMsg?.content).toContain("Cached memory");
   });
 
+  it("warns and does not inject stale recall after auto-recall fails", async () => {
+    const recall = mock()
+      .mockResolvedValueOnce({
+        success: true,
+        response: { results: [{ id: "1", text: "Stale memory" }] },
+      })
+      .mockResolvedValueOnce({
+        success: false,
+        error: "Operation timed out after 10000ms",
+      });
+    activeClientFactory = () => ({
+      healthCheck: mock(() => Promise.resolve({ success: true })),
+      retain: mock(() => Promise.resolve({ success: true })),
+      retainBatch: mock(() => Promise.resolve({ success: true })),
+      recall,
+      reflect: mock(() => Promise.resolve({ success: true, response: { text: "" } })),
+    });
+
+    const pi = createMockPi();
+    const extension = await import("../src/index");
+    extension.default(pi);
+    await runHealthySessionStart(pi);
+
+    const ctx = createMockContext();
+    const beforeAgentStart = pi.handlers.get("before_agent_start")!;
+    await beforeAgentStart({ type: "before_agent_start", prompt: "First prompt" }, ctx);
+    await beforeAgentStart({ type: "before_agent_start", prompt: "Second prompt" }, ctx);
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "epimetheus: auto-recall failed: Operation timed out after 10000ms",
+      "warning"
+    );
+
+    const inputMessages = [{ role: "user", content: "Second prompt" }];
+    const contextResult = (await pi.handlers.get("context")!(
+      { type: "context", messages: inputMessages },
+      ctx
+    )) as { messages?: Array<{ content?: unknown }> } | undefined;
+    const messages = contextResult?.messages ?? inputMessages;
+    expect(
+      messages.some(
+        (message) => typeof message.content === "string" && message.content.includes("Stale memory")
+      )
+    ).toBe(false);
+  });
+
   it("before_agent_start performs recall on first message of session", async () => {
     // Verifies that auto-recall uses event.prompt instead of scanning entries.
     // getEntries() returns empty here (first message of session), confirming

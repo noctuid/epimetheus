@@ -703,7 +703,7 @@ describe("doAutoRecallImpl", () => {
   });
 
   describe("error handling", () => {
-    it("returns null when client returns error", async () => {
+    it("returns the client error", async () => {
       const mockClient = createMockClient({ success: false, error: "API rate limit exceeded" });
       let cachedDetails: RecallMessageDetails | null = {
         count: 1,
@@ -721,12 +721,12 @@ describe("doAutoRecallImpl", () => {
         }
       );
 
-      expect(result).toBeNull();
+      expect(result?.error).toBe("API rate limit exceeded");
       // cacheDetails should be called with null on error
       expect(cachedDetails).toBeNull();
     });
 
-    it("returns null when client throws exception", async () => {
+    it("returns an unexpected client error", async () => {
       const mockClient: RecallClient = {
         recall: async () => {
           throw new Error("Network error");
@@ -748,7 +748,7 @@ describe("doAutoRecallImpl", () => {
         }
       );
 
-      expect(result).toBeNull();
+      expect(result?.error).toBe("Network error");
       expect(cachedDetails).toBeNull();
     });
   });
@@ -818,9 +818,9 @@ describe("doAutoRecallImpl", () => {
       );
 
       expect(result).not.toBeNull();
-      expect(result?.recallMessage.content).toContain("<hindsight_memories>");
-      expect(result?.recallMessage.content).toContain("User prefers dark mode");
-      expect(result?.recallMessage.content).toContain("User uses VS Code");
+      expect(result?.recallMessage?.content).toContain("<hindsight_memories>");
+      expect(result?.recallMessage?.content).toContain("User prefers dark mode");
+      expect(result?.recallMessage?.content).toContain("User uses VS Code");
     });
 
     it("includes date/time when showDateTime is true", async () => {
@@ -834,7 +834,7 @@ describe("doAutoRecallImpl", () => {
         (_details) => {}
       );
 
-      expect(result?.recallMessage.content).toContain("Current date and time:");
+      expect(result?.recallMessage?.content).toContain("Current date and time:");
     });
 
     it("excludes date/time when showDateTime is false", async () => {
@@ -848,7 +848,7 @@ describe("doAutoRecallImpl", () => {
         (_details) => {}
       );
 
-      expect(result?.recallMessage.content).not.toContain("Current date and time:");
+      expect(result?.recallMessage?.content).not.toContain("Current date and time:");
     });
   });
 
@@ -1094,8 +1094,8 @@ describe("doAutoRecallImpl", () => {
         () => {}
       );
 
-      expect(result?.recallMessage.content).toContain(customPreamble);
-      expect(result?.recallMessage.content).not.toContain(DEFAULT_PREAMBLE);
+      expect(result?.recallMessage?.content).toContain(customPreamble);
+      expect(result?.recallMessage?.content).not.toContain(DEFAULT_PREAMBLE);
     });
   });
 
@@ -1367,7 +1367,7 @@ describe("doAutoRecallImpl", () => {
         }
       );
 
-      expect(result).toBeNull();
+      expect(result?.error).toContain("Operation timed out after 50ms");
       // Stale recall cache is cleared on timeout (no degraded fallback)
       expect(cachedDetails).toBeNull();
     });
@@ -1386,7 +1386,7 @@ describe("doAutoRecallImpl", () => {
       );
 
       expect(result).not.toBeNull();
-      expect(result?.recallMessage.content).toContain("Fast memory");
+      expect(result?.recallMessage?.content).toContain("Fast memory");
     });
   });
 });
