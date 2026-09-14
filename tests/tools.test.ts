@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RecallResponse, ReflectResponse } from "@vectorize-io/hindsight-client";
-import type { HindsightClientWrapper } from "../src/client";
+import { HindsightClientWrapper } from "../src/client";
 import type { HindsightConfig } from "../src/config";
 import { clearSessionQueueState, removePendingFlag } from "../src/queue";
 import {
@@ -532,6 +532,68 @@ describe("hindsight_recall", () => {
     expect(recallMock).toHaveBeenCalled();
     const callArgs = recallMock.mock.calls[0]![0]!;
     expect(callArgs.types).toEqual(["observation"]);
+  });
+});
+
+// ============================================
+// hindsight_recall configured timeout behavior
+// (real HindsightClientWrapper; only the SDK HTTP boundary is mocked so
+// the production timeout mechanism is exercised)
+// ============================================
+
+describe("hindsight_recall configured timeout", () => {
+  function makeWrapper(recallImpl: () => Promise<unknown>): HindsightClientWrapper {
+    const wrapper = new HindsightClientWrapper({
+      ...testConfig,
+      recallTimeoutMs: 50,
+    });
+    const sdk = (wrapper as any).client as { recall: () => Promise<unknown> };
+    sdk.recall = recallImpl;
+    return wrapper;
+  }
+
+  it("fails with a timeout error when recall exceeds the configured timeout", async () => {
+    const pi = createMockPi();
+    const client = makeWrapper(() => new Promise(() => {}));
+    registerTools(pi, { ...testConfig, recallTimeoutMs: 50 }, client);
+    const recallTool = pi.tools.find((t: ToolDef) => t.name === "hindsight_recall");
+    const ctx = createMockContext();
+
+    const result = (await recallTool!.execute(
+      "tc1",
+      { query: "test" },
+      undefined,
+      undefined,
+      ctx
+    )) as {
+      content: Array<{ type: string; text: string }>;
+      details: { success: boolean; error?: string };
+    };
+
+    expect(result.details.success).toBe(false);
+    expect(result.details.error).toContain("Operation timed out after 50ms");
+    expect(result.content[0]?.text).toContain("Failed to recall memories");
+  });
+
+  it("returns results when recall completes within the configured timeout", async () => {
+    const pi = createMockPi();
+    const client = makeWrapper(() =>
+      Promise.resolve({ results: [{ id: "1", text: "Quick memory" }] })
+    );
+    registerTools(pi, { ...testConfig, recallTimeoutMs: 50 }, client);
+    const recallTool = pi.tools.find((t: ToolDef) => t.name === "hindsight_recall");
+    const ctx = createMockContext();
+
+    const result = (await recallTool!.execute(
+      "tc1",
+      { query: "test" },
+      undefined,
+      undefined,
+      ctx
+    )) as { content: Array<{ type: string; text: string }>; details: { success: boolean } };
+
+    expect(result.details.success).toBe(true);
+    expect(result.content[0]?.text).toContain("1. Quick memory");
   });
 });
 

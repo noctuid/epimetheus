@@ -240,11 +240,14 @@ export class HindsightClientWrapper {
 
   /**
    * Recall memories with timeout and optional abort signal.
+   * Defaults to the configured `recallTimeoutMs`, which is shared by
+   * auto-recall and the hindsight_recall tool. Callers can still pass an
+   * explicit timeoutMs to override the configured default.
    */
   async recall(
     options: RecallOptions,
     signal?: AbortSignal,
-    timeoutMs: number = 10000
+    timeoutMs: number = this.config.recallTimeoutMs
   ): Promise<{ success: boolean; response?: RecallResponse; error?: string }> {
     try {
       const result = await this.withTimeout(

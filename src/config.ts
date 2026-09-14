@@ -102,6 +102,8 @@ export interface HindsightConfig {
   hindsightContextPrefix: string;
   hindsightContextMaxLength: number;
   maxRecallTokens: number | null;
+  /** Timeout in milliseconds for recall requests (auto-recall and the hindsight_recall tool). Must be a timer-safe positive integer. Default: 10_000. */
+  recallTimeoutMs: number;
   recallPromptPreamble: string;
   autoRecallShowDateTime: boolean;
   autoRecallDisplay: boolean;
@@ -145,6 +147,8 @@ const VALID_AUTO_FLUSH_PENDING_EVENTS = ["quit", "startup"] as const;
 type AutoFlushSessionEvent = (typeof VALID_AUTO_FLUSH_SESSION_EVENTS)[number];
 type AutoFlushPendingEvent = (typeof VALID_AUTO_FLUSH_PENDING_EVENTS)[number];
 
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
 const DEFAULT_CONFIG: HindsightConfig = {
   enabled: true,
   apiUrl: "",
@@ -157,6 +161,7 @@ const DEFAULT_CONFIG: HindsightConfig = {
   hindsightContextPrefix: "pi: ",
   hindsightContextMaxLength: 100,
   maxRecallTokens: null,
+  recallTimeoutMs: 10_000,
   recallPromptPreamble:
     "[System note: The following is recalled memory context, NOT new user or assistant input. Prioritize recent when conflicting. Only use memories that are directly useful to continue this conversation; ignore the rest]",
   autoRecallShowDateTime: true,
@@ -217,6 +222,7 @@ const VALID_CONFIG_KEYS = new Set<keyof HindsightConfig>([
   "hindsightContextPrefix",
   "hindsightContextMaxLength",
   "maxRecallTokens",
+  "recallTimeoutMs",
   "recallPromptPreamble",
   "autoRecallShowDateTime",
   "autoRecallDisplay",
@@ -390,6 +396,24 @@ function parseNumber(
   return {
     value: defaultValue,
     warning: `Invalid number for ${fieldName}: "${value}". Using default: ${defaultDesc}`,
+  };
+}
+
+function parseTimerDelay(
+  value: unknown,
+  defaultValue: number,
+  fieldName: string
+): { value: number; warning?: string } {
+  const num =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN;
+  if (Number.isInteger(num) && num >= 1 && num <= MAX_TIMEOUT_MS) return { value: num };
+  return {
+    value: defaultValue,
+    warning: `Invalid number for ${fieldName}: "${String(value)}". Expected an integer between 1 and ${MAX_TIMEOUT_MS}. Using default: ${defaultValue}`,
   };
 }
 
@@ -599,6 +623,11 @@ function setConfigValue(
       return (
         result.warning ?? `autoRecallBudget must be a string, got ${typeof value}. Using default.`
       );
+    }
+    case "recallTimeoutMs": {
+      const result = parseTimerDelay(value, DEFAULT_CONFIG.recallTimeoutMs, key);
+      config[key] = result.value;
+      return result.warning;
     }
     case "hindsightContextMaxLength":
     case "recallMaxQueryChars": {
@@ -1173,6 +1202,11 @@ export function loadConfig(extensionsDir?: string): {
       legacy: ["PI_HINDSIGHT_MAX_RECALL_TOKENS"],
     },
     {
+      configKey: "recallTimeoutMs",
+      preferred: "EPIMETHEUS_RECALL_TIMEOUT_MS",
+      legacy: ["PI_HINDSIGHT_RECALL_TIMEOUT_MS"],
+    },
+    {
       configKey: "recallPromptPreamble",
       preferred: "EPIMETHEUS_RECALL_PROMPT_PREAMBLE",
       legacy: ["PI_HINDSIGHT_RECALL_PROMPT_PREAMBLE"],
@@ -1399,6 +1433,19 @@ export function validateConfig(config: HindsightConfig): {
       `recallMaxQueryChars must be >= 1. Using default: ${DEFAULT_CONFIG.recallMaxQueryChars}.`
     );
     config.recallMaxQueryChars = DEFAULT_CONFIG.recallMaxQueryChars;
+  }
+
+  // Validate recallTimeoutMs - reset to default if malformed or out of range
+  if (
+    typeof config.recallTimeoutMs !== "number" ||
+    !Number.isInteger(config.recallTimeoutMs) ||
+    config.recallTimeoutMs < 1 ||
+    config.recallTimeoutMs > MAX_TIMEOUT_MS
+  ) {
+    warnings.push(
+      `recallTimeoutMs must be an integer between 1 and ${MAX_TIMEOUT_MS}. Using default: ${DEFAULT_CONFIG.recallTimeoutMs}.`
+    );
+    config.recallTimeoutMs = DEFAULT_CONFIG.recallTimeoutMs;
   }
 
   // Valid content types per retainContent role

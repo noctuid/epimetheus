@@ -435,6 +435,43 @@ describe("recall", () => {
     expect(result.error).toContain("cancelled");
     sdk.recall = origRecall;
   });
+
+  it("times out using the configured recallTimeoutMs when no explicit timeout is passed", async () => {
+    const client = new HindsightClientWrapper({ ...testConfig, recallTimeoutMs: 50 });
+    const { sdk, origRecall } = mockSdkMethods(client);
+    sdk.recall = mock(() => new Promise(() => {}));
+
+    const result = await client.recall({ query: "test" });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Operation timed out after 50ms");
+    sdk.recall = origRecall;
+  });
+
+  it("succeeds when recall completes within the configured recallTimeoutMs", async () => {
+    const client = new HindsightClientWrapper({ ...testConfig, recallTimeoutMs: 50 });
+    const { sdk, origRecall } = mockSdkMethods(client);
+    const mockResponse = { results: [{ id: "1", text: "Memory" }] };
+    sdk.recall = mock(() => Promise.resolve(mockResponse));
+
+    const result = await client.recall({ query: "test" });
+
+    expect(result.success).toBe(true);
+    expect(result.response).toEqual(mockResponse);
+    sdk.recall = origRecall;
+  });
+
+  it("explicit timeoutMs argument overrides the configured recallTimeoutMs", async () => {
+    const client = new HindsightClientWrapper({ ...testConfig, recallTimeoutMs: 10000 });
+    const { sdk, origRecall } = mockSdkMethods(client);
+    sdk.recall = mock(() => new Promise(() => {}));
+
+    const result = await client.recall({ query: "test" }, undefined, 50);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Operation timed out after 50ms");
+    sdk.recall = origRecall;
+  });
 });
 
 // ============================================
