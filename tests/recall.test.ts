@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RecallResponse } from "@vectorize-io/hindsight-client";
+import { HindsightClientWrapper } from "../src/client";
 import { registerCommands } from "../src/commands";
 import type { HindsightConfig, TagsMatch } from "../src/config";
 import type { AutoRecallConfig, RecallClient, RecallMessageDetails } from "../src/index";
@@ -1328,6 +1329,64 @@ describe("doAutoRecallImpl", () => {
 
       expect(receivedTags).toEqual(["project:myapp"]);
       expect(receivedTagsMatch).toBe("any_strict");
+    });
+  });
+
+  // ============================================
+  // Configured recall timeout behavior
+  // (real HindsightClientWrapper; only the SDK HTTP boundary is mocked so
+  // the production timeout mechanism is exercised)
+  // ============================================
+
+  describe("configured recall timeout", () => {
+    function makeWrapper(recallImpl: () => Promise<unknown>): HindsightClientWrapper {
+      const wrapper = new HindsightClientWrapper({
+        ...testConfig,
+        recallTimeoutMs: 50,
+      });
+      const sdk = (wrapper as any).client as { recall: () => Promise<unknown> };
+      sdk.recall = recallImpl;
+      return wrapper;
+    }
+
+    it("injects nothing when recall exceeds the configured timeout", async () => {
+      const wrapper = makeWrapper(() => new Promise(() => {}));
+      let cachedDetails: RecallMessageDetails | null = {
+        count: 1,
+        snippet: "prev",
+        memories: "prev",
+      };
+
+      const result = await doAutoRecallImpl(
+        wrapper,
+        "test query",
+        mockSignal,
+        defaultConfig,
+        (details) => {
+          cachedDetails = details;
+        }
+      );
+
+      expect(result).toBeNull();
+      // Stale recall cache is cleared on timeout (no degraded fallback)
+      expect(cachedDetails).toBeNull();
+    });
+
+    it("returns the recall message when recall completes within the configured timeout", async () => {
+      const wrapper = makeWrapper(() =>
+        Promise.resolve({ results: [{ id: "1", text: "Fast memory" }] })
+      );
+
+      const result = await doAutoRecallImpl(
+        wrapper,
+        "test query",
+        mockSignal,
+        defaultConfig,
+        () => {}
+      );
+
+      expect(result).not.toBeNull();
+      expect(result?.recallMessage.content).toContain("Fast memory");
     });
   });
 });

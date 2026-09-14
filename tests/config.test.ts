@@ -30,6 +30,7 @@ const validConfig: HindsightConfig = {
   hindsightContextPrefix: "pi: ",
   hindsightContextMaxLength: 100,
   maxRecallTokens: null,
+  recallTimeoutMs: 10000,
   recallPromptPreamble: "Test",
   autoRecallShowDateTime: true,
   autoRecallDisplay: false,
@@ -284,6 +285,16 @@ describe("validateConfig", () => {
     expect(config.recallMaxQueryChars).toBe(800);
   });
 
+  it("warns when recallTimeoutMs is less than 1", () => {
+    const config = { ...validConfig, recallTimeoutMs: 0 };
+    const result = validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContain(
+      "epimetheus: recallTimeoutMs must be an integer between 1 and 2147483647. Using default: 10000."
+    );
+    expect(config.recallTimeoutMs).toBe(10000);
+  });
+
   it("warns when retainContent has duplicates", () => {
     const config = {
       ...validConfig,
@@ -374,6 +385,34 @@ describe("validateConfig resets invalid values to defaults", () => {
     const config = { ...validConfig, recallMaxQueryChars: 0 };
     const { warnings } = validateConfig(config);
     expect(config.recallMaxQueryChars).toBe(800);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it("recallTimeoutMs 0 → reset to 10000", () => {
+    const config = { ...validConfig, recallTimeoutMs: 0 };
+    const { warnings } = validateConfig(config);
+    expect(config.recallTimeoutMs).toBe(10000);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it("recallTimeoutMs non-number → reset to 10000", () => {
+    const config = { ...validConfig, recallTimeoutMs: "5000" as unknown as number };
+    const { warnings } = validateConfig(config);
+    expect(config.recallTimeoutMs).toBe(10000);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it("recallTimeoutMs fractional value → reset to 10000", () => {
+    const config = { ...validConfig, recallTimeoutMs: 1.5 };
+    const { warnings } = validateConfig(config);
+    expect(config.recallTimeoutMs).toBe(10000);
+    expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
+  });
+
+  it("recallTimeoutMs above the timer limit → reset to 10000", () => {
+    const config = { ...validConfig, recallTimeoutMs: 2_147_483_648 };
+    const { warnings } = validateConfig(config);
+    expect(config.recallTimeoutMs).toBe(10000);
     expect(warnings.some((w) => w.includes("Using default"))).toBe(true);
   });
 
@@ -1469,6 +1508,77 @@ describe("loadConfig", () => {
     expect(config.maxRecallTokens).toBeNull(); // Falls back to default
     expect(warning).toBeDefined();
     expect(warning).toContain("Invalid number for maxRecallTokens");
+  });
+
+  it("recallTimeoutMs defaults to 10000", () => {
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.recallTimeoutMs).toBe(10000);
+  });
+
+  it("recallTimeoutMs can be set via config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallTimeoutMs: 30000,
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.recallTimeoutMs).toBe(30000);
+    expect(warning).toBeUndefined();
+  });
+
+  it("recallTimeoutMs can be set via env var", () => {
+    process.env.EPIMETHEUS_RECALL_TIMEOUT_MS = "30000";
+
+    const { config, envVars } = loadConfig(TEST_DIR);
+    expect(config.recallTimeoutMs).toBe(30000);
+    expect(envVars).toContain("EPIMETHEUS_RECALL_TIMEOUT_MS");
+  });
+
+  it("recallTimeoutMs falls back to legacy PI_HINDSIGHT_RECALL_TIMEOUT_MS env var", () => {
+    process.env.PI_HINDSIGHT_RECALL_TIMEOUT_MS = "30000";
+
+    const { config, envVars } = loadConfig(TEST_DIR);
+    expect(config.recallTimeoutMs).toBe(30000);
+    expect(envVars).toContain("PI_HINDSIGHT_RECALL_TIMEOUT_MS");
+  });
+
+  it("accepts the maximum timer-supported recallTimeoutMs", () => {
+    process.env.EPIMETHEUS_RECALL_TIMEOUT_MS = "2147483647";
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.recallTimeoutMs).toBe(2_147_483_647);
+    expect(warning).toBeUndefined();
+  });
+
+  it("warns on recallTimeoutMs env values outside the timer-supported integer range", () => {
+    for (const value of ["10000ms", "30seconds", "", "Infinity", "1.5", "2147483648"]) {
+      process.env.EPIMETHEUS_RECALL_TIMEOUT_MS = value;
+
+      const { config, warning } = loadConfig(TEST_DIR);
+      expect(config.recallTimeoutMs).toBe(10000); // Falls back to default
+      expect(warning).toBeDefined();
+      expect(warning).toContain("Invalid number for recallTimeoutMs");
+    }
+  });
+
+  it("warns on out-of-range recallTimeoutMs in the config file", () => {
+    writeFileSync(
+      join(TEST_DIR, "config.json"),
+      JSON.stringify({
+        apiUrl: "https://test.test",
+        apiKey: "test-key",
+        recallTimeoutMs: 2_147_483_648,
+      })
+    );
+
+    const { config, warning } = loadConfig(TEST_DIR);
+    expect(config.recallTimeoutMs).toBe(10000); // Falls back to default
+    expect(warning).toBeDefined();
+    expect(warning).toContain("Invalid number for recallTimeoutMs");
   });
 
   it("does not warn on valid number", () => {
