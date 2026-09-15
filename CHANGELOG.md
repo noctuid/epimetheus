@@ -10,6 +10,10 @@
 
 - **Visible auto-recall failures** — Auto-recall failures now use TUI warning notifications instead of relying only on console warnings that are overwritten during redraw. Failures still inject no memory context and are recorded in the debug log.
 
+### Documentation
+
+- Updated the README with new Epimetheus artwork and an agent testimonial, and clarified the BEAM benchmark and assistant-role caveats.
+
 ## 0.7.0
 
 ### Features
